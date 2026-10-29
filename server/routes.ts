@@ -1,0 +1,354 @@
+import { clerkClient, getAuth } from "@clerk/express";
+import type { RequestHandler } from "express";
+import { and, asc, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
+import { z } from "zod";
+import { calculateProductProfitability } from "../shared/money";
+import { appUsers, productAuditLogs, productCategories, products } from "../shared/schema";
+import { db } from "./db";
+import { categoryInputSchema, productInputSchema } from "./product-validation";
+
+type Actor = { clerkUserId: string; email: string };
+type OwnerResolution =
+  | { authorized: true; actor: Actor }
+  | {
+      authorized: false;
+      email: string | null;
+      reason: "owner_not_configured" | "email_not_approved" | "email_not_verified";
+    };
+
+async function resolveOwner(userId: string): Promise<OwnerResolution> {
+  const user = await clerkClient.users.getUser(userId);
+  const primaryEmail = user.emailAddresses.find(
+    (address) => address.id === user.primaryEmailAddressId,
+  );
+
+  if (!primaryEmail || primaryEmail.verification?.status !== "verified") {
+    return { authorized: false, email: primaryEmail?.emailAddress ?? null, reason: "email_not_verified" };
+  }
+
+  const email = primaryEmail.emailAddress.trim().toLowerCase();
+  const configuredOwner = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
+  if (!configuredOwner) {
+    return { authorized: false, email, reason: "owner_not_configured" };
+  }
+  if (email !== configuredOwner) {
+    return { authorized: false, email, reason: "email_not_approved" };
+  }
+
+  await db
+    .insert(appUsers)
+    .values({ clerkUserId: userId, email, role: "owner" })
+    .onConflictDoNothing();
+
+  const [appUser] = await db
+    .select({ role: appUsers.role, email: appUsers.email })
+    .from(appUsers)
+    .where(eq(appUsers.clerkUserId, userId))
+    .limit(1);
+
+  if (!appUser || appUser.role !== "owner" || appUser.email !== email) {
+    return { authorized: false, email, reason: "email_not_approved" };
+  }
+  return { authorized: true, actor: { clerkUserId: userId, email } };
+}
+
+export const requireOwner: RequestHandler = async (req, res, next) => {
+  const { userId } = getAuth(req);
+  if (!userId) {
+    res.status(401).json({ error: "Sign in to access the administration area." });
+    return;
+  }
+
+  try {
+    const result = await resolveOwner(userId);
+    if (!result.authorized) {
+      const status = result.reason === "owner_not_configured" ? 503 : 403;
+      const message =
+        result.reason === "owner_not_configured"
+          ? "Owner access is not configured yet."
+          : "This verified account is not approved for owner access.";
+      res.status(status).json({ error: message });
+      return;
+    }
+    res.locals.actor = result.actor;
+    next();
+  } catch (error) {
+    console.error(
+      "Unable to verify administrator access.",
+      error instanceof Error ? error.name : "UnknownError",
+    );
+    res.status(503).json({ error: "Administrator access could not be verified. Try again shortly." });
+  }
+};
+
+const productFiltersSchema = z.object({
+  q: z.string().trim().max(160).optional(),
+  status: z.enum(["all", "draft", "active", "inactive"]).default("all"),
+  categoryId: z.string().regex(/^\d+$/).optional(),
+  page: z.string().regex(/^\d+$/).default("1"),
+  pageSize: z.string().regex(/^\d+$/).default("25"),
+});
+
+function serializeProduct(product: typeof products.$inferSelect) {
+  return {
+    ...product,
+    ...calculateProductProfitability(
+      product.sellingPriceZmw,
+      product.estimatedLandedCostZmw,
+    ),
+  };
+}
+
+function databaseErrorStatus(error: unknown): { status: number; message: string } | null {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code: unknown }).code)
+      : "";
+  if (code === "23505") {
+    return { status: 409, message: "That SKU or category name is already in use." };
+  }
+  if (code === "23503") {
+    return { status: 400, message: "The selected category is no longer available." };
+  }
+  if (code === "23514") {
+    return { status: 400, message: "One or more values are outside the allowed range." };
+  }
+  return null;
+}
+
+function validationMessage(error: z.ZodError): string {
+  return error.issues[0]?.message ?? "Check the submitted values and try again.";
+}
+
+export function registerApiRoutes(app: import("express").Express) {
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
+  app.get("/api/me", async (req, res) => {
+    const { userId } = getAuth(req);
+    if (!userId) {
+      res.status(401).json({ error: "Not signed in." });
+      return;
+    }
+
+    try {
+      const result = await resolveOwner(userId);
+      if (!result.authorized) {
+        res.json({ authorized: false, email: result.email, role: null, reason: result.reason });
+        return;
+      }
+      res.json({ authorized: true, email: result.actor.email, role: "owner" });
+    } catch (error) {
+      console.error(
+        "Unable to load the current application user.",
+        error instanceof Error ? error.name : "UnknownError",
+      );
+      res.status(503).json({ error: "Account access could not be checked. Try again shortly." });
+    }
+  });
+
+  app.get("/api/categories", requireOwner, async (_req, res) => {
+    const categories = await db
+      .select()
+      .from(productCategories)
+      .orderBy(asc(productCategories.name));
+    res.json({ categories });
+  });
+
+  app.post("/api/categories", requireOwner, async (req, res) => {
+    const parsed = categoryInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+
+    try {
+      const [category] = await db
+        .insert(productCategories)
+        .values(parsed.data)
+        .returning();
+      res.status(201).json({ category });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error);
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/api/categories/:id", requireOwner, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid category identifier." });
+      return;
+    }
+    const parsed = categoryInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+
+    try {
+      const [category] = await db
+        .update(productCategories)
+        .set({ ...parsed.data, updatedAt: new Date() })
+        .where(eq(productCategories.id, id))
+        .returning();
+      if (!category) {
+        res.status(404).json({ error: "Category not found." });
+        return;
+      }
+      res.json({ category });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error);
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/products", requireOwner, async (req, res) => {
+    const parsedFilters = productFiltersSchema.safeParse(req.query);
+    if (!parsedFilters.success) {
+      res.status(400).json({ error: validationMessage(parsedFilters.error) });
+      return;
+    }
+
+    const { q, status, categoryId, page, pageSize } = parsedFilters.data;
+    const pageNumber = Math.max(1, Number(page));
+    const limit = Math.min(100, Math.max(1, Number(pageSize)));
+    const conditions: SQL[] = [];
+
+    if (q) {
+      const escaped = q.replace(/[\\%_]/g, "\\$&");
+      const search = `%${escaped}%`;
+      const searchCondition = or(
+        ilike(products.name, search),
+        ilike(products.sku, search),
+        ilike(products.brand, search),
+        ilike(products.supplierName, search),
+        ilike(products.supplierProductCode, search),
+      );
+      if (searchCondition) conditions.push(searchCondition);
+    }
+    if (status !== "all") conditions.push(eq(products.status, status));
+    if (categoryId) conditions.push(eq(products.categoryId, Number(categoryId)));
+    const where = conditions.length ? and(...conditions) : undefined;
+
+    const [items, [{ total }]] = await Promise.all([
+      db
+        .select()
+        .from(products)
+        .where(where)
+        .orderBy(desc(products.updatedAt), asc(products.name))
+        .limit(limit)
+        .offset((pageNumber - 1) * limit),
+      db.select({ total: count() }).from(products).where(where),
+    ]);
+
+    res.json({
+      products: items.map(serializeProduct),
+      pagination: {
+        page: pageNumber,
+        pageSize: limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  });
+
+  app.post("/api/products", requireOwner, async (req, res) => {
+    const parsed = productInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    const actor = res.locals.actor as Actor;
+
+    try {
+      const product = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(products).values(parsed.data).returning();
+        await tx.insert(productAuditLogs).values({
+          productId: created.id,
+          actorClerkUserId: actor.clerkUserId,
+          action: "created",
+          changedFields: Object.keys(parsed.data),
+        });
+        return created;
+      });
+      res.status(201).json({ product: serializeProduct(product) });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error);
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.put("/api/products/:id", requireOwner, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid product identifier." });
+      return;
+    }
+    const parsed = productInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    const actor = res.locals.actor as Actor;
+
+    try {
+      const product = await db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(products).where(eq(products.id, id)).limit(1);
+        if (!existing) return null;
+
+        const changedFields = Object.keys(parsed.data).filter(
+          (key) =>
+            existing[key as keyof typeof existing] !==
+            parsed.data[key as keyof typeof parsed.data],
+        );
+        const [updated] = await tx
+          .update(products)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(eq(products.id, id))
+          .returning();
+
+        if (changedFields.length > 0) {
+          await tx.insert(productAuditLogs).values({
+            productId: id,
+            actorClerkUserId: actor.clerkUserId,
+            action: parsed.data.status === "inactive" ? "deactivated" : "updated",
+            changedFields,
+          });
+        }
+        return updated;
+      });
+
+      if (!product) {
+        res.status(404).json({ error: "Product not found." });
+        return;
+      }
+      res.json({ product: serializeProduct(product) });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error);
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+}
