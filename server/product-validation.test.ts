@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
@@ -76,6 +76,17 @@ test("validates supplier contacts, URLs, and non-negative lead times", () => {
   assert.equal(supplierInputSchema.safeParse({ ...supplier, email: "not-an-email" }).success, false);
   assert.equal(supplierInputSchema.safeParse({ ...supplier, website: "not-a-url" }).success, false);
   assert.equal(supplierInputSchema.safeParse({ ...supplier, defaultLeadTimeDays: "-1" }).success, false);
+});
+
+test("validates customer quote lines, prices, and duplicate products", () => {
+  const quote = {
+    customerId: "1", validUntil: "2026-12-31", deliveryAddress: null, notes: null, status: "draft",
+    lines: [{ productId: "2", quantity: "3", unitPriceZmw: "125.50" }],
+  };
+  assert.equal(customerQuoteInputSchema.parse(quote).lines[0]?.quantity, 3);
+  assert.equal(customerQuoteInputSchema.safeParse({ ...quote, lines: [{ ...quote.lines[0], unitPriceZmw: "-1" }] }).success, false);
+  assert.equal(customerQuoteInputSchema.safeParse({ ...quote, lines: [...quote.lines, ...quote.lines] }).success, false);
+  assert.equal(customerQuoteInputSchema.safeParse({ ...quote, validUntil: "2026-02-30" }).success, false);
 });
 
 test("validates quotation currency, amounts, quantities, and calendar dates", () => {

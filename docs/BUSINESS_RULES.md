@@ -39,3 +39,4 @@
 - Profitability reports separate recorded cost of sales from estimates based on current product cost estimates. They do not represent net profit; missing opening inventory values can make recorded cost incomplete.
 - Replenishment suggestions trigger below the product's configured reorder level and subtract active reservations and unstocked quantities on non-cancelled purchase orders. Suggested quantity restores stock to that reorder level; recent 90-day sales are context, not a demand forecast.
 - The cash forecast assumes all current receivables and payables settle within 30 days. It assumes no new sales or costs and may be incomplete until opening cash balances are recorded.
+- Customer quotes save ZMW price snapshots. Only accepted, unexpired quotes can be converted, once, into draft sales orders; stock is reserved only when the order is confirmed.

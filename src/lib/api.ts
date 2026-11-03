@@ -38,6 +38,10 @@ export interface InventoryReceipt { id: number; quantityToPost: number; quantity
 export interface Customer { id: number; name: string; email: string | null; phone: string | null; address: string | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "fulfilled" | "cancelled"; deliveryAddress: string | null; notes: string | null; totalZmw: string; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
+export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
+export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
+export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; status: CustomerQuoteStatus; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
+export interface CustomerQuoteInput { customerId: number; validUntil: string | null; deliveryAddress: string | null; notes: string | null; status: "draft" | "sent" | "accepted" | "rejected"; lines: { productId: number; quantity: number; unitPriceZmw: string }[]; }
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
 
 export interface CurrentUser {
@@ -346,6 +350,16 @@ export async function saveCustomer(input: Omit<Customer, "id">, id?: number): Pr
 }
 export async function fetchSalesOrders(): Promise<SalesOrder[]> {
   return (await request<{ orders: SalesOrder[] }>("/api/sales-orders")).orders;
+}
+export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
+  return (await request<{ quotes: CustomerQuote[] }>("/api/customer-quotes")).quotes;
+}
+export async function saveCustomerQuote(input: CustomerQuoteInput, id?: number): Promise<void> {
+  await request(id ? `/api/customer-quotes/${id}` : "/api/customer-quotes", { method: id ? "PATCH" : "POST", body: JSON.stringify(input) });
+}
+export async function convertCustomerQuote(id: number): Promise<string> {
+  const result = await request<{ order: { orderNumber: string } }>(`/api/customer-quotes/${id}/convert`, { method: "POST" });
+  return result.order.orderNumber;
 }
 export async function fetchMarketingCampaigns(): Promise<MarketingCampaignOption[]> {
   return (await request<{ campaigns: MarketingCampaignOption[] }>("/api/marketing/campaigns")).campaigns;

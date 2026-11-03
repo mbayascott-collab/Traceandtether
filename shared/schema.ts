@@ -27,6 +27,7 @@ export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_r
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
 export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
 export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
+export const customerQuoteStatus = pgEnum("customer_quote_status", ["draft", "sent", "accepted", "rejected", "converted"]);
 export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
 export const marketingCampaignStatus = pgEnum("marketing_campaign_status", ["draft", "active", "paused", "completed", "cancelled"]);
 export const marketingContentStatus = pgEnum("marketing_content_status", ["planned", "in_progress", "ready", "published", "cancelled"]);
@@ -318,6 +319,47 @@ export const salesOrderLines = pgTable(
     index("sales_order_lines_order_idx").on(table.salesOrderId),
     check("sales_order_lines_quantity_positive", sql`${table.quantity} > 0`),
     check("sales_order_lines_price_nonnegative", sql`${table.unitPriceZmw} >= 0`),
+  ],
+);
+
+export const customerQuotes = pgTable(
+  "customer_quotes",
+  {
+    id: serial("id").primaryKey(),
+    quoteNumber: varchar("quote_number", { length: 40 }).notNull(),
+    customerId: integer("customer_id").notNull().references(() => customers.id, { onDelete: "restrict" }),
+    status: customerQuoteStatus("status").notNull().default("draft"),
+    validUntil: date("valid_until"),
+    deliveryAddress: text("delivery_address"),
+    notes: text("notes"),
+    salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("customer_quotes_number_unique").on(table.quoteNumber),
+    uniqueIndex("customer_quotes_sales_order_unique").on(table.salesOrderId),
+    index("customer_quotes_customer_idx").on(table.customerId),
+    index("customer_quotes_status_idx").on(table.status),
+    check("customer_quotes_conversion_state", sql`(${table.status} = 'converted') = (${table.salesOrderId} is not null)`),
+  ],
+);
+
+export const customerQuoteLines = pgTable(
+  "customer_quote_lines",
+  {
+    id: serial("id").primaryKey(),
+    customerQuoteId: integer("customer_quote_id").notNull().references(() => customerQuotes.id, { onDelete: "restrict" }),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    quantity: integer("quantity").notNull(),
+    unitPriceZmw: numeric("unit_price_zmw", { precision: 14, scale: 2 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("customer_quote_lines_product_unique").on(table.customerQuoteId, table.productId),
+    index("customer_quote_lines_quote_idx").on(table.customerQuoteId),
+    check("customer_quote_lines_quantity_positive", sql`${table.quantity} > 0`),
+    check("customer_quote_lines_price_nonnegative", sql`${table.unitPriceZmw} >= 0`),
   ],
 );
 

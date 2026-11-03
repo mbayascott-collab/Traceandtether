@@ -237,6 +237,22 @@ export const salesOrderInputSchema = z.object({
   if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
 });
 
+export const customerQuoteInputSchema = z.object({
+  customerId: positiveInteger,
+  validUntil: validDate,
+  deliveryAddress: nullableText(5_000),
+  notes: nullableText(5_000),
+  status: z.enum(["draft", "sent", "accepted", "rejected"]),
+  lines: z.array(z.object({
+    productId: positiveInteger,
+    quantity: positiveInteger,
+    unitPriceZmw: nonnegativeAmount,
+  }).strict()).min(1).max(100),
+}).strict().superRefine((quote, context) => {
+  const ids = quote.lines.map((line) => line.productId);
+  if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per quote." });
+});
+
 export const publicShopOrderInputSchema = z.object({
   name: z.string().trim().min(1).max(160),
   phone: z.string().trim().min(5).max(60),

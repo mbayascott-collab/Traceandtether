@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
-  customerInputSchema, publicShopOrderInputSchema, salesOrderInputSchema,
+  customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesOrderLines, salesOrders,
+  customerQuoteLines, customerQuotes, customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
@@ -123,6 +123,91 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const attribution = attributionByOrder.get(order.id);
       return { ...order, customerName, campaignId: attribution?.campaignId ?? null, campaignName: attribution?.campaignName ?? null, lines: items, totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
     }) });
+  });
+  app.get("/api/customer-quotes", owner, async (_req, res) => {
+    const [quotes, lines] = await Promise.all([
+      db.select({ quote: customerQuotes, customerName: customers.name, salesOrderNumber: salesOrders.orderNumber })
+        .from(customerQuotes).innerJoin(customers, eq(customerQuotes.customerId, customers.id))
+        .leftJoin(salesOrders, eq(customerQuotes.salesOrderId, salesOrders.id)).orderBy(desc(customerQuotes.createdAt)),
+      db.select({ line: customerQuoteLines, productName: products.name, sku: products.sku })
+        .from(customerQuoteLines).innerJoin(products, eq(customerQuoteLines.productId, products.id)),
+    ]);
+    res.json({ quotes: quotes.map(({ quote, customerName, salesOrderNumber }) => {
+      const quoteLines = lines.filter(({ line }) => line.customerQuoteId === quote.id).map(({ line, productName, sku }) => ({
+        id: line.id, productId: line.productId, productName, sku, quantity: line.quantity,
+        unitPriceZmw: line.unitPriceZmw, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+      }));
+      return { ...quote, customerName, salesOrderNumber, lines: quoteLines, totalZmw: money(quoteLines.reduce((sum, line) => sum + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
+    }) });
+  });
+  app.post("/api/customer-quotes", owner, async (req, res) => {
+    const parsed = customerQuoteInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the quote details.");
+    const [customer] = await db.select({ status: customers.status }).from(customers).where(eq(customers.id, parsed.data.customerId)).limit(1);
+    if (!customer || customer.status !== "active") return bad(res, "Choose an active customer.");
+    const ids = parsed.data.lines.map((line) => line.productId);
+    const active = await db.select({ id: products.id, status: products.status }).from(products).where(inArray(products.id, ids));
+    if (active.length !== ids.length || active.some((product) => product.status !== "active")) return bad(res, "Choose active products only.");
+    const { lines, ...input } = parsed.data;
+    const quote = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(customerQuotes).values({
+        ...input, quoteNumber: `CQ-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
+      }).returning();
+      await tx.insert(customerQuoteLines).values(lines.map((line) => ({ ...line, customerQuoteId: created.id })));
+      return created;
+    });
+    res.status(201).json({ quote });
+  });
+  app.patch("/api/customer-quotes/:id", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid quote.");
+    const parsed = customerQuoteInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the quote details.");
+    const result = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
+      if (!current) return { error: "Customer quote not found.", status: 404 };
+      if (current.status !== "draft" && current.status !== "sent") return { error: "Only draft or sent quotes can be edited.", status: 409 };
+      const [customer] = await tx.select({ status: customers.status }).from(customers).where(eq(customers.id, parsed.data.customerId)).limit(1);
+      if (!customer || customer.status !== "active") return { error: "Choose an active customer.", status: 400 };
+      const ids = parsed.data.lines.map((line) => line.productId);
+      const active = await tx.select({ id: products.id, status: products.status }).from(products).where(inArray(products.id, ids));
+      if (active.length !== ids.length || active.some((product) => product.status !== "active")) return { error: "Choose active products only.", status: 400 };
+      const { lines, ...input } = parsed.data;
+      await tx.delete(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id));
+      await tx.insert(customerQuoteLines).values(lines.map((line) => ({ ...line, customerQuoteId: id })));
+      const [quote] = await tx.update(customerQuotes).set({ ...input, updatedAt: new Date() }).where(eq(customerQuotes.id, id)).returning();
+      return { quote };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json(result);
+  });
+  app.post("/api/customer-quotes/:id/convert", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid quote.");
+    const result = await db.transaction(async (tx) => {
+      const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
+      if (!quote) return { error: "Customer quote not found.", status: 404 };
+      if (quote.status !== "accepted" || quote.salesOrderId) return { error: "Mark this quote as accepted before converting it.", status: 409 };
+      if (quote.validUntil && quote.validUntil < new Date().toISOString().slice(0, 10)) return { error: "This quote has expired and cannot be converted.", status: 409 };
+      const quoteLines = await tx.select().from(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id)).orderBy(asc(customerQuoteLines.productId));
+      const activeProducts = await tx.select({ id: products.id, status: products.status }).from(products)
+        .where(inArray(products.id, quoteLines.map((line) => line.productId))).orderBy(asc(products.id)).for("update");
+      if (activeProducts.length !== quoteLines.length || activeProducts.some((product) => product.status !== "active")) return { error: "A quoted product is no longer active.", status: 409 };
+      const [customer] = await tx.select({ status: customers.status }).from(customers).where(eq(customers.id, quote.customerId)).limit(1);
+      if (!customer || customer.status !== "active") return { error: "The customer is inactive; reactivate them before converting.", status: 409 };
+      const [order] = await tx.insert(salesOrders).values({
+        orderNumber: `SO-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
+        customerId: quote.customerId, deliveryAddress: quote.deliveryAddress,
+        notes: `Created from ${quote.quoteNumber}${quote.notes ? ` — ${quote.notes}` : ""}`, status: "draft",
+      }).returning();
+      await tx.insert(salesOrderLines).values(quoteLines.map((line) => ({
+        salesOrderId: order.id, productId: line.productId, quantity: line.quantity, unitPriceZmw: line.unitPriceZmw,
+      })));
+      const [savedQuote] = await tx.update(customerQuotes).set({ status: "converted", salesOrderId: order.id, updatedAt: new Date() }).where(eq(customerQuotes.id, id)).returning();
+      return { quote: savedQuote, order };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json(result);
   });
   app.patch("/api/sales-orders/:id/attribution", owner, async (req, res) => {
     const id = idOf(req.params.id);

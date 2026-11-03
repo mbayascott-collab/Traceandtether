@@ -55,6 +55,7 @@ import SupplierWorkspace from "./SupplierWorkspace";
 import ProcurementWorkspace from "./ProcurementWorkspace";
 import InventoryWorkspace from "./InventoryWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
+import CustomerQuotesWorkspace from "./CustomerQuotesWorkspace";
 import AccountingWorkspace from "./AccountingWorkspace";
 import MarketingWorkspace from "./MarketingWorkspace";
 import ProfitabilityWorkspace, { BusinessDashboard } from "./BusinessReports";
@@ -272,11 +273,12 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isReservations = location === "/reservations";
   const isStockAdjustments = location === "/stock-adjustments";
   const isCustomers = location === "/customers";
+  const isCustomerQuotes = location === "/customer-quotes";
   const isSalesOrders = location === "/sales-orders";
   const isAccounting = location === "/accounting";
   const isMarketing = location === "/marketing";
   const isProfitability = location === "/profitability";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : "Dashboard";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -455,6 +457,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/customers" aria-current={isCustomers ? "page" : undefined}>
             <Users aria-hidden="true" /><span>Customers</span>
+          </Link>
+          <Link href="/customer-quotes" aria-current={isCustomerQuotes ? "page" : undefined}>
+            <FileText aria-hidden="true" /><span>Customer quotes</span>
           </Link>
           <Link href="/sales-orders" aria-current={isSalesOrders ? "page" : undefined}>
             <BadgeDollarSign aria-hidden="true" /><span>Sales orders</span>
@@ -840,6 +845,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isReservations && <InventoryWorkspace mode="reservations" />}
           {isStockAdjustments && <InventoryWorkspace mode="adjustments" />}
           {isCustomers && <SalesWorkspace mode="customers" />}
+          {isCustomerQuotes && <CustomerQuotesWorkspace />}
           {isSalesOrders && <SalesWorkspace mode="orders" />}
           {isAccounting && <AccountingWorkspace />}
           {isMarketing && <MarketingWorkspace />}
