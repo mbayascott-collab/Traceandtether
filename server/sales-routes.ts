@@ -266,7 +266,11 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).for("update").limit(1);
       if (!order) return { error: "Sales order not found.", status: 404 };
-      if (order.status !== "draft") return { error: "Only draft orders without stock or accounting history can be deleted. Cancel an active order instead.", status: 409 };
+      const wasNeverConfirmed = order.confirmedAt === null;
+      if (order.status !== "draft" && !(order.status === "cancelled" && wasNeverConfirmed)) {
+        return { error: "Only draft orders or orders cancelled before confirmation can be deleted.", status: 409 };
+      }
+      if (!wasNeverConfirmed) return { error: "This order has confirmation history and cannot be deleted.", status: 409 };
       const [reservation] = await tx.select({ id: inventoryReservations.id })
         .from(inventoryReservations).where(eq(inventoryReservations.salesOrderId, id)).limit(1);
       if (reservation) return { error: "This order has stock reservation history and cannot be deleted. Cancel it instead.", status: 409 };
