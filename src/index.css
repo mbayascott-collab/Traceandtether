@@ -89,9 +89,25 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   padding: 25px 15px 17px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(184, 203, 194, 0.55) transparent;
   color: #e8f0e9;
   background: #173e3d;
   border-right: 1px solid rgba(225, 239, 229, 0.13);
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(184, 203, 194, 0.55);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 99px;
 }
 
 .brand-lockup {
@@ -143,6 +159,7 @@ textarea:focus-visible {
 
 .side-nav {
   display: grid;
+  flex: 0 0 auto;
   gap: 5px;
 }
 
