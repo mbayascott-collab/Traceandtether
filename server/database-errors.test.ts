@@ -12,4 +12,12 @@ test("maps PostgreSQL constraint failures wrapped by Drizzle", () => {
     status: 400,
     message: "One or more values are outside the allowed range.",
   });
+  assert.deepEqual(databaseErrorStatus(
+    { cause: { code: "23503" } },
+    undefined,
+    "Supplier has quotation history.",
+  ), {
+    status: 400,
+    message: "Supplier has quotation history.",
+  });
 });

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertCircle, ArrowLeftRight, Pencil, Plus, RefreshCw, Search, Truck } from "lucide-react";
+import { AlertCircle, ArrowLeftRight, Pencil, Plus, RefreshCw, Search, Trash2, Truck } from "lucide-react";
 import {
   ApiError,
   createSupplier,
   createSupplierQuote,
+  deleteSupplier,
   fetchProducts,
   fetchSupplierQuotes,
   fetchSuppliers,
@@ -225,6 +226,26 @@ export default function SupplierWorkspace({ mode }: { mode: Mode }) {
   const [supplierDialog, setSupplierDialog] = useState<Supplier | "new" | null>(null);
   const [quoteDialog, setQuoteDialog] = useState<SupplierQuote | "new" | null>(null);
   const [notice, setNotice] = useState("");
+  const [deletingSupplierId, setDeletingSupplierId] = useState<number | null>(null);
+
+  async function handleDeleteSupplier(supplier: Supplier) {
+    const confirmed = window.confirm(
+      `Delete ${supplier.name}? This permanently removes the supplier record. Suppliers with quotations cannot be deleted; deactivate those instead to keep their history.`,
+    );
+    if (!confirmed) return;
+    setError("");
+    setNotice("");
+    setDeletingSupplierId(supplier.id);
+    try {
+      await deleteSupplier(supplier.id);
+      setSuppliers((current) => current.filter((item) => item.id !== supplier.id));
+      setNotice(`${supplier.name} deleted.`);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setDeletingSupplierId(null);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -280,7 +301,7 @@ export default function SupplierWorkspace({ mode }: { mode: Mode }) {
             <div className="supplier-card-top"><div><span className="supplier-country">{supplier.country || "Country not set"}</span><h2>{supplier.name}</h2></div><span className={`status-badge status-${supplier.status}`}>{supplier.status}</span></div>
             <div className="supplier-contact">{supplier.contactName || "No contact"}{supplier.email ? ` · ${supplier.email}` : ""}{supplier.phone ? ` · ${supplier.phone}` : ""}</div>
             <div className="supplier-card-meta"><span>Typical lead time <strong>{supplier.defaultLeadTimeDays} days</strong></span><span>{supplier.paymentTerms || "Payment terms not set"}</span></div>
-            <div className="supplier-card-foot"><span>{supplier.website || "No website"}</span><button className="button button-secondary button-small" onClick={() => setSupplierDialog(supplier)}><Pencil /> Edit</button></div>
+            <div className="supplier-card-foot"><span>{supplier.website || "No website"}</span><div className="supplier-card-actions"><button className="button button-secondary button-small" onClick={() => setSupplierDialog(supplier)}><Pencil /> Edit</button><button className="button button-danger button-small" aria-label={`Delete ${supplier.name}`} title="Delete supplier" disabled={deletingSupplierId === supplier.id} onClick={() => handleDeleteSupplier(supplier)}><Trash2 /> Delete</button></div></div>
           </article>)}</div> : <div className="panel"><div className="empty-state"><div className="empty-mark"><Truck /></div><h3>No suppliers match this view</h3><p>Add internal supplier records; these are not marketplace seller accounts.</p><button className="button button-primary" onClick={() => setSupplierDialog("new")}><Plus /> Add supplier</button></div></div>}
           <div className="notice-strip"><Truck /><span>Making a supplier inactive keeps its profile and quotation history. It only removes that supplier from new quotations.</span></div>
         </>

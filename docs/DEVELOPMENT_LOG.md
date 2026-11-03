@@ -23,3 +23,4 @@
 - `npm test`: 12 tests passed. `npm run build`: passed.
 - Health returned 200; anonymous supplier, quotation, and product API requests returned 401. Signed-in UI interaction still requires an owner session.
 - Confirmed Drizzle-wrapped PostgreSQL constraint errors are mapped to user-safe conflict/range responses.
+- Added owner-only supplier deletion with confirmation; deletion is blocked when quotations exist. Database checks confirmed quoted suppliers are protected and unquoted suppliers can be removed.
