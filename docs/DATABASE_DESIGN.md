@@ -32,7 +32,6 @@ Products reference a category with `products.category_id`. Deactivating a catego
 
 - `suppliers` stores internal contact and commercial details with an active/inactive status. Inactivation preserves records and history.
 - `supplier_quotes` links a supplier to a product and stores quoted unit price, currency, MOQ, lead time, validity, terms, reference, and received/accepted/rejected status.
-- Supplier deletion is restricted when quotations reference the supplier; inactivation preserves quote history.
 - Quote prices remain in their source currency. The comparison view does not rank values across currencies or claim a landed-cost total.
 - Supplier and quote records are exposed only through owner-protected API routes.
 - `purchase_currency` — three-letter currency code, default `CNY`.

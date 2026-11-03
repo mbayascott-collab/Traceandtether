@@ -1959,12 +1959,6 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.supplier-card-actions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 7px;
-}
-
 .compare-toolbar {
   display: flex;
   align-items: end;

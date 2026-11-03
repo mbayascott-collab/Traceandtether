@@ -217,12 +217,6 @@ export async function updateSupplier(id: number, input: SupplierInput): Promise<
   return result.supplier;
 }
 
-export async function deleteSupplier(id: number): Promise<void> {
-  await request<{ success: true }>(`/api/suppliers/${id}`, {
-    method: "DELETE",
-  });
-}
-
 export async function fetchSupplierQuotes(productId?: number): Promise<SupplierQuote[]> {
   const query = new URLSearchParams();
   if (productId) query.set("productId", String(productId));

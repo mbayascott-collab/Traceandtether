@@ -1,3 +1,2 @@
 - [Single-business resale model](single-business-resale-model.md) — The business imports mainly from China and resells only its own products in Zambia; it is not a marketplace.
 - [Supplier quote comparisons](supplier-quote-comparisons.md) — Keep quote prices paired with their source currency; do not infer FX-adjusted or landed-cost rankings.
-- [Supplier deletion and history](supplier-deletion.md) — Delete suppliers only when they have no quotations; deactivate suppliers with quote history.

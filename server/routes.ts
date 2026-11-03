@@ -219,41 +219,6 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.delete("/api/suppliers/:id", requireOwner, async (req, res) => {
-    const id = Number(req.params.id);
-    if (!Number.isSafeInteger(id) || id <= 0) {
-      res.status(400).json({ error: "Invalid supplier identifier." });
-      return;
-    }
-    const [supplier] = await db.select({ id: suppliers.id }).from(suppliers)
-      .where(eq(suppliers.id, id)).limit(1);
-    if (!supplier) {
-      res.status(404).json({ error: "Supplier not found." });
-      return;
-    }
-    const [quote] = await db.select({ id: supplierQuotes.id }).from(supplierQuotes)
-      .where(eq(supplierQuotes.supplierId, id)).limit(1);
-    if (quote) {
-      res.status(409).json({ error: "This supplier has quotations and cannot be deleted. Deactivate it instead to keep the history." });
-      return;
-    }
-    try {
-      await db.delete(suppliers).where(eq(suppliers.id, id));
-      res.json({ success: true });
-    } catch (error) {
-      const databaseError = databaseErrorStatus(
-        error,
-        undefined,
-        "This supplier has quotations and cannot be deleted. Deactivate it instead to keep the history.",
-      );
-      if (databaseError) {
-        res.status(databaseError.status).json({ error: databaseError.message });
-        return;
-      }
-      throw error;
-    }
-  });
-
   app.get("/api/supplier-quotes", requireOwner, async (req, res) => {
     const parsed = z.object({ productId: z.string().regex(/^\d+$/).optional() }).safeParse(req.query);
     if (!parsed.success) {

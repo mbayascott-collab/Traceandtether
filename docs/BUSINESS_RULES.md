@@ -28,5 +28,4 @@
 - It does not create purchase orders, shipments, customer orders, payments, refunds, tax calculations, or accounting entries.
 - It does not estimate tax/customs rates or automatically select suppliers.
 - Supplier records are internal sourcing records, not seller accounts.
-- A supplier can be deleted only when it has no quotations; deactivate suppliers with quote history to preserve the record trail.
 - Quotations retain the supplier's stated currency. Comparisons do not convert currencies or infer freight, tax, or landed costs.
