@@ -83,7 +83,9 @@ textarea:focus-visible {
   position: sticky;
   top: 0;
   z-index: 10;
+  align-self: stretch;
   height: 100dvh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   padding: 25px 15px 17px;
