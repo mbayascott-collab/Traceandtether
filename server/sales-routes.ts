@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
-  customerInputSchema, salesOrderInputSchema,
+  customerInputSchema, publicShopOrderInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
   customers, inventoryMovements, inventoryReservations, products, salesOrderLines, salesOrders,
@@ -24,6 +24,70 @@ async function stockBalance(tx: any, productId: number) {
 }
 
 export function registerSalesRoutes(app: Express, owner: RequestHandler) {
+  app.get("/api/shop/products", async (_req, res) => {
+    const rows = await db.select({
+      id: products.id,
+      name: products.name,
+      description: products.description,
+      unit: products.unit,
+      sellingPriceZmw: products.sellingPriceZmw,
+    }).from(products).where(and(eq(products.status, "active"))).orderBy(asc(products.name));
+    const catalog = [];
+    for (const product of rows) {
+      if (product.sellingPriceZmw == null) continue;
+      const balance = await stockBalance(db, product.id);
+      const available = Math.max(0, balance.onHand - balance.reserved);
+      if (available > 0) catalog.push(product);
+    }
+    res.json({ products: catalog });
+  });
+
+  app.post("/api/shop/orders", async (req, res) => {
+    const parsed = publicShopOrderInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check your order details.");
+    const result = await db.transaction(async (tx) => {
+      const ids = parsed.data.lines.map((line) => line.productId);
+      const selected = await tx.select({
+        id: products.id, name: products.name, status: products.status, sellingPriceZmw: products.sellingPriceZmw,
+      }).from(products).where(inArray(products.id, ids)).orderBy(asc(products.id)).for("update");
+      if (selected.length !== ids.length || selected.some((product) => product.status !== "active" || product.sellingPriceZmw == null)) {
+        return { error: "One or more selected products are no longer available." };
+      }
+      for (const line of parsed.data.lines) {
+        const balance = await stockBalance(tx, line.productId);
+        if (balance.onHand - balance.reserved < line.quantity) {
+          const product = selected.find((item) => item.id === line.productId);
+          return { error: `${product?.name ?? "A selected product"} no longer has enough available stock. Please update your order.` };
+        }
+      }
+      const [customer] = await tx.insert(customers).values({
+        name: parsed.data.name,
+        phone: parsed.data.phone,
+        email: parsed.data.email,
+        address: parsed.data.address || null,
+        status: "active",
+      }).returning();
+      const orderNumber = `WEB-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`;
+      const [order] = await tx.insert(salesOrders).values({
+        orderNumber,
+        customerId: customer.id,
+        deliveryAddress: parsed.data.address || null,
+        notes: [ "Public shop order request", parsed.data.notes ].filter(Boolean).join(" — "),
+        status: "draft",
+      }).returning();
+      const byId = new Map(selected.map((product) => [product.id, product]));
+      await tx.insert(salesOrderLines).values(parsed.data.lines.map((line) => ({
+        salesOrderId: order.id,
+        productId: line.productId,
+        quantity: line.quantity,
+        unitPriceZmw: byId.get(line.productId)!.sellingPriceZmw!,
+      })));
+      return { orderNumber };
+    });
+    if ("error" in result) return res.status(409).json({ error: result.error });
+    res.status(201).json({ orderNumber: result.orderNumber });
+  });
+
   app.get("/api/customers", owner, async (_req, res) => {
     res.json({ customers: await db.select().from(customers).orderBy(asc(customers.name)) });
   });

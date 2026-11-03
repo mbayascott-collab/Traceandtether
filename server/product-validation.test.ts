@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   customerInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
-  shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
+  publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
 const validProduct = {
@@ -143,4 +143,15 @@ test("validates customer contacts and ZMW sales order lines", () => {
   assert.equal(salesOrderInputSchema.safeParse(order).success, true);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPriceZmw: "-2" }] }).success, false);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
+});
+
+test("validates public shop order requests without accepting client prices", () => {
+  const request = {
+    name: "A customer", phone: "+260 977 000 000", email: "",
+    address: "", notes: "", lines: [{ productId: 2, quantity: 3 }],
+  };
+  assert.equal(publicShopOrderInputSchema.safeParse(request).success, true);
+  assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ productId: 2, quantity: 0 }] }).success, false);
+  assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [...request.lines, ...request.lines] }).success, false);
+  assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ ...request.lines[0], unitPriceZmw: "0.01" }] }).success, false);
 });

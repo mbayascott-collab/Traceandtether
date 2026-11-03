@@ -11,6 +11,7 @@ import { shadcn } from "@clerk/themes";
 import { Redirect, Route, Router as WouterRouter, Switch, useLocation } from "wouter";
 import { ApiError, fetchCurrentUser, type CurrentUser } from "./lib/api";
 import BusinessApp from "./components/BusinessApp";
+import PublicShop from "./components/PublicShop";
 
 const clerkPubKey = publishableKeyFromHost(
   window.location.hostname,
@@ -130,6 +131,9 @@ function LandingPage() {
           <div className="landing-actions">
             <a className="button button-primary" href={`${basePath}/sign-in`}>
               Sign in
+            </a>
+            <a className="button button-secondary" href={`${basePath}/shop`}>
+              Visit the shop
             </a>
             <a className="button button-secondary" href={`${basePath}/sign-up`}>
               Create owner account
@@ -307,6 +311,7 @@ function ClerkRoutes() {
     >
       <Switch>
         <Route path="/" component={LandingPage} />
+        <Route path="/shop" component={PublicShop} />
         <Route path="/sign-in/*?" component={SignInPage} />
         <Route path="/sign-up/*?" component={SignUpPage} />
         <Route path="/dashboard" component={ProtectedWorkspace} />
