@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne, sum } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { allocateLandedCosts } from "../shared/landed-cost";
@@ -10,6 +10,7 @@ import {
   shipmentInputSchema, shipmentReceiptSchema,
 } from "./product-validation";
 import { db } from "./db";
+import { postJournal } from "./accounting-posting";
 
 const invalid = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const apiError = (error: unknown) => typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
@@ -181,9 +182,26 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     const [order] = await db.select({ status: purchaseOrders.status }).from(purchaseOrders)
       .where(eq(purchaseOrders.id, parsed.data.purchaseOrderId)).limit(1);
     if (!order || order.status === "cancelled") return invalid(res, "Choose an open purchase order.");
-    const [expense] = await db.insert(importExpenses).values({
-      ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
-    }).returning();
+    const expense = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(importExpenses).values({
+        ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
+      }).returning();
+      const expenseResult = await tx.execute(sql`
+        select round(${parsed.data.amount}::numeric * ${parsed.data.exchangeRateToZmw}::numeric, 2)::text as amount
+      `);
+      const expenseZmw = String(expenseResult.rows[0]?.amount ?? "0.00");
+      await postJournal(tx, {
+        sourceKey: `import-expense-${created.id}`,
+        sourceType: "import_expense", sourceId: created.id,
+        memo: `${created.category}: ${created.description}`,
+        entryDate: created.incurredAt,
+        lines: [
+          { accountKey: "landed_cost_clearing", debitZmw: expenseZmw, description: created.description },
+          { accountKey: "accounts_payable", creditZmw: expenseZmw, description: created.description },
+        ],
+      });
+      return created;
+    });
     res.status(201).json({ expense });
   });
 

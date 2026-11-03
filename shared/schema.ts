@@ -1,6 +1,7 @@
 import {
   check,
   date,
+  boolean,
   index,
   integer,
   jsonb,
@@ -26,6 +27,7 @@ export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_r
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
 export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
 export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
+export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
 export const appRole = pgEnum("app_role", [
   "owner",
   "manager",
@@ -380,5 +382,60 @@ export const importExpenses = pgTable(
     index("import_expenses_order_idx").on(table.purchaseOrderId),
     check("import_expenses_amount_positive", sql`${table.amount} > 0`),
     check("import_expenses_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
+  ],
+);
+
+export const accountingAccounts = pgTable(
+  "accounting_accounts",
+  {
+    id: serial("id").primaryKey(),
+    code: varchar("code", { length: 12 }).notNull(),
+    name: varchar("name", { length: 120 }).notNull(),
+    type: accountingAccountType("type").notNull(),
+    systemKey: varchar("system_key", { length: 60 }),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("accounting_accounts_code_unique").on(table.code),
+    uniqueIndex("accounting_accounts_system_key_unique").on(table.systemKey),
+  ],
+);
+
+export const journalEntries = pgTable(
+  "journal_entries",
+  {
+    id: serial("id").primaryKey(),
+    entryNumber: varchar("entry_number", { length: 40 }).notNull(),
+    sourceKey: varchar("source_key", { length: 180 }),
+    sourceType: varchar("source_type", { length: 40 }).notNull(),
+    sourceId: integer("source_id"),
+    memo: varchar("memo", { length: 500 }).notNull(),
+    entryDate: date("entry_date").notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("journal_entries_number_unique").on(table.entryNumber),
+    uniqueIndex("journal_entries_source_key_unique").on(table.sourceKey),
+    index("journal_entries_date_idx").on(table.entryDate),
+  ],
+);
+
+export const journalLines = pgTable(
+  "journal_lines",
+  {
+    id: serial("id").primaryKey(),
+    journalEntryId: integer("journal_entry_id").notNull().references(() => journalEntries.id, { onDelete: "restrict" }),
+    accountId: integer("account_id").notNull().references(() => accountingAccounts.id, { onDelete: "restrict" }),
+    productId: integer("product_id").references(() => products.id, { onDelete: "restrict" }),
+    description: varchar("description", { length: 240 }),
+    debitZmw: numeric("debit_zmw", { precision: 14, scale: 2 }).notNull().default("0"),
+    creditZmw: numeric("credit_zmw", { precision: 14, scale: 2 }).notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("journal_lines_entry_idx").on(table.journalEntryId),
+    index("journal_lines_account_product_idx").on(table.accountId, table.productId),
+    check("journal_lines_one_sided", sql`(${table.debitZmw} > 0 and ${table.creditZmw} = 0) or (${table.creditZmw} > 0 and ${table.debitZmw} = 0)`),
   ],
 );

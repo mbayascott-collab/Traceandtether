@@ -8,6 +8,7 @@ import {
   customers, inventoryMovements, inventoryReservations, products, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
+import { accountBalance, formatCents, postJournal } from "./accounting-posting";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -172,6 +173,38 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const holds = await tx.select().from(inventoryReservations).where(and(eq(inventoryReservations.salesOrderId, id), eq(inventoryReservations.status, "active"))).orderBy(asc(inventoryReservations.productId));
       if (!holds.length) return { error: "No active stock reservations were found.", status: 409 };
       for (const hold of holds) await tx.select({ id: products.id }).from(products).where(eq(products.id, hold.productId)).for("update");
+      const orderLines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, id));
+      const revenue = orderLines.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
+      if (revenue > 0n) {
+        await postJournal(tx, {
+          sourceKey: `sales-order-${id}-revenue`, sourceType: "sales_order", sourceId: id,
+          memo: `Sales order ${order.orderNumber}`, entryDate: order.orderDate,
+          lines: [
+            { accountKey: "accounts_receivable", debitZmw: formatCents(revenue), description: "Unpaid customer balance" },
+            { accountKey: "sales_revenue", creditZmw: formatCents(revenue), description: "Sales" },
+          ],
+        });
+      }
+      const costLines = [];
+      for (const line of orderLines) {
+        const [movementTotal] = await tx.select({ value: sum(inventoryMovements.quantityDelta) })
+          .from(inventoryMovements).where(eq(inventoryMovements.productId, line.productId));
+        const onHand = Number(movementTotal?.value ?? 0);
+        const inventoryValue = await accountBalance(tx, "inventory", line.productId);
+        if (onHand <= 0 || inventoryValue <= 0n) continue;
+        const cost = (inventoryValue * BigInt(line.quantity) + BigInt(onHand / 2)) / BigInt(onHand);
+        if (cost <= 0n) continue;
+        costLines.push(
+          { accountKey: "cost_of_goods_sold", productId: line.productId, debitZmw: formatCents(cost), description: "Weighted-average cost of sale" },
+          { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory issued" },
+        );
+      }
+      if (costLines.length) {
+        await postJournal(tx, {
+          sourceKey: `sales-order-${id}-cogs`, sourceType: "sales_order_cogs", sourceId: id,
+          memo: `Cost of sales for ${order.orderNumber}`, entryDate: order.orderDate, lines: costLines,
+        });
+      }
       for (const hold of holds) {
         const [movement] = await tx.insert(inventoryMovements).values({
           productId: hold.productId, kind: "reservation_fulfillment", quantityDelta: -hold.quantity,

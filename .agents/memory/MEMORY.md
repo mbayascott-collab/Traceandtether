@@ -2,3 +2,4 @@
 - [Supplier quote comparisons](supplier-quote-comparisons.md) — Keep quote prices paired with their source currency; do not infer FX-adjusted or landed-cost rankings.
 - [Inventory ledger](inventory-ledger.md) — Derive on-hand from append-only movements; keep reservations separate and post shipment receipts explicitly.
 - [Online shop rollout](online-shop-rollout.md) — Use manual order requests until Shopify funding is available; Shopify remains a later storefront/checkout option.
+- [Accounting policy](accounting-policy.md) — Use weighted-average inventory costing and accrual posting for unpaid sales and supplier costs.

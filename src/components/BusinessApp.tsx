@@ -54,6 +54,7 @@ import SupplierWorkspace from "./SupplierWorkspace";
 import ProcurementWorkspace from "./ProcurementWorkspace";
 import InventoryWorkspace from "./InventoryWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
+import AccountingWorkspace from "./AccountingWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -269,7 +270,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isStockAdjustments = location === "/stock-adjustments";
   const isCustomers = location === "/customers";
   const isSalesOrders = location === "/sales-orders";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : "Dashboard";
+  const isAccounting = location === "/accounting";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -451,6 +453,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/sales-orders" aria-current={isSalesOrders ? "page" : undefined}>
             <BadgeDollarSign aria-hidden="true" /><span>Sales orders</span>
+          </Link>
+          <Link href="/accounting" aria-current={isAccounting ? "page" : undefined}>
+            <Calculator aria-hidden="true" /><span>Accounting</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -820,6 +825,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isStockAdjustments && <InventoryWorkspace mode="adjustments" />}
           {isCustomers && <SalesWorkspace mode="customers" />}
           {isSalesOrders && <SalesWorkspace mode="orders" />}
+          {isAccounting && <AccountingWorkspace />}
         </div>
       </main>
 

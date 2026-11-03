@@ -12,7 +12,7 @@
 - Estimated gross margin = estimated gross profit divided by selling price, multiplied by 100, when selling price is positive.
 - Gross margin is not markup, contribution, operating profit, or net profit.
 - Profitability calculations use decimal strings and integer minor units; stored monetary amounts use PostgreSQL `NUMERIC(14,2)`.
-- Profitability shown in this milestone is explicitly estimated; actual landed cost and cost of goods sold are not implemented.
+- Product-page profitability remains an estimate. Accounting cost of goods sold uses weighted-average book value for stock with accounting valuation; legacy stock without opening value is not included accurately.
 
 ## Product and category lifecycle
 
@@ -26,7 +26,9 @@
 ## Scope boundaries
 
 - Stock-on-hand is derived from append-only receipt, adjustment, and reservation-fulfillment movements. Reservations reduce available stock but do not change on-hand stock until fulfilled.
-- Sales orders snapshot explicit ZMW unit prices. Confirming an order reserves available stock; fulfillment records the stock-out movement. This does not create payments, refunds, tax calculations, accounting entries, or multi-location stock tracking.
+- Sales orders snapshot explicit ZMW unit prices. Confirming an order reserves available stock; fulfillment records the stock-out movement. Unpaid sales are recorded as receivables and unpaid purchases/import costs as payables.
+- Automated journal entries are immutable, balanced, and linked to their source event. Inventory receipts add ZMW purchase costs and pre-receipt allocated import costs to inventory; cost of sales uses weighted-average inventory book value. Import expenses entered after partial or full stock posting may leave an amount in landed-cost clearing for review.
+- Opening balances, cash receipts/disbursements, payment settlement, tax, refunds, bank reconciliation, and accountant-reviewed financial statements are not implemented. Historical stock without accounting valuation can have incomplete cost of sales until its opening value is entered through an approved accounting process.
 - Public shop order requests are saved as draft sales orders after server-side price and stock checks. They do not reserve stock or collect payment; an owner must confirm stock, delivery, and payment before treating the order as accepted. Public catalog responses include only active, priced, available products and customer-facing fields.
 - Use manual order requests until Shopify is affordable; Shopify can be integrated later as the storefront and checkout system without exposing the private supplier and cost records.
 - It does not estimate tax/customs rates or automatically select suppliers.
