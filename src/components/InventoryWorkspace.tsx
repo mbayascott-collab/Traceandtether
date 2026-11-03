@@ -52,7 +52,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Quantity<input name="quantity" type="number" min="1" required /></label><label>Reference<input name="reference" placeholder="Order or job reference" /></label>
         <label>Reason<input name="reason" required maxLength={500} /></label><button className="button button-primary">Reserve stock</button>
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>Quantity</th><th>Reference</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>{reservations.map((r) => <tr key={r.id}><td>{r.productName} · {r.sku}</td><td>{r.quantity}</td><td>{r.reference || "—"}</td><td>{r.reason}</td><td>{r.status}</td><td>{r.status === "active" && <><button onClick={() => run(() => releaseReservation(r.id))}>Release</button> <button onClick={() => run(() => fulfillReservation(r.id))}>Fulfill</button></>}</td></tr>)}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>Quantity</th><th>Reference</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>{reservations.map((r) => <tr key={r.id}><td>{r.productName} · {r.sku}</td><td>{r.quantity}</td><td>{r.reference || "—"}</td><td>{r.reason}</td><td>{r.status}</td><td>{r.status === "active" && (r.salesOrderId ? "Manage through sales order" : <><button onClick={() => run(() => releaseReservation(r.id))}>Release</button> <button onClick={() => run(() => fulfillReservation(r.id))}>Fulfill</button></>)}</td></tr>)}</tbody></table></div>
     </>}
     {mode === "adjustments" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createInventoryAdjustment({

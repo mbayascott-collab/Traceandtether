@@ -213,6 +213,30 @@ export const inventoryAdjustmentInputSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 }).strict();
 
+export const customerInputSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  email: z.preprocess((value) => value === "" || value === undefined ? null : value,
+    z.string().trim().email().max(254).nullable()),
+  phone: nullableText(60),
+  address: nullableText(5_000),
+  notes: nullableText(5_000),
+  status: z.enum(["active", "inactive"]),
+}).strict();
+
+export const salesOrderInputSchema = z.object({
+  customerId: positiveInteger,
+  deliveryAddress: nullableText(5_000),
+  notes: nullableText(5_000),
+  lines: z.array(z.object({
+    productId: positiveInteger,
+    quantity: positiveInteger,
+    unitPriceZmw: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  }).strict()).min(1).max(100),
+}).strict().superRefine((order, context) => {
+  const ids = order.lines.map((line) => line.productId);
+  if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
+});
+
 export type ProductInput = z.infer<typeof productInputSchema>;
 export type CategoryInput = z.infer<typeof categoryInputSchema>;
 export type SupplierInput = z.infer<typeof supplierInputSchema>;

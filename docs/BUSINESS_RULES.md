@@ -26,7 +26,7 @@
 ## Scope boundaries
 
 - Stock-on-hand is derived from append-only receipt, adjustment, and reservation-fulfillment movements. Reservations reduce available stock but do not change on-hand stock until fulfilled.
-- It does not create customer orders, payments, refunds, tax calculations, accounting entries, or multi-location stock tracking.
+- Sales orders snapshot explicit ZMW unit prices. Confirming an order reserves available stock; fulfillment records the stock-out movement. This does not create payments, refunds, tax calculations, accounting entries, or multi-location stock tracking.
 - It does not estimate tax/customs rates or automatically select suppliers.
 - Supplier records are internal sourcing records, not seller accounts.
 - Quotations retain the supplier's stated currency. Comparisons do not convert currencies or infer freight, tax, or landed costs.

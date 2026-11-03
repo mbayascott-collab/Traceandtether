@@ -20,7 +20,7 @@
 - Owner access requires `INITIAL_ADMIN_EMAIL` to be configured.
 - Only the verified initial owner is authorised; employee role assignment is not included.
 - Product image uploads and permanent file storage are not included.
-- Product-level inventory balances, traceable movements, reservations, receipts, adjustments, purchase orders, shipments, and import costs are implemented. Customer orders, multi-location stock, taxes, and accounting remain out of scope.
+- Product-level inventory balances, traceable movements, reservations, receipts, adjustments, purchase orders, shipments, import costs, customer records, and sales order processing are implemented. Payments, multi-location stock, taxes, and accounting remain out of scope.
 - The interface displays only stored product/category data; no demo business records are seeded.
 
 ## Planned phases

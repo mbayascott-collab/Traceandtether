@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
   shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
@@ -133,4 +133,14 @@ test("validates reservation quantities and non-zero reasoned stock adjustments",
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: -2, reference: null, reason: "Cycle count correction" }).success, true);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 0, reference: null, reason: "No change" }).success, false);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 2, reference: null, reason: " " }).success, false);
+});
+
+test("validates customer contacts and ZMW sales order lines", () => {
+  const customer = { name: "Kabwe Retail", email: "orders@example.com", phone: null, address: null, notes: null, status: "active" };
+  assert.equal(customerInputSchema.safeParse(customer).success, true);
+  assert.equal(customerInputSchema.safeParse({ ...customer, email: "bad-email" }).success, false);
+  const order = { customerId: 1, deliveryAddress: null, notes: null, lines: [{ productId: 2, quantity: 3, unitPriceZmw: "120.50" }] };
+  assert.equal(salesOrderInputSchema.safeParse(order).success, true);
+  assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPriceZmw: "-2" }] }).success, false);
+  assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
 });

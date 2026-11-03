@@ -24,6 +24,8 @@ export const shipmentStatus = pgEnum("shipment_status", ["in_transit", "partiall
 export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"]);
 export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment"]);
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
+export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
+export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
 export const appRole = pgEnum("app_role", [
   "owner",
   "manager",
@@ -256,11 +258,71 @@ export const shipmentLines = pgTable(
   ],
 );
 
+export const customers = pgTable(
+  "customers",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 160 }).notNull(),
+    email: varchar("email", { length: 254 }),
+    phone: varchar("phone", { length: 60 }),
+    address: text("address"),
+    notes: text("notes"),
+    status: customerStatus("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("customers_name_idx").on(table.name),
+    index("customers_status_idx").on(table.status),
+  ],
+);
+
+export const salesOrders = pgTable(
+  "sales_orders",
+  {
+    id: serial("id").primaryKey(),
+    orderNumber: varchar("order_number", { length: 40 }).notNull(),
+    customerId: integer("customer_id").notNull().references(() => customers.id, { onDelete: "restrict" }),
+    status: salesOrderStatus("status").notNull().default("draft"),
+    orderDate: date("order_date").notNull().defaultNow(),
+    deliveryAddress: text("delivery_address"),
+    notes: text("notes"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    fulfilledAt: timestamp("fulfilled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_orders_number_unique").on(table.orderNumber),
+    index("sales_orders_customer_idx").on(table.customerId),
+    index("sales_orders_status_idx").on(table.status),
+  ],
+);
+
+export const salesOrderLines = pgTable(
+  "sales_order_lines",
+  {
+    id: serial("id").primaryKey(),
+    salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "restrict" }),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    quantity: integer("quantity").notNull(),
+    unitPriceZmw: numeric("unit_price_zmw", { precision: 14, scale: 2 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_order_lines_product_unique").on(table.salesOrderId, table.productId),
+    index("sales_order_lines_order_idx").on(table.salesOrderId),
+    check("sales_order_lines_quantity_positive", sql`${table.quantity} > 0`),
+    check("sales_order_lines_price_nonnegative", sql`${table.unitPriceZmw} >= 0`),
+  ],
+);
+
 export const inventoryReservations = pgTable(
   "inventory_reservations",
   {
     id: serial("id").primaryKey(),
     productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     quantity: integer("quantity").notNull(),
     status: inventoryReservationStatus("status").notNull().default("active"),
     reference: varchar("reference", { length: 120 }),
@@ -270,6 +332,7 @@ export const inventoryReservations = pgTable(
   },
   (table) => [
     index("inventory_reservations_product_status_idx").on(table.productId, table.status),
+    uniqueIndex("inventory_reservations_sales_product_unique").on(table.salesOrderId, table.productId),
     check("inventory_reservations_quantity_positive", sql`${table.quantity} > 0`),
     check("inventory_reservations_reason_nonempty", sql`length(trim(${table.reason})) > 0`),
   ],

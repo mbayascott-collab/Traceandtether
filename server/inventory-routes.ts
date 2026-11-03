@@ -115,6 +115,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [reservation] = await tx.select().from(inventoryReservations).where(eq(inventoryReservations.id, id)).for("update").limit(1);
       if (!reservation) return { error: "Reservation not found.", status: 404 };
+      if (reservation.salesOrderId) return { error: "Manage this reservation through its sales order.", status: 409 };
       if (reservation.status !== "active") return { error: "Only active reservations can be released.", status: 409 };
       const [saved] = await tx.update(inventoryReservations).set({ status: "released", updatedAt: new Date() }).where(eq(inventoryReservations.id, id)).returning();
       return { reservation: saved };
@@ -129,6 +130,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [reservation] = await tx.select().from(inventoryReservations).where(eq(inventoryReservations.id, id)).for("update").limit(1);
       if (!reservation) return { error: "Reservation not found.", status: 404 };
+      if (reservation.salesOrderId) return { error: "Manage this reservation through its sales order.", status: 409 };
       if (reservation.status !== "active") return { error: "Only active reservations can be fulfilled.", status: 409 };
       await tx.select({ id: products.id }).from(products).where(eq(products.id, reservation.productId)).for("update");
       const current = await balance(tx, reservation.productId);
