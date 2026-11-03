@@ -136,6 +136,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     for (const line of currentLines) {
       const value = next.get(line.id)!;
       if (value > line.quantityShipped) return invalid(res, "Received quantity cannot exceed the quantity shipped.");
+      if (value < line.quantityStocked) return invalid(res, "Received quantity cannot be reduced below the quantity already posted to stock.");
       const otherReceived = receipts.filter((row) => row.lineId === line.purchaseOrderLineId && row.shipmentId !== id)
         .reduce((sumValue, row) => sumValue + row.quantity, 0);
       const ordered = orderLines.find((row) => row.id === line.purchaseOrderLineId)?.quantityOrdered ?? 0;

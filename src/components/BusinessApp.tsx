@@ -25,6 +25,8 @@ import {
   Plus,
   RefreshCw,
   Receipt,
+  Bookmark,
+  SlidersHorizontal,
   Search,
   ShieldCheck,
   Tags,
@@ -50,6 +52,7 @@ import {
 } from "../lib/api";
 import SupplierWorkspace from "./SupplierWorkspace";
 import ProcurementWorkspace from "./ProcurementWorkspace";
+import InventoryWorkspace from "./InventoryWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -259,7 +262,11 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isShipments = location === "/shipments";
   const isImportExpenses = location === "/import-expenses";
   const isLandedCosts = location === "/landed-costs";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : "Dashboard";
+  const isInventory = location === "/inventory";
+  const isStockReceipts = location === "/stock-receipts";
+  const isReservations = location === "/reservations";
+  const isStockAdjustments = location === "/stock-adjustments";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -423,6 +430,18 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/landed-costs" aria-current={isLandedCosts ? "page" : undefined}>
             <Calculator aria-hidden="true" /><span>Landed costs</span>
+          </Link>
+          <Link href="/inventory" aria-current={isInventory ? "page" : undefined}>
+            <Boxes aria-hidden="true" /><span>Inventory</span>
+          </Link>
+          <Link href="/stock-receipts" aria-current={isStockReceipts ? "page" : undefined}>
+            <ClipboardList aria-hidden="true" /><span>Stock receipts</span>
+          </Link>
+          <Link href="/reservations" aria-current={isReservations ? "page" : undefined}>
+            <Bookmark aria-hidden="true" /><span>Reservations</span>
+          </Link>
+          <Link href="/stock-adjustments" aria-current={isStockAdjustments ? "page" : undefined}>
+            <SlidersHorizontal aria-hidden="true" /><span>Adjustments</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -786,6 +805,10 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isShipments && <ProcurementWorkspace mode="shipments" />}
           {isImportExpenses && <ProcurementWorkspace mode="expenses" />}
           {isLandedCosts && <ProcurementWorkspace mode="landed" />}
+          {isInventory && <InventoryWorkspace mode="overview" />}
+          {isStockReceipts && <InventoryWorkspace mode="receipts" />}
+          {isReservations && <InventoryWorkspace mode="reservations" />}
+          {isStockAdjustments && <InventoryWorkspace mode="adjustments" />}
         </div>
       </main>
 

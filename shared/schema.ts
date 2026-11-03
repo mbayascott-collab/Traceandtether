@@ -22,6 +22,8 @@ export const supplierQuoteStatus = pgEnum("supplier_quote_status", ["received", 
 export const purchaseOrderStatus = pgEnum("purchase_order_status", ["ordered", "partially_received", "received", "cancelled"]);
 export const shipmentStatus = pgEnum("shipment_status", ["in_transit", "partially_received", "received", "cancelled"]);
 export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"]);
+export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment"]);
+export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
 export const appRole = pgEnum("app_role", [
   "owner",
   "manager",
@@ -243,12 +245,54 @@ export const shipmentLines = pgTable(
     purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id, { onDelete: "restrict" }),
     quantityShipped: integer("quantity_shipped").notNull(),
     quantityReceived: integer("quantity_received").notNull().default(0),
+    quantityStocked: integer("quantity_stocked").notNull().default(0),
   },
   (table) => [
     index("shipment_lines_shipment_idx").on(table.shipmentId),
     index("shipment_lines_order_line_idx").on(table.purchaseOrderLineId),
     check("shipment_lines_shipped_positive", sql`${table.quantityShipped} > 0`),
     check("shipment_lines_received_range", sql`${table.quantityReceived} >= 0 and ${table.quantityReceived} <= ${table.quantityShipped}`),
+    check("shipment_lines_stocked_range", sql`${table.quantityStocked} >= 0 and ${table.quantityStocked} <= ${table.quantityReceived}`),
+  ],
+);
+
+export const inventoryReservations = pgTable(
+  "inventory_reservations",
+  {
+    id: serial("id").primaryKey(),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    quantity: integer("quantity").notNull(),
+    status: inventoryReservationStatus("status").notNull().default("active"),
+    reference: varchar("reference", { length: 120 }),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("inventory_reservations_product_status_idx").on(table.productId, table.status),
+    check("inventory_reservations_quantity_positive", sql`${table.quantity} > 0`),
+    check("inventory_reservations_reason_nonempty", sql`length(trim(${table.reason})) > 0`),
+  ],
+);
+
+export const inventoryMovements = pgTable(
+  "inventory_movements",
+  {
+    id: serial("id").primaryKey(),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    kind: inventoryMovementKind("kind").notNull(),
+    quantityDelta: integer("quantity_delta").notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    reference: varchar("reference", { length: 120 }),
+    sourceKey: varchar("source_key", { length: 160 }),
+    reservationId: integer("reservation_id").references(() => inventoryReservations.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("inventory_movements_product_created_idx").on(table.productId, table.createdAt),
+    uniqueIndex("inventory_movements_source_key_unique").on(table.sourceKey),
+    check("inventory_movements_delta_nonzero", sql`${table.quantityDelta} <> 0`),
+    check("inventory_movements_reason_nonempty", sql`length(trim(${table.reason})) > 0`),
   ],
 );
 

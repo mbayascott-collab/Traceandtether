@@ -31,6 +31,10 @@ export interface LandedCostOrder extends PurchaseOrder {
   allocations: { expenseId: number; lineId: number; amountZmw: string }[];
   lines: (PurchaseOrderLine & { allocatedExpensesZmw: string; purchaseUnitCostZmw: string; landedUnitCostZmw: string })[];
 }
+export interface InventoryItem { id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number; }
+export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; createdAt: string; }
+export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; createdAt: string; }
+export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
 
 export interface CurrentUser {
   authorized: boolean;
@@ -302,6 +306,33 @@ export async function createImportExpense(input: {
 }
 export async function fetchLandedCosts(): Promise<LandedCostOrder[]> {
   return (await request<{ orders: LandedCostOrder[] }>("/api/landed-costs")).orders;
+}
+export async function fetchInventory(): Promise<InventoryItem[]> {
+  return (await request<{ inventory: InventoryItem[] }>("/api/inventory")).inventory;
+}
+export async function fetchInventoryMovements(): Promise<InventoryMovement[]> {
+  return (await request<{ movements: InventoryMovement[] }>("/api/inventory/movements")).movements;
+}
+export async function fetchInventoryReceipts(): Promise<InventoryReceipt[]> {
+  return (await request<{ receipts: InventoryReceipt[] }>("/api/inventory/receipts")).receipts;
+}
+export async function postInventoryReceipt(shipmentLineId: number): Promise<void> {
+  await request(`/api/inventory/receipts/${shipmentLineId}/post`, { method: "POST" });
+}
+export async function fetchReservations(): Promise<InventoryReservation[]> {
+  return (await request<{ reservations: InventoryReservation[] }>("/api/inventory/reservations")).reservations;
+}
+export async function createReservation(input: { productId: number; quantity: number; reference: string | null; reason: string }): Promise<void> {
+  await request("/api/inventory/reservations", { method: "POST", body: JSON.stringify(input) });
+}
+export async function releaseReservation(id: number): Promise<void> {
+  await request(`/api/inventory/reservations/${id}/release`, { method: "POST" });
+}
+export async function fulfillReservation(id: number): Promise<void> {
+  await request(`/api/inventory/reservations/${id}/fulfill`, { method: "POST" });
+}
+export async function createInventoryAdjustment(input: { productId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
+  await request("/api/inventory/adjustments", { method: "POST", body: JSON.stringify(input) });
 }
 
 export async function updateSupplierQuote(id: number, input: SupplierQuoteInput): Promise<void> {

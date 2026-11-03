@@ -1,2 +1,3 @@
 - [Single-business resale model](single-business-resale-model.md) — The business imports mainly from China and resells only its own products in Zambia; it is not a marketplace.
 - [Supplier quote comparisons](supplier-quote-comparisons.md) — Keep quote prices paired with their source currency; do not infer FX-adjusted or landed-cost rankings.
+- [Inventory ledger](inventory-ledger.md) — Derive on-hand from append-only movements; keep reservations separate and post shipment receipts explicitly.

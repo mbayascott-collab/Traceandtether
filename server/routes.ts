@@ -9,6 +9,7 @@ import {
 import { db } from "./db";
 import { databaseErrorStatus } from "./database-errors";
 import { registerProcurementRoutes } from "./procurement-routes";
+import { registerInventoryRoutes } from "./inventory-routes";
 import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
@@ -504,4 +505,5 @@ export function registerApiRoutes(app: import("express").Express) {
   });
 
   registerProcurementRoutes(app, requireOwner);
+  registerInventoryRoutes(app, requireOwner);
 }

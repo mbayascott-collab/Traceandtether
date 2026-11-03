@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  importExpenseInputSchema, productInputSchema, purchaseOrderInputSchema, shipmentInputSchema,
+  importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, shipmentInputSchema,
   shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
@@ -125,4 +125,12 @@ test("validates shipment and expense inputs", () => {
   };
   assert.equal(importExpenseInputSchema.safeParse(expense).success, true);
   assert.equal(importExpenseInputSchema.safeParse({ ...expense, amount: "0.00" }).success, false);
+});
+
+test("validates reservation quantities and non-zero reasoned stock adjustments", () => {
+  assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, quantity: 2, reference: null, reason: "Customer order" }).success, true);
+  assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, quantity: 0, reference: null, reason: "Hold" }).success, false);
+  assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: -2, reference: null, reason: "Cycle count correction" }).success, true);
+  assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 0, reference: null, reason: "No change" }).success, false);
+  assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 2, reference: null, reason: " " }).success, false);
 });

@@ -199,6 +199,20 @@ export const importExpenseInputSchema = z.object({
   notes: nullableText(5_000),
 }).strict();
 
+export const inventoryReservationInputSchema = z.object({
+  productId: positiveInteger,
+  quantity: positiveInteger,
+  reference: nullableText(120),
+  reason: z.string().trim().min(1).max(500),
+}).strict();
+
+export const inventoryAdjustmentInputSchema = z.object({
+  productId: positiveInteger,
+  quantityDelta: z.coerce.number().int().min(-1_000_000).max(1_000_000).refine((value) => value !== 0),
+  reference: nullableText(120),
+  reason: z.string().trim().min(1).max(500),
+}).strict();
+
 export type ProductInput = z.infer<typeof productInputSchema>;
 export type CategoryInput = z.infer<typeof categoryInputSchema>;
 export type SupplierInput = z.infer<typeof supplierInputSchema>;
