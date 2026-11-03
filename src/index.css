@@ -2432,3 +2432,89 @@ textarea:focus-visible {
   .shop-product-art { height: 180px; }
   .shop-footer { flex-wrap: wrap; }
 }
+
+.marketing-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 17px;
+}
+
+.marketing-section {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.marketing-section .panel-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.marketing-section .panel-heading span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.marketing-form {
+  display: grid;
+  gap: 11px;
+  padding: 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.marketing-form label {
+  display: grid;
+  gap: 6px;
+  color: #506763;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.marketing-form input,
+.marketing-form select,
+.marketing-form textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #fffefa;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.marketing-form textarea { resize: vertical; }
+.marketing-form .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.marketing-form .marketing-checkbox { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.marketing-form .marketing-checkbox input { width: auto; min-height: 0; }
+
+.marketing-list { max-height: 300px; overflow: auto; }
+
+.marketing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #edf0ea;
+}
+
+.marketing-row > div { display: grid; gap: 5px; min-width: 0; }
+.marketing-row strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; }
+.marketing-row span { color: var(--muted); font-size: 9px; }
+.muted-empty { padding: 10px 16px; color: var(--muted); font-size: 10px; }
+.marketing-expenses { grid-column: 1 / -1; }
+.marketing-expenses .marketing-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.marketing-expenses .marketing-form > label { min-width: 0; }
+.marketing-expenses .marketing-form > button { align-self: end; }
+.marketing-expenses .table-wrap { margin: 0; border: 0; border-radius: 0; }
+
+@media (max-width: 900px) {
+  .marketing-layout { grid-template-columns: 1fr; }
+  .marketing-expenses { grid-column: auto; }
+}
+
+@media (max-width: 560px) {
+  .marketing-form .form-grid,
+  .marketing-expenses .marketing-form { grid-template-columns: 1fr; }
+}

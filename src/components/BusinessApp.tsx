@@ -19,6 +19,7 @@ import {
   LockKeyhole,
   LogOut,
   Menu,
+  Megaphone,
   Package,
   PackagePlus,
   Pencil,
@@ -55,6 +56,7 @@ import ProcurementWorkspace from "./ProcurementWorkspace";
 import InventoryWorkspace from "./InventoryWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import AccountingWorkspace from "./AccountingWorkspace";
+import MarketingWorkspace from "./MarketingWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -271,7 +273,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isCustomers = location === "/customers";
   const isSalesOrders = location === "/sales-orders";
   const isAccounting = location === "/accounting";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : "Dashboard";
+  const isMarketing = location === "/marketing";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -456,6 +459,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/accounting" aria-current={isAccounting ? "page" : undefined}>
             <Calculator aria-hidden="true" /><span>Accounting</span>
+          </Link>
+          <Link href="/marketing" aria-current={isMarketing ? "page" : undefined}>
+            <Megaphone aria-hidden="true" /><span>Marketing</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -826,6 +832,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isCustomers && <SalesWorkspace mode="customers" />}
           {isSalesOrders && <SalesWorkspace mode="orders" />}
           {isAccounting && <AccountingWorkspace />}
+          {isMarketing && <MarketingWorkspace />}
         </div>
       </main>
 

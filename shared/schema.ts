@@ -28,6 +28,8 @@ export const inventoryReservationStatus = pgEnum("inventory_reservation_status",
 export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
 export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
 export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
+export const marketingCampaignStatus = pgEnum("marketing_campaign_status", ["draft", "active", "paused", "completed", "cancelled"]);
+export const marketingContentStatus = pgEnum("marketing_content_status", ["planned", "in_progress", "ready", "published", "cancelled"]);
 export const appRole = pgEnum("app_role", [
   "owner",
   "manager",
@@ -437,5 +439,72 @@ export const journalLines = pgTable(
     index("journal_lines_entry_idx").on(table.journalEntryId),
     index("journal_lines_account_product_idx").on(table.accountId, table.productId),
     check("journal_lines_one_sided", sql`(${table.debitZmw} > 0 and ${table.creditZmw} = 0) or (${table.creditZmw} > 0 and ${table.debitZmw} = 0)`),
+  ],
+);
+
+export const marketingCampaigns = pgTable(
+  "marketing_campaigns",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 180 }).notNull(),
+    objective: text("objective"),
+    channel: varchar("channel", { length: 80 }),
+    status: marketingCampaignStatus("status").notNull().default("draft"),
+    startsOn: date("starts_on"),
+    endsOn: date("ends_on"),
+    budgetZmw: numeric("budget_zmw", { precision: 14, scale: 2 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("marketing_campaigns_status_idx").on(table.status),
+    check("marketing_campaigns_budget_nonnegative", sql`${table.budgetZmw} is null or ${table.budgetZmw} >= 0`),
+    check("marketing_campaigns_date_order", sql`${table.startsOn} is null or ${table.endsOn} is null or ${table.endsOn} >= ${table.startsOn}`),
+  ],
+);
+
+export const marketingContentItems = pgTable(
+  "marketing_content_items",
+  {
+    id: serial("id").primaryKey(),
+    campaignId: integer("campaign_id").references(() => marketingCampaigns.id, { onDelete: "set null" }),
+    title: varchar("title", { length: 180 }).notNull(),
+    platform: varchar("platform", { length: 80 }).notNull(),
+    contentType: varchar("content_type", { length: 80 }).notNull(),
+    status: marketingContentStatus("status").notNull().default("planned"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    caption: text("caption"),
+    publishedUrl: varchar("published_url", { length: 2_000 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("marketing_content_campaign_idx").on(table.campaignId),
+    index("marketing_content_schedule_idx").on(table.scheduledAt),
+  ],
+);
+
+export const marketingExpenses = pgTable(
+  "marketing_expenses",
+  {
+    id: serial("id").primaryKey(),
+    campaignId: integer("campaign_id").references(() => marketingCampaigns.id, { onDelete: "set null" }),
+    category: varchar("category", { length: 80 }).notNull(),
+    description: varchar("description", { length: 240 }).notNull(),
+    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull(),
+    exchangeRateToZmw: numeric("exchange_rate_to_zmw", { precision: 18, scale: 8 }).notNull(),
+    expenseDate: date("expense_date").notNull().defaultNow(),
+    paid: boolean("paid").notNull().default(false),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("marketing_expenses_campaign_idx").on(table.campaignId),
+    check("marketing_expenses_amount_positive", sql`${table.amount} > 0`),
+    check("marketing_expenses_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
   ],
 );

@@ -12,6 +12,7 @@ import { registerProcurementRoutes } from "./procurement-routes";
 import { registerInventoryRoutes } from "./inventory-routes";
 import { registerSalesRoutes } from "./sales-routes";
 import { registerAccountingRoutes } from "./accounting-routes";
+import { registerMarketingRoutes } from "./marketing-routes";
 import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
@@ -510,4 +511,5 @@ export function registerApiRoutes(app: import("express").Express) {
   registerInventoryRoutes(app, requireOwner);
   registerSalesRoutes(app, requireOwner);
   registerAccountingRoutes(app, requireOwner);
+  registerMarketingRoutes(app, requireOwner);
 }

@@ -12,6 +12,7 @@ export const accounts = [
   { code: "4100", name: "Sales revenue", type: "income" as const, systemKey: "sales_revenue" },
   { code: "5100", name: "Cost of goods sold", type: "expense" as const, systemKey: "cost_of_goods_sold" },
   { code: "6100", name: "Inventory adjustments", type: "expense" as const, systemKey: "inventory_adjustments" },
+  { code: "6200", name: "Marketing expenses", type: "expense" as const, systemKey: "marketing_expense" },
 ];
 
 export type PostingLine = {

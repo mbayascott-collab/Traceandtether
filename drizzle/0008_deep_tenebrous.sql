@@ -1,0 +1,1 @@
+ALTER TABLE "marketing_expenses" ADD COLUMN "paid" boolean DEFAULT false NOT NULL;
