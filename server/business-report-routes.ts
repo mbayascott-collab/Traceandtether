@@ -2,9 +2,10 @@ import { desc, eq } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
   accountingAccounts, customers, inventoryMovements, inventoryReservations, journalEntries, journalLines,
-  products, salesOrderLines, salesOrders,
+  products, purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
 import { calculateProductProfitability, toMinorUnits } from "../shared/money";
+import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/business-planning";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
 
@@ -22,7 +23,8 @@ const validDate = (value: string) => {
 export function registerBusinessReportRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/business-dashboard", owner, async (_req, res) => {
     const monthStart = `${new Date().toISOString().slice(0, 8)}01`;
-    const [allProducts, allCustomers, orders, movements, reservations, lines, inventoryValue] = await Promise.all([
+    const salesWindowStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const [allProducts, allCustomers, orders, movements, reservations, lines, purchaseHeaders, purchaseLines, postedShipLines, accountBalances] = await Promise.all([
       db.select().from(products).orderBy(desc(products.updatedAt)),
       db.select({ id: customers.id }).from(customers),
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
@@ -30,21 +32,48 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       db.select({ productId: inventoryMovements.productId, quantityDelta: inventoryMovements.quantityDelta }).from(inventoryMovements),
       db.select({ productId: inventoryReservations.productId, quantity: inventoryReservations.quantity })
         .from(inventoryReservations).where(eq(inventoryReservations.status, "active")),
-      db.select({ orderId: salesOrderLines.salesOrderId, quantity: salesOrderLines.quantity, price: salesOrderLines.unitPriceZmw }).from(salesOrderLines),
-      accountBalance(db, "inventory"),
+      db.select({ orderId: salesOrderLines.salesOrderId, productId: salesOrderLines.productId, quantity: salesOrderLines.quantity, price: salesOrderLines.unitPriceZmw }).from(salesOrderLines),
+      db.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders),
+      db.select().from(purchaseOrderLines),
+      db.select({ purchaseOrderLineId: shipmentLines.purchaseOrderLineId, quantityStocked: shipmentLines.quantityStocked }).from(shipmentLines),
+      Promise.all([
+        accountBalance(db, "inventory"), accountBalance(db, "cash_bank"),
+        accountBalance(db, "accounts_receivable"), accountBalance(db, "accounts_payable"),
+      ]),
     ]);
+    const [inventoryValue, cashBalance, receivablesRaw, payablesRaw] = accountBalances;
     const onHand = new Map<number, number>(), reserved = new Map<number, number>();
     for (const row of movements) onHand.set(row.productId, (onHand.get(row.productId) ?? 0) + row.quantityDelta);
     for (const row of reservations) reserved.set(row.productId, (reserved.get(row.productId) ?? 0) + row.quantity);
     const fulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && order.orderDate >= monthStart).map(({ order }) => order.id));
     const monthSales = lines.reduce((total, line) => fulfilledIds.has(line.orderId) ? total + cents(line.price) * BigInt(line.quantity) : total, 0n);
-    const lowStock = allProducts.filter((product) => product.status === "active" && product.reorderThreshold > 0)
-      .map((product) => ({ id: product.id, name: product.name, sku: product.sku, available: Math.max(0, (onHand.get(product.id) ?? 0) - (reserved.get(product.id) ?? 0)), threshold: product.reorderThreshold }))
-      .filter((product) => product.available <= product.threshold)
-      .sort((a, b) => a.available - b.available).slice(0, 8);
+    const demand = new Map<number, number>();
+    const recentFulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && order.orderDate >= salesWindowStart).map(({ order }) => order.id));
+    for (const line of lines) if (recentFulfilledIds.has(line.orderId)) demand.set(line.productId, (demand.get(line.productId) ?? 0) + line.quantity);
+    const purchaseStatus = new Map(purchaseHeaders.map((order) => [order.id, order.status]));
+    const stockedByLine = new Map<number, number>();
+    for (const line of postedShipLines) stockedByLine.set(line.purchaseOrderLineId, (stockedByLine.get(line.purchaseOrderLineId) ?? 0) + line.quantityStocked);
+    const incoming = new Map<number, number>();
+    for (const line of purchaseLines) {
+      if (purchaseStatus.get(line.purchaseOrderId) === "cancelled") continue;
+      incoming.set(line.productId, (incoming.get(line.productId) ?? 0) + Math.max(0, line.quantityOrdered - (stockedByLine.get(line.id) ?? 0)));
+    }
+    const replenishment = allProducts.filter((product) => product.status === "active" && product.reorderThreshold > 0)
+      .map((product) => {
+        const available = Math.max(0, (onHand.get(product.id) ?? 0) - (reserved.get(product.id) ?? 0));
+        const incomingQty = incoming.get(product.id) ?? 0;
+        return {
+          id: product.id, name: product.name, sku: product.sku, supplierName: product.supplierName,
+          available, incoming: incomingQty, salesLast90Days: demand.get(product.id) ?? 0,
+          reorderLevel: product.reorderThreshold,
+          suggestedQuantity: suggestedReorderQuantity(onHand.get(product.id) ?? 0, reserved.get(product.id) ?? 0, incomingQty, product.reorderThreshold),
+        };
+      }).filter((product) => product.suggestedQuantity > 0)
+      .sort((a, b) => a.suggestedQuantity - b.suggestedQuantity).slice(0, 12);
     const recentOrders = orders.slice(0, 6).map(({ order, customerName }) => ({
       id: order.id, orderNumber: order.orderNumber, customerName, status: order.status, orderDate: order.orderDate,
     }));
+    const forecast = forecastCashWithin30Days(cashBalance, receivablesRaw, payablesRaw);
     res.json({
       metrics: {
         products: allProducts.length, activeProducts: allProducts.filter((p) => p.status === "active").length,
@@ -52,7 +81,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         monthSalesZmw: from(monthSales), inStockProducts: allProducts.filter((p) => (onHand.get(p.id) ?? 0) - (reserved.get(p.id) ?? 0) > 0).length,
         inventoryValueZmw: from(inventoryValue),
       },
-      lowStock, recentOrders, monthStart,
+      cashForecast: {
+        recordedCashZmw: from(forecast.recordedCash), expectedReceiptsZmw: from(forecast.expectedReceipts),
+        expectedPaymentsZmw: from(forecast.expectedPayments), estimatedClosingZmw: from(forecast.estimatedClosing),
+        assumption: "Current unpaid balances are collected or paid within 30 days; no new sales or costs are assumed.",
+      },
+      replenishment, recentOrders, monthStart, salesWindowStart,
     });
   });
 

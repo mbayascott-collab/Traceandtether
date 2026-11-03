@@ -2536,6 +2536,11 @@ textarea:focus-visible {
 .business-dashboard-data { display: grid; gap: 16px; margin: 18px 0; }
 .business-dashboard-data .metric-value { font-size: clamp(18px, 2vw, 25px); }
 .report-footnote { margin: 10px 0 16px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.cash-forecast-panel { overflow: hidden; }
+.cash-forecast-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 16px; }
+.cash-forecast-grid > div { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.cash-forecast-grid span { color: var(--muted); font-size: 10px; }
+.cash-forecast-grid strong { color: var(--ink); font-size: 17px; }
 .profitability-controls { display: flex; align-items: end; gap: 12px; padding: 16px; margin-bottom: 16px; }
 .profitability-controls label { display: grid; gap: 5px; color: #506763; font-size: 10px; font-weight: 700; }
 .profitability-controls input { min-height: 36px; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: #fffefa; }
@@ -2543,6 +2548,7 @@ textarea:focus-visible {
 
 @media (max-width: 560px) {
   .profitability-controls { flex-wrap: wrap; }
+  .cash-forecast-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .marketing-report-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }

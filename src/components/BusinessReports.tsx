@@ -2,8 +2,9 @@ import { useEffect, useState, type FormEvent } from "react";
 
 type DashboardData = {
   metrics: { products: number; activeProducts: number; customers: number; openOrders: number; monthSalesZmw: string; inStockProducts: number; inventoryValueZmw: string };
-  lowStock: { id: number; name: string; sku: string; available: number; threshold: number }[];
+  replenishment: { id: number; name: string; sku: string; supplierName: string | null; available: number; incoming: number; salesLast90Days: number; reorderLevel: number; suggestedQuantity: number }[];
   recentOrders: { id: number; orderNumber: string; customerName: string; status: string; orderDate: string }[];
+  cashForecast: { recordedCashZmw: string; expectedReceiptsZmw: string; expectedPaymentsZmw: string; estimatedClosingZmw: string; assumption: string };
   monthStart: string;
 };
 type ProfitReport = {
@@ -40,13 +41,22 @@ export function BusinessDashboard() {
   return <section className="business-dashboard-data">
     <div className="metric-grid">{cards.map(([label, value]) => <article className="metric-card" key={label}><div className="metric-top"><span>{label}</span></div><strong className="metric-value">{value}</strong></article>)}</div>
     <div className="dashboard-lower">
-      <section className="panel"><div className="panel-heading"><h2>Low stock</h2><span>At or below reorder level</span></div>
-        <div className="panel-body">{data.lowStock.length ? data.lowStock.map((item) => <div className="recent-row" key={item.id}><div><span className="recent-name">{item.name}</span><span className="recent-meta">{item.sku} · available {item.available}</span></div><span className="recent-price">Target {item.threshold}</span></div>) : <p>No active products are at their reorder level.</p>}</div>
+      <section className="panel"><div className="panel-heading"><div><h2>Replenishment suggestions</h2><span>Based on your reorder level and incoming stock</span></div></div>
+        <div className="panel-body">{data.replenishment.length ? data.replenishment.map((item) => <div className="recent-row" key={item.id}><div><span className="recent-name">{item.name} · {item.sku}</span><span className="recent-meta">Available {item.available} · Incoming {item.incoming} · Sold {item.salesLast90Days} in 90 days · {item.supplierName || "Supplier not set"}</span></div><span className="recent-price">Suggest {item.suggestedQuantity}</span></div>) : <p>No products are below their reorder level.</p>}</div>
       </section>
       <section className="panel"><div className="panel-heading"><h2>Recent orders</h2></div>
         <div className="panel-body">{data.recentOrders.length ? data.recentOrders.map((order) => <div className="recent-row" key={order.id}><div><span className="recent-name">{order.orderNumber} · {order.customerName}</span><span className="recent-meta">{order.orderDate}</span></div><span className="recent-price">{order.status}</span></div>) : <p>No sales orders yet.</p>}</div>
       </section>
     </div>
+    <section className="panel cash-forecast-panel"><div className="panel-heading"><div><h2>30-day cash forecast</h2><span>A simple estimate from balances already in the books</span></div></div>
+      <div className="cash-forecast-grid">
+        <div><span>Recorded cash</span><strong>{money(data.cashForecast.recordedCashZmw)}</strong></div>
+        <div><span>Expected receipts</span><strong>{money(data.cashForecast.expectedReceiptsZmw)}</strong></div>
+        <div><span>Expected payments</span><strong>{money(data.cashForecast.expectedPaymentsZmw)}</strong></div>
+        <div><span>Estimated closing cash</span><strong>{money(data.cashForecast.estimatedClosingZmw)}</strong></div>
+      </div>
+      <p className="report-footnote">{data.cashForecast.assumption} Opening cash balances are not recorded yet, so this estimate may be incomplete.</p>
+    </section>
     <p className="report-footnote">Sales include fulfilled orders dated this month. Inventory value uses recorded accounting entries; stock without an opening value may be missing.</p>
   </section>;
 }
