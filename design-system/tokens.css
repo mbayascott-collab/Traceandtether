@@ -1,0 +1,29 @@
+/* Extracted Trade Desk tokens. This file is a reference and is not imported by the app. */
+:root {
+  --td-ink: #203a3c;
+  --td-ink-soft: #536a69;
+  --td-muted: #778985;
+  --td-line: #dce4dc;
+  --td-line-strong: #c7d3ca;
+  --td-paper: #fffefa;
+  --td-canvas: #f3f5ef;
+  --td-canvas-deep: #e9eee6;
+  --td-teal: #176b62;
+  --td-teal-deep: #104f4b;
+  --td-teal-wash: #e6f1eb;
+  --td-copper: #b5653f;
+  --td-copper-wash: #fbefe6;
+  --td-olive: #64784e;
+  --td-danger: #a54c3e;
+  --td-danger-wash: #f9eae6;
+
+  --td-font-ui: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --td-font-display: "Manrope", "DM Sans", ui-sans-serif, sans-serif;
+  --td-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --td-radius-control: 7px;
+  --td-radius-panel: 9px;
+  --td-radius-pill: 999px;
+  --td-focus-ring: 0 0 0 3px rgba(23, 107, 98, 0.22);
+  --td-shadow-panel: 0 16px 46px rgba(31, 57, 53, 0.08);
+}

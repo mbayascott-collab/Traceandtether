@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "me8F_01ls3h2aIBvGgGLS"
+uri = "file://design-system/preview.html"
+type = "html"
+title = "Trade Desk design system"
+description = "A visual guide to the palette, typography, status colors, controls, and table style extracted from the current app. The app screens have not been changed."
+logical_id = "743697a4-6f29-40b5-b352-4fbe6384a23f"
+content_hash = "sha256:125fc8df69b90fc95acd3023992e8b58b4c43f794dc416681c1e1390a6b93121"
+size = 8052
+mtime_ms = 1793745795692
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:81c35c18-29d0-4b4c-886c-09c645f6eb9f/743697a4-6f29-40b5-b352-4fbe6384a23f/9ee1818a-2357-4819-9916-6132c5e23596"
+storage_version_token = "1793745822254704"
+content_type = "text/html"
