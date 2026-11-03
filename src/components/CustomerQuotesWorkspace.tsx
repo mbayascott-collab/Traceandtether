@@ -69,7 +69,7 @@ export default function CustomerQuotesWorkspace() {
           setLines((current) => current.map((row, n) => n === i ? { ...row, productId: e.target.value, unitPriceZmw: product?.sellingPriceZmw ?? "" } : row));
         }}><option value="">Select active product</option>{products.filter((p) => p.status === "active").map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</select></label>
         <label>Quantity<input type="number" min="1" step="1" required value={line.quantity} onChange={(e) => setLines((current) => current.map((row, n) => n === i ? { ...row, quantity: e.target.value } : row))} /></label>
-        <label>Unit price (ZMW)<input inputMode="decimal" pattern="\\d{1,12}(\\.\\d{1,2})?" required value={line.unitPriceZmw} onChange={(e) => setLines((current) => current.map((row, n) => n === i ? { ...row, unitPriceZmw: e.target.value } : row))} /></label>
+        <label>Unit price (ZMW)<input inputMode="decimal" placeholder="e.g. 125.50" required value={line.unitPriceZmw} onChange={(e) => setLines((current) => current.map((row, n) => n === i ? { ...row, unitPriceZmw: e.target.value } : row))} /></label>
         {lines.length > 1 && <button type="button" className="button button-secondary" onClick={() => setLines((current) => current.filter((_, n) => n !== i))}>Remove line</button>}
       </div>)}
       <button type="button" className="button button-secondary" onClick={() => setLines((current) => [...current, blankLine()])}>Add product</button>
