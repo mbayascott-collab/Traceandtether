@@ -279,6 +279,10 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isMarketing = location === "/marketing";
   const isProfitability = location === "/profitability";
   const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : "Dashboard";
+  useEffect(() => {
+    document.querySelector(".app-main")?.scrollTo(0, 0);
+    window.scrollTo(0, 0);
+  }, [location]);
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
