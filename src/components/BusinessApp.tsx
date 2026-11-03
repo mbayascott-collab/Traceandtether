@@ -10,6 +10,8 @@ import {
   ChevronRight,
   CircleCheck,
   CircleOff,
+  ClipboardList,
+  Calculator,
   FolderOpen,
   FileText,
   Info,
@@ -22,6 +24,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Receipt,
   Search,
   ShieldCheck,
   Tags,
@@ -46,6 +49,7 @@ import {
   type ProductStatus,
 } from "../lib/api";
 import SupplierWorkspace from "./SupplierWorkspace";
+import ProcurementWorkspace from "./ProcurementWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -251,7 +255,11 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isSuppliers = location === "/suppliers";
   const isQuotes = location === "/supplier-quotes";
   const isComparison = location === "/supplier-comparisons";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : "Dashboard";
+  const isPurchaseOrders = location === "/purchase-orders";
+  const isShipments = location === "/shipments";
+  const isImportExpenses = location === "/import-expenses";
+  const isLandedCosts = location === "/landed-costs";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -403,6 +411,18 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/supplier-comparisons" aria-current={isComparison ? "page" : undefined}>
             <ArrowLeftRight aria-hidden="true" /><span>Compare offers</span>
+          </Link>
+          <Link href="/purchase-orders" aria-current={isPurchaseOrders ? "page" : undefined}>
+            <ClipboardList aria-hidden="true" /><span>Purchase orders</span>
+          </Link>
+          <Link href="/shipments" aria-current={isShipments ? "page" : undefined}>
+            <Truck aria-hidden="true" /><span>Shipments</span>
+          </Link>
+          <Link href="/import-expenses" aria-current={isImportExpenses ? "page" : undefined}>
+            <Receipt aria-hidden="true" /><span>Import expenses</span>
+          </Link>
+          <Link href="/landed-costs" aria-current={isLandedCosts ? "page" : undefined}>
+            <Calculator aria-hidden="true" /><span>Landed costs</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -762,6 +782,10 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isSuppliers && <SupplierWorkspace mode="suppliers" />}
           {isQuotes && <SupplierWorkspace mode="quotes" />}
           {isComparison && <SupplierWorkspace mode="comparison" />}
+          {isPurchaseOrders && <ProcurementWorkspace mode="orders" />}
+          {isShipments && <ProcurementWorkspace mode="shipments" />}
+          {isImportExpenses && <ProcurementWorkspace mode="expenses" />}
+          {isLandedCosts && <ProcurementWorkspace mode="landed" />}
         </div>
       </main>
 

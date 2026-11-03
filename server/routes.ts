@@ -8,6 +8,7 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { databaseErrorStatus } from "./database-errors";
+import { registerProcurementRoutes } from "./procurement-routes";
 import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
@@ -501,4 +502,6 @@ export function registerApiRoutes(app: import("express").Express) {
       throw error;
     }
   });
+
+  registerProcurementRoutes(app, requireOwner);
 }

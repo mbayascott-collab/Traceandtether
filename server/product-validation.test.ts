@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { productInputSchema, supplierInputSchema, supplierQuoteInputSchema } from "./product-validation";
+import {
+  importExpenseInputSchema, productInputSchema, purchaseOrderInputSchema, shipmentInputSchema,
+  shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
+} from "./product-validation";
 
 const validProduct = {
   sku: "mz-001",
@@ -96,4 +99,30 @@ test("validates quotation currency, amounts, quantities, and calendar dates", ()
   assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, unitPrice: "2.999" }).success, false);
   assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, minimumOrderQuantity: "0" }).success, false);
   assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, validUntil: "2026-02-30" }).success, false);
+});
+
+test("validates purchase order rates, lines, and duplicate products", () => {
+  const order = {
+    supplierId: 1, currency: "cny", exchangeRateToZmw: "3.25000000", expectedAt: null, notes: null,
+    lines: [{ productId: 2, quantityOrdered: 4, unitPrice: "12.50" }],
+  };
+  assert.equal(purchaseOrderInputSchema.parse(order).currency, "CNY");
+  assert.equal(purchaseOrderInputSchema.safeParse({ ...order, exchangeRateToZmw: "0" }).success, false);
+  assert.equal(purchaseOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
+  assert.equal(purchaseOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPrice: "-1" }] }).success, false);
+});
+
+test("validates shipment and expense inputs", () => {
+  const shipment = {
+    purchaseOrderId: 1, shipmentReference: null, carrier: null, trackingNumber: null, shippedAt: null,
+    expectedAt: "2026-12-01", notes: null, lines: [{ purchaseOrderLineId: 3, quantityShipped: 4 }],
+  };
+  assert.equal(shipmentInputSchema.safeParse(shipment).success, true);
+  assert.equal(shipmentReceiptSchema.safeParse({ lines: [{ shipmentLineId: 1, quantityReceived: -1 }] }).success, false);
+  const expense = {
+    purchaseOrderId: 1, category: "Freight", description: "Sea freight", amount: "120.00", currency: "USD",
+    exchangeRateToZmw: "26.50000000", basis: "value", incurredAt: "2026-11-03", reference: null, notes: null,
+  };
+  assert.equal(importExpenseInputSchema.safeParse(expense).success, true);
+  assert.equal(importExpenseInputSchema.safeParse({ ...expense, amount: "0.00" }).success, false);
 });

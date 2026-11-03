@@ -19,6 +19,9 @@ export const productStatus = pgEnum("product_status", ["draft", "active", "inact
 export const categoryStatus = pgEnum("category_status", ["active", "inactive"]);
 export const supplierStatus = pgEnum("supplier_status", ["active", "inactive"]);
 export const supplierQuoteStatus = pgEnum("supplier_quote_status", ["received", "accepted", "rejected"]);
+export const purchaseOrderStatus = pgEnum("purchase_order_status", ["ordered", "partially_received", "received", "cancelled"]);
+export const shipmentStatus = pgEnum("shipment_status", ["in_transit", "partially_received", "received", "cancelled"]);
+export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"]);
 export const appRole = pgEnum("app_role", [
   "owner",
   "manager",
@@ -166,5 +169,109 @@ export const supplierQuotes = pgTable(
     check("supplier_quotes_price_nonnegative", sql`${table.unitPrice} >= 0`),
     check("supplier_quotes_moq_positive", sql`${table.minimumOrderQuantity} > 0`),
     check("supplier_quotes_lead_time_nonnegative", sql`${table.leadTimeDays} >= 0`),
+  ],
+);
+
+export const purchaseOrders = pgTable(
+  "purchase_orders",
+  {
+    id: serial("id").primaryKey(),
+    orderNumber: varchar("order_number", { length: 40 }).notNull(),
+    supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "restrict" }),
+    status: purchaseOrderStatus("status").notNull().default("ordered"),
+    currency: varchar("currency", { length: 3 }).notNull(),
+    exchangeRateToZmw: numeric("exchange_rate_to_zmw", { precision: 18, scale: 8 }).notNull(),
+    orderedAt: date("ordered_at").notNull().defaultNow(),
+    expectedAt: date("expected_at"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("purchase_orders_number_unique").on(table.orderNumber),
+    index("purchase_orders_supplier_idx").on(table.supplierId),
+    index("purchase_orders_status_idx").on(table.status),
+    check("purchase_orders_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
+  ],
+);
+
+export const purchaseOrderLines = pgTable(
+  "purchase_order_lines",
+  {
+    id: serial("id").primaryKey(),
+    purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    quantityOrdered: integer("quantity_ordered").notNull(),
+    unitPrice: numeric("unit_price", { precision: 14, scale: 2 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("purchase_order_lines_product_unique").on(table.purchaseOrderId, table.productId),
+    index("purchase_order_lines_order_idx").on(table.purchaseOrderId),
+    check("purchase_order_lines_quantity_positive", sql`${table.quantityOrdered} > 0`),
+    check("purchase_order_lines_price_nonnegative", sql`${table.unitPrice} >= 0`),
+  ],
+);
+
+export const shipments = pgTable(
+  "shipments",
+  {
+    id: serial("id").primaryKey(),
+    purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    shipmentReference: varchar("shipment_reference", { length: 100 }),
+    carrier: varchar("carrier", { length: 120 }),
+    trackingNumber: varchar("tracking_number", { length: 120 }),
+    status: shipmentStatus("status").notNull().default("in_transit"),
+    shippedAt: date("shipped_at"),
+    expectedAt: date("expected_at"),
+    receivedAt: date("received_at"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("shipments_order_idx").on(table.purchaseOrderId),
+    uniqueIndex("shipments_reference_per_order_unique").on(table.purchaseOrderId, table.shipmentReference),
+  ],
+);
+
+export const shipmentLines = pgTable(
+  "shipment_lines",
+  {
+    id: serial("id").primaryKey(),
+    shipmentId: integer("shipment_id").notNull().references(() => shipments.id, { onDelete: "restrict" }),
+    purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id, { onDelete: "restrict" }),
+    quantityShipped: integer("quantity_shipped").notNull(),
+    quantityReceived: integer("quantity_received").notNull().default(0),
+  },
+  (table) => [
+    index("shipment_lines_shipment_idx").on(table.shipmentId),
+    index("shipment_lines_order_line_idx").on(table.purchaseOrderLineId),
+    check("shipment_lines_shipped_positive", sql`${table.quantityShipped} > 0`),
+    check("shipment_lines_received_range", sql`${table.quantityReceived} >= 0 and ${table.quantityReceived} <= ${table.quantityShipped}`),
+  ],
+);
+
+export const importExpenses = pgTable(
+  "import_expenses",
+  {
+    id: serial("id").primaryKey(),
+    purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    category: varchar("category", { length: 80 }).notNull(),
+    description: varchar("description", { length: 240 }).notNull(),
+    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull(),
+    exchangeRateToZmw: numeric("exchange_rate_to_zmw", { precision: 18, scale: 8 }).notNull(),
+    basis: allocationBasis("basis").notNull().default("value"),
+    incurredAt: date("incurred_at").notNull().defaultNow(),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("import_expenses_order_idx").on(table.purchaseOrderId),
+    check("import_expenses_amount_positive", sql`${table.amount} > 0`),
+    check("import_expenses_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
   ],
 );

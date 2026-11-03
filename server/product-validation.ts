@@ -118,6 +118,87 @@ export const supplierQuoteInputSchema = z
   })
   .strict();
 
+const validDate = z.preprocess(
+  (value) => value === "" || value === undefined ? null : value,
+  z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "Enter a real calendar date.").nullable(),
+);
+
+const positiveRate = z.string().trim().regex(/^\d{1,10}(?:\.\d{1,8})?$/, "Enter a positive exchange rate with up to eight decimals.")
+  .refine((value) => {
+    const [whole, fraction = ""] = value.split(".");
+    return BigInt(whole) * 100_000_000n + BigInt(fraction.padEnd(8, "0")) > 0n;
+  }, "Exchange rate must be greater than zero.");
+
+const nonnegativeAmount = z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/, "Enter a non-negative amount with up to two decimals.");
+
+const purchaseOrderLineSchema = z.object({
+  productId: positiveInteger,
+  quantityOrdered: positiveInteger,
+  unitPrice: nonnegativeAmount,
+}).strict();
+
+export const purchaseOrderInputSchema = z.object({
+  supplierId: positiveInteger,
+  currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+  exchangeRateToZmw: positiveRate,
+  expectedAt: validDate,
+  notes: nullableText(5_000),
+  lines: z.array(purchaseOrderLineSchema).min(1).max(100),
+}).strict().superRefine((order, context) => {
+  const productIds = order.lines.map((line) => line.productId);
+  if (new Set(productIds).size !== productIds.length) {
+    context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
+  }
+});
+
+export const purchaseOrderUpdateSchema = z.object({
+  status: z.enum(["ordered", "cancelled"]),
+  expectedAt: validDate,
+  notes: nullableText(5_000),
+}).strict();
+
+export const shipmentInputSchema = z.object({
+  purchaseOrderId: positiveInteger,
+  shipmentReference: nullableText(100),
+  carrier: nullableText(120),
+  trackingNumber: nullableText(120),
+  shippedAt: validDate,
+  expectedAt: validDate,
+  notes: nullableText(5_000),
+  lines: z.array(z.object({
+    purchaseOrderLineId: positiveInteger,
+    quantityShipped: positiveInteger,
+  }).strict()).min(1).max(100),
+}).strict().superRefine((shipment, context) => {
+  const lineIds = shipment.lines.map((line) => line.purchaseOrderLineId);
+  if (new Set(lineIds).size !== lineIds.length) {
+    context.addIssue({ code: "custom", path: ["lines"], message: "Each order line can appear only once per shipment." });
+  }
+});
+
+export const shipmentReceiptSchema = z.object({
+  lines: z.array(z.object({
+    shipmentLineId: positiveInteger,
+    quantityReceived: z.number().int().min(0).max(1_000_000),
+  }).strict()).min(1).max(100),
+}).strict();
+
+export const importExpenseInputSchema = z.object({
+  purchaseOrderId: positiveInteger,
+  category: z.string().trim().min(1).max(80),
+  description: z.string().trim().min(1).max(240),
+  amount: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/).refine((value) => toMinorUnits(value)! > 0n),
+  currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+  exchangeRateToZmw: positiveRate,
+  basis: z.enum(["value", "quantity"]),
+  incurredAt: validDate,
+  reference: nullableText(120),
+  notes: nullableText(5_000),
+}).strict();
+
 export type ProductInput = z.infer<typeof productInputSchema>;
 export type CategoryInput = z.infer<typeof categoryInputSchema>;
 export type SupplierInput = z.infer<typeof supplierInputSchema>;

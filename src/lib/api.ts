@@ -2,6 +2,35 @@ export type ProductStatus = "draft" | "active" | "inactive";
 export type CategoryStatus = "active" | "inactive";
 export type SupplierStatus = "active" | "inactive";
 export type SupplierQuoteStatus = "received" | "accepted" | "rejected";
+export type PurchaseOrderStatus = "ordered" | "partially_received" | "received" | "cancelled";
+export type ShipmentStatus = "in_transit" | "partially_received" | "received" | "cancelled";
+export type AllocationBasis = "value" | "quantity";
+
+export interface PurchaseOrderLine {
+  id: number; productId: number; productName: string; sku: string; quantityOrdered: number; unitPrice: string;
+}
+export interface PurchaseOrder {
+  id: number; orderNumber: string; supplierId: number; supplierName: string; status: PurchaseOrderStatus;
+  currency: string; exchangeRateToZmw: string; orderedAt: string; expectedAt: string | null; notes: string | null;
+  lines: PurchaseOrderLine[];
+}
+export interface ShipmentLine {
+  id: number; purchaseOrderLineId: number; productName: string; sku: string; quantityShipped: number;
+  quantityReceived: number; quantityOrdered: number;
+}
+export interface Shipment {
+  id: number; purchaseOrderId: number; orderNumber: string; supplierName: string; shipmentReference: string | null;
+  carrier: string | null; trackingNumber: string | null; status: ShipmentStatus; shippedAt: string | null;
+  expectedAt: string | null; lines: ShipmentLine[];
+}
+export interface ImportExpense {
+  id: number; purchaseOrderId: number; category: string; description: string; amount: string; currency: string;
+  exchangeRateToZmw: string; basis: AllocationBasis; incurredAt: string; reference: string | null;
+}
+export interface LandedCostOrder extends PurchaseOrder {
+  allocations: { expenseId: number; lineId: number; amountZmw: string }[];
+  lines: (PurchaseOrderLine & { allocatedExpensesZmw: string; purchaseUnitCostZmw: string; landedUnitCostZmw: string })[];
+}
 
 export interface CurrentUser {
   authorized: boolean;
@@ -238,6 +267,41 @@ export async function createSupplierQuote(input: SupplierQuoteInput): Promise<vo
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function fetchPurchaseOrders(): Promise<PurchaseOrder[]> {
+  return (await request<{ orders: PurchaseOrder[] }>("/api/purchase-orders")).orders;
+}
+export async function createPurchaseOrder(input: {
+  supplierId: number; currency: string; exchangeRateToZmw: string; expectedAt: string | null; notes: string | null;
+  lines: { productId: number; quantityOrdered: number; unitPrice: string }[];
+}): Promise<void> {
+  await request("/api/purchase-orders", { method: "POST", body: JSON.stringify(input) });
+}
+export async function fetchShipments(): Promise<Shipment[]> {
+  return (await request<{ shipments: Shipment[] }>("/api/shipments")).shipments;
+}
+export async function createShipment(input: {
+  purchaseOrderId: number; shipmentReference: string | null; carrier: string | null; trackingNumber: string | null;
+  shippedAt: string | null; expectedAt: string | null; notes: string | null;
+  lines: { purchaseOrderLineId: number; quantityShipped: number }[];
+}): Promise<void> {
+  await request("/api/shipments", { method: "POST", body: JSON.stringify(input) });
+}
+export async function receiveShipment(id: number, lines: { shipmentLineId: number; quantityReceived: number }[]): Promise<void> {
+  await request(`/api/shipments/${id}/receive`, { method: "PATCH", body: JSON.stringify({ lines }) });
+}
+export async function fetchImportExpenses(): Promise<ImportExpense[]> {
+  return (await request<{ expenses: ImportExpense[] }>("/api/import-expenses")).expenses;
+}
+export async function createImportExpense(input: {
+  purchaseOrderId: number; category: string; description: string; amount: string; currency: string;
+  exchangeRateToZmw: string; basis: AllocationBasis; incurredAt: string | null; reference: string | null; notes: string | null;
+}): Promise<void> {
+  await request("/api/import-expenses", { method: "POST", body: JSON.stringify(input) });
+}
+export async function fetchLandedCosts(): Promise<LandedCostOrder[]> {
+  return (await request<{ orders: LandedCostOrder[] }>("/api/landed-costs")).orders;
 }
 
 export async function updateSupplierQuote(id: number, input: SupplierQuoteInput): Promise<void> {

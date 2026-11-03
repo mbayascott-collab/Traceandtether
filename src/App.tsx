@@ -315,6 +315,10 @@ function ClerkRoutes() {
         <Route path="/suppliers" component={ProtectedWorkspace} />
         <Route path="/supplier-quotes" component={ProtectedWorkspace} />
         <Route path="/supplier-comparisons" component={ProtectedWorkspace} />
+        <Route path="/purchase-orders" component={ProtectedWorkspace} />
+        <Route path="/shipments" component={ProtectedWorkspace} />
+        <Route path="/import-expenses" component={ProtectedWorkspace} />
+        <Route path="/landed-costs" component={ProtectedWorkspace} />
         <Route component={() => <Redirect to="/" />} />
       </Switch>
     </ClerkProvider>

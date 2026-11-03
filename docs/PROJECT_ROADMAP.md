@@ -26,7 +26,7 @@
 ## Planned phases
 
 1. **Phase 1 — Foundation and product management:** implementation is in place; the owner email is configured. Signed-in CRUD still needs manual verification after the owner creates and verifies the Clerk account.
-2. **Phase 2 — Suppliers, purchasing, and imports:** supplier profiles, product quotations, and supplier comparisons are implemented. Purchase orders, shipment records, import costs, partial receipts, and landed-cost allocations remain.
+2. **Phase 2 — Suppliers, purchasing, and imports:** supplier profiles, product quotations, supplier comparisons, purchase orders, shipment records and receipts, import expenses, and landed-cost allocations are implemented. Inventory posting remains outside this phase.
 3. **Phase 3 — Inventory:** stock locations, traceable movements, reservations, receipts, adjustments, valuation, and reorder alerts.
 4. **Phase 4 — Sales and online shop:** central orders, sales channels, checkout, payments, delivery, and customer-facing catalogue.
 5. **Phase 5 — Accounting:** chart of accounts, double-entry journals, expenses, payables/receivables, reconciliation, and financial reports.

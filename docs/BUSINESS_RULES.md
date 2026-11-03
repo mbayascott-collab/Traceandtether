@@ -4,7 +4,8 @@
 
 - Purchase prices are recorded in the selected supplier currency.
 - Selling prices and estimated landed costs are recorded in ZMW.
-- The application does not convert purchase currency to ZMW; the user enters or later records the ZMW landed-cost estimate separately.
+- Product purchase prices and supplier quotations remain in their recorded currencies. Purchase orders and import expenses use an explicit, user-entered ZMW exchange rate for landed-cost calculations; rates are never inferred.
+- Landed-cost allocations are calculated per purchase-order line using each expense's recorded value or quantity basis. They do not overwrite the product's separately maintained estimated landed cost.
 - Prices are optional for draft products and cannot be negative.
 - An active product must have a positive selling price.
 - Estimated gross profit per unit = selling price in ZMW minus estimated landed cost per unit in ZMW.
@@ -25,7 +26,7 @@
 ## Scope boundaries
 
 - This milestone does not reserve or decrement inventory.
-- It does not create purchase orders, shipments, customer orders, payments, refunds, tax calculations, or accounting entries.
+- It does not create customer orders, payments, refunds, tax calculations, accounting entries, or inventory balances/stock movements.
 - It does not estimate tax/customs rates or automatically select suppliers.
 - Supplier records are internal sourcing records, not seller accounts.
 - Quotations retain the supplier's stated currency. Comparisons do not convert currencies or infer freight, tax, or landed costs.
