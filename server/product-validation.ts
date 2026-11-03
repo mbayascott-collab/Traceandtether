@@ -33,21 +33,6 @@ export const productInputSchema = z
     sku: z.string().trim().min(1).max(60).transform((value) => value.toUpperCase()),
     name: z.string().trim().min(1).max(160),
     description: nullableText(5_000),
-    imageUrls: z.array(z.string().trim().url().max(2_048).refine((value) => {
-      try {
-        const url = new URL(value);
-        return url.protocol === "https:" &&
-          !url.username && !url.password &&
-          url.hostname.includes(".") && !url.hostname.includes(":") &&
-          !/(^localhost$|\.localhost$|\.local$|\.internal$)$/i.test(url.hostname) &&
-          !/^(0\.|127\.|10\.|192\.168\.|169\.254\.)/.test(url.hostname) &&
-          !/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(url.hostname) &&
-          !/^192\.0\.0\./.test(url.hostname) &&
-          !/^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname);
-      } catch {
-        return false;
-      }
-    }, "Use a public HTTPS image URL.")).max(5).default([]),
     brand: nullableText(100),
     categoryId: nullableCategoryId,
     supplierName: nullableText(160),

@@ -39,16 +39,6 @@ test("rejects negative monetary values", () => {
   assert.equal(result.success, false);
 });
 
-test("accepts up to five public HTTPS product images and rejects unsafe links", () => {
-  const urls = Array.from({ length: 5 }, (_, index) => `https://images.example.com/${index}.jpg`);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: urls }).success, true);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: [...urls, "https://images.example.com/6.jpg"] }).success, false);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: ["http://images.example.com/photo.jpg"] }).success, false);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: ["https://localhost/photo.jpg"] }).success, false);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: ["https://192.168.1.2/photo.jpg"] }).success, false);
-  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrls: ["https://user:pass@images.example.com/photo.jpg"] }).success, false);
-});
-
 test("requires an active product to have a positive ZMW selling price", () => {
   const result = productInputSchema.safeParse({
     ...validProduct,

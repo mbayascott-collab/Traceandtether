@@ -28,7 +28,6 @@
 - Stock-on-hand is derived from append-only receipt, adjustment, and reservation-fulfillment movements. Reservations reduce available stock but do not change on-hand stock until fulfilled.
 - Sales orders snapshot explicit ZMW unit prices. Confirming an order reserves available stock; fulfillment records the stock-out movement. This does not create payments, refunds, tax calculations, accounting entries, or multi-location stock tracking.
 - Public shop order requests are saved as draft sales orders after server-side price and stock checks. They do not reserve stock or collect payment; an owner must confirm stock, delivery, and payment before treating the order as accepted. Public catalog responses include only active, priced, available products and customer-facing fields.
-- Products may have up to five externally hosted HTTPS image URLs. The app stores the links, not image files; image hosts must remain available for the shop to display the pictures.
 - Use manual order requests until Shopify is affordable; Shopify can be integrated later as the storefront and checkout system without exposing the private supplier and cost records.
 - It does not estimate tax/customs rates or automatically select suppliers.
 - Supplier records are internal sourcing records, not seller accounts.

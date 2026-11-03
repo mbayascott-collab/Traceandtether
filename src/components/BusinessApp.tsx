@@ -15,7 +15,6 @@ import {
   FolderOpen,
   FileText,
   Info,
-  Image as ImageIcon,
   LayoutDashboard,
   LockKeyhole,
   LogOut,
@@ -65,7 +64,6 @@ type ProductDraft = {
   sku: string;
   name: string;
   description: string;
-  imageUrls: string[];
   brand: string;
   categoryId: string;
   supplierName: string;
@@ -129,7 +127,6 @@ function emptyProductDraft(): ProductDraft {
     sku: "",
     name: "",
     description: "",
-    imageUrls: [],
     brand: "",
     categoryId: "",
     supplierName: "",
@@ -149,7 +146,6 @@ function productToDraft(product: Product): ProductDraft {
     sku: product.sku,
     name: product.name,
     description: product.description ?? "",
-    imageUrls: product.imageUrls ?? [],
     brand: product.brand ?? "",
     categoryId: product.categoryId == null ? "" : String(product.categoryId),
     supplierName: product.supplierName ?? "",
@@ -169,7 +165,6 @@ function toProductInput(draft: ProductDraft): ProductInput {
     sku: draft.sku.trim(),
     name: draft.name.trim(),
     description: draft.description.trim() || null,
-    imageUrls: draft.imageUrls.map((url) => url.trim()).filter(Boolean),
     brand: draft.brand.trim() || null,
     categoryId: draft.categoryId ? Number(draft.categoryId) : null,
     supplierName: draft.supplierName.trim() || null,
@@ -191,18 +186,6 @@ function productValidation(draft: ProductDraft): string {
     return "Enter a valid purchase currency code, such as USD or CNY.";
   }
   if (!draft.unit.trim()) return "Enter the unit used to describe this product.";
-  const imageUrls = draft.imageUrls.map((url) => url.trim()).filter(Boolean);
-  if (imageUrls.length > 5) return "Add no more than five product images.";
-  for (const imageUrl of imageUrls) {
-    try {
-      const parsed = new URL(imageUrl);
-      if (parsed.protocol !== "https:" || /(^localhost$|\.localhost$|\.local$|\.internal$)$/i.test(parsed.hostname)) {
-        return "Product image links must use a public HTTPS address.";
-      }
-    } catch {
-      return "Enter a valid HTTPS image URL.";
-    }
-  }
   if (!/^\d+$/.test(draft.reorderThreshold) || Number(draft.reorderThreshold) < 0) {
     return "Reorder threshold must be a whole number of zero or more.";
   }
@@ -911,10 +894,6 @@ function ProductModal({
     if (validation) setValidation("");
   }
 
-  function updateImageUrl(index: number, value: string) {
-    update("imageUrls", draft.imageUrls.map((url, current) => current === index ? value : url));
-  }
-
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title">
@@ -954,32 +933,6 @@ function ProductModal({
               <div className="field field-full">
                 <label htmlFor="product-description">Description</label>
                 <textarea id="product-description" value={draft.description} onChange={(event) => update("description", event.target.value)} maxLength={2000} placeholder="A short description for your own reference" />
-              </div>
-              <div className="form-section-label field-full"><ImageIcon aria-hidden="true" /> Product images</div>
-              <div className="field field-full">
-                <label>Image URLs <span>Up to 5 · public HTTPS links</span></label>
-                <div className="product-image-fields">
-                  {draft.imageUrls.map((url, index) => (
-                    <div className="product-image-field" key={index}>
-                      <input
-                        type="url"
-                        value={url}
-                        maxLength={2048}
-                        onChange={(event) => updateImageUrl(index, event.target.value)}
-                        placeholder="https://example.com/product-photo.jpg"
-                        aria-label={`Product image URL ${index + 1}`}
-                      />
-                      {url.trim() && <img src={url} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} />}
-                      <button type="button" className="icon-button" aria-label={`Remove image URL ${index + 1}`} onClick={() => update("imageUrls", draft.imageUrls.filter((_, current) => current !== index))}><X aria-hidden="true" /></button>
-                    </div>
-                  ))}
-                  {draft.imageUrls.length < 5 && (
-                    <button type="button" className="button button-secondary button-small" onClick={() => update("imageUrls", [...draft.imageUrls, ""])}>
-                      <Plus aria-hidden="true" /> Add image link
-                    </button>
-                  )}
-                </div>
-                <small>Paste a direct link to each product picture. Images are not uploaded to this app.</small>
               </div>
 
               <div className="form-section-label field-full"><Truck aria-hidden="true" /> Supplier & sourcing</div>
