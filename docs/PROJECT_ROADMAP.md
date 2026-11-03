@@ -31,7 +31,7 @@
 4. **Phase 4 — Sales and online shop:** owner-managed customer and sales orders are implemented. A public, stock-aware catalogue and manual order-request checkout are implemented; Shopify integration is deferred until funding is available. Online payments, shipping-rate calculation, and automated delivery remain deferred.
 5. **Phase 5 — Accounting foundation:** a ZMW chart of accounts, balanced source-linked journals, and automated posting for import expenses, stock receipts, inventory adjustments, and fulfilled sales are implemented. Opening balances, payments, tax, bank reconciliation, and accountant-reviewed reports remain.
 6. **Phase 6 — Marketing and CRM:** campaign management, content planning, marketing expense posting, manual sales-order attribution, customer purchase segments, and campaign reports are implemented. Social-platform attribution, customer groups, and promotions remain.
-7. **Phase 7 — Business intelligence:** consolidated dashboards, profitability, replenishment recommendations, cash-flow forecasts, and reports.
+7. **Phase 7 — Business intelligence:** a sales/stock dashboard and product profitability reports are implemented. Replenishment recommendations, cash-flow forecasts, and additional reports remain.
 8. **Phase 8 — Production readiness:** broader security review, recovery procedures, performance, coverage, documentation, and deployment validation.
 
 Features move to complete only after their stored-data behavior, validation, authorization, and relevant tests have been verified.

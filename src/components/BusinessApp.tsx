@@ -57,6 +57,7 @@ import InventoryWorkspace from "./InventoryWorkspace";
 import SalesWorkspace from "./SalesWorkspace";
 import AccountingWorkspace from "./AccountingWorkspace";
 import MarketingWorkspace from "./MarketingWorkspace";
+import ProfitabilityWorkspace, { BusinessDashboard } from "./BusinessReports";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -274,7 +275,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isSalesOrders = location === "/sales-orders";
   const isAccounting = location === "/accounting";
   const isMarketing = location === "/marketing";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : "Dashboard";
+  const isProfitability = location === "/profitability";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isSalesOrders ? "Sales orders" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -463,6 +465,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           <Link href="/marketing" aria-current={isMarketing ? "page" : undefined}>
             <Megaphone aria-hidden="true" /><span>Marketing</span>
           </Link>
+          <Link href="/profitability" aria-current={isProfitability ? "page" : undefined}>
+            <BadgeDollarSign aria-hidden="true" /><span>Profitability</span>
+          </Link>
         </nav>
         <div className="sidebar-spacer" />
         <div className="workspace-note">
@@ -507,8 +512,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
               <section className="page-heading">
                 <div>
                   <p className="eyebrow">Business overview · Zambia</p>
-                  <h1>Your catalogue, in view.</h1>
-                  <p>Product sourcing references and ZMW price decisions, together in one place.</p>
+                  <h1>Business dashboard</h1>
+                  <p>See sales, stock, orders, and product results in one place.</p>
                 </div>
                 <button className="button button-primary" onClick={() => setLocation("/products")}>
                   <PackagePlus aria-hidden="true" /> Manage products
@@ -516,15 +521,16 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
               </section>
               <section className="dashboard-intro" aria-label="Workspace introduction">
                 <div>
-                  <p className="eyebrow">Product management · Phase 1</p>
-                  <h2>Make the next buying decision with the full picture.</h2>
-                  <p>Keep supplier references, source currency and estimated ZMW pricing connected at product level.</p>
+                  <p className="eyebrow">Business overview</p>
+                  <h2>Track what is selling and what needs attention.</h2>
+                  <p>Figures come from saved orders, stock movements, and accounting entries.</p>
                 </div>
                 <div className="intro-stamp" aria-hidden="true"><span>Source<br />to shelf</span></div>
               </section>
+              <BusinessDashboard />
               <div className="section-caption">
-                <h2>Workspace snapshot</h2>
-                <span>Numbers reflect records returned by your catalogue.</span>
+                <h2>Catalogue snapshot</h2>
+                <span>Product records and category details.</span>
               </div>
               <section className="metric-grid" aria-label="Workspace totals">
                 <article className="metric-card">
@@ -595,9 +601,13 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
                       <span className="quick-link-icon"><FolderOpen aria-hidden="true" /></span>
                       <span><strong>Organise categories</strong><small>Keep the catalogue easy to scan</small></span>
                     </Link>
+                    <Link className="quick-link" href="/profitability">
+                      <span className="quick-link-icon"><BadgeDollarSign aria-hidden="true" /></span>
+                      <span><strong>Review profitability</strong><small>Compare recorded and estimated results</small></span>
+                    </Link>
                     <div className="notice-strip">
                       <ShieldCheck aria-hidden="true" />
-                      <span>Gross profit and margin are estimates only. No stock, sales or accounting figures are shown here.</span>
+                      <span>Product estimates differ from recorded sales costs. Open the profitability report to compare them.</span>
                     </div>
                   </div>
                 </section>
@@ -833,6 +843,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isSalesOrders && <SalesWorkspace mode="orders" />}
           {isAccounting && <AccountingWorkspace />}
           {isMarketing && <MarketingWorkspace />}
+          {isProfitability && <ProfitabilityWorkspace />}
         </div>
       </main>
 

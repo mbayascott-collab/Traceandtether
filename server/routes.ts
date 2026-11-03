@@ -13,6 +13,7 @@ import { registerInventoryRoutes } from "./inventory-routes";
 import { registerSalesRoutes } from "./sales-routes";
 import { registerAccountingRoutes } from "./accounting-routes";
 import { registerMarketingRoutes } from "./marketing-routes";
+import { registerBusinessReportRoutes } from "./business-report-routes";
 import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
@@ -512,4 +513,5 @@ export function registerApiRoutes(app: import("express").Express) {
   registerSalesRoutes(app, requireOwner);
   registerAccountingRoutes(app, requireOwner);
   registerMarketingRoutes(app, requireOwner);
+  registerBusinessReportRoutes(app, requireOwner);
 }
