@@ -37,7 +37,8 @@ export interface InventoryReservation { id: number; productId: number; productNa
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
 export interface Customer { id: number; name: string; email: string | null; phone: string | null; address: string | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
-export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "fulfilled" | "cancelled"; deliveryAddress: string | null; notes: string | null; totalZmw: string; lines: SalesOrderLine[]; }
+export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "fulfilled" | "cancelled"; deliveryAddress: string | null; notes: string | null; totalZmw: string; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
+export interface MarketingCampaignOption { id: number; name: string; status: string; }
 
 export interface CurrentUser {
   authorized: boolean;
@@ -345,6 +346,12 @@ export async function saveCustomer(input: Omit<Customer, "id">, id?: number): Pr
 }
 export async function fetchSalesOrders(): Promise<SalesOrder[]> {
   return (await request<{ orders: SalesOrder[] }>("/api/sales-orders")).orders;
+}
+export async function fetchMarketingCampaigns(): Promise<MarketingCampaignOption[]> {
+  return (await request<{ campaigns: MarketingCampaignOption[] }>("/api/marketing/campaigns")).campaigns;
+}
+export async function setSalesOrderAttribution(id: number, campaignId: number | null): Promise<void> {
+  await request(`/api/sales-orders/${id}/attribution`, { method: "PATCH", body: JSON.stringify({ campaignId }) });
 }
 export async function createSalesOrder(input: { customerId: number; deliveryAddress: string | null; notes: string | null; lines: { productId: number; quantity: number; unitPriceZmw: string }[] }): Promise<void> {
   await request("/api/sales-orders", { method: "POST", body: JSON.stringify(input) });

@@ -5,7 +5,7 @@ import {
   customerInputSchema, publicShopOrderInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customers, inventoryMovements, inventoryReservations, products, salesOrderLines, salesOrders,
+  customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
@@ -108,17 +108,38 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines] = await Promise.all([
+    const [orders, lines, attributions] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
         .from(salesOrderLines).innerJoin(products, eq(salesOrderLines.productId, products.id)),
+      db.select({ salesOrderId: marketingAttributions.salesOrderId, campaignId: marketingAttributions.campaignId, campaignName: marketingCampaigns.name })
+        .from(marketingAttributions).innerJoin(marketingCampaigns, eq(marketingAttributions.campaignId, marketingCampaigns.id)),
     ]);
+    const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
     res.json({ orders: orders.map(({ order, customerName }) => {
       const items = lines.filter(({ line }) => line.salesOrderId === order.id)
         .map(({ line, productName, sku }) => ({ ...line, productName, sku, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)) }));
-      return { ...order, customerName, lines: items, totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
+      const attribution = attributionByOrder.get(order.id);
+      return { ...order, customerName, campaignId: attribution?.campaignId ?? null, campaignName: attribution?.campaignName ?? null, lines: items, totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
     }) });
+  });
+  app.patch("/api/sales-orders/:id/attribution", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid sales order.");
+    const campaignId = req.body?.campaignId;
+    if (campaignId !== null && (!Number.isSafeInteger(campaignId) || campaignId <= 0)) return bad(res, "Choose a valid campaign.");
+    const [order] = await db.select({ id: salesOrders.id }).from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
+    if (!order) return res.status(404).json({ error: "Sales order not found." });
+    if (campaignId === null) {
+      await db.delete(marketingAttributions).where(eq(marketingAttributions.salesOrderId, id));
+      return res.json({ campaignId: null });
+    }
+    const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId)).limit(1);
+    if (!campaign) return bad(res, "Choose an existing campaign.");
+    await db.insert(marketingAttributions).values({ salesOrderId: id, campaignId })
+      .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, attributedAt: new Date() } });
+    res.json({ campaignId });
   });
   app.post("/api/sales-orders", owner, async (req, res) => {
     const parsed = salesOrderInputSchema.safeParse(req.body);

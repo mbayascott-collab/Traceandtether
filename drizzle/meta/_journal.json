@@ -64,6 +64,13 @@
       "when": 1793740727148,
       "tag": "0008_deep_tenebrous",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793741619457,
+      "tag": "0009_aspiring_grandmaster",
+      "breakpoints": true
     }
   ]
 }

@@ -35,3 +35,4 @@
 - Supplier records are internal sourcing records, not seller accounts.
 - Quotations retain the supplier's stated currency. Comparisons do not convert currencies or infer freight, tax, or landed costs.
 - Marketing expenses retain the entered currency and explicit ZMW exchange rate. Unpaid costs post to marketing expense and accounts payable; costs marked paid credit cash and bank. Campaign budgets are planning limits, not accounting balances.
+- Campaign attribution is explicitly assigned by the owner to a sales order; no touchpoint is inferred. Campaign sales reports include fulfilled orders by order date, while customer groups use lifetime fulfilled-order counts.

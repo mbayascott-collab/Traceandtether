@@ -508,3 +508,17 @@ export const marketingExpenses = pgTable(
     check("marketing_expenses_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
   ],
 );
+
+export const marketingAttributions = pgTable(
+  "marketing_attributions",
+  {
+    id: serial("id").primaryKey(),
+    salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "cascade" }),
+    campaignId: integer("campaign_id").notNull().references(() => marketingCampaigns.id, { onDelete: "restrict" }),
+    attributedAt: timestamp("attributed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("marketing_attributions_order_unique").on(table.salesOrderId),
+    index("marketing_attributions_campaign_idx").on(table.campaignId),
+  ],
+);

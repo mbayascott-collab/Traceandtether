@@ -4,6 +4,12 @@ import { Pencil, Plus, RefreshCw, X } from "lucide-react";
 type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
+type MarketingReport = {
+  period: { from: string | null; to: string | null };
+  totals: { spendZmw: string; attributedRevenueZmw: string; attributedOrders: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
+  campaigns: { id: number; name: string; status: string; orderCount: number; attributedRevenueZmw: string; spendZmw: string; revenueToSpend: string | null }[];
+  segments: { key: string; name: string; customerCount: number; fulfilledOrders: number; salesZmw: string; customers: { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; salesZmw: string }[] }[];
+};
 const campaignEmpty = { name: "", objective: "", channel: "", status: "draft", startsOn: "", endsOn: "", budgetZmw: "", notes: "" };
 const contentEmpty = { campaignId: "", title: "", platform: "", contentType: "Post", status: "planned", scheduledAt: "", caption: "", publishedUrl: "", notes: "" };
 const expenseEmpty = { campaignId: "", category: "Advertising", description: "", amount: "", currency: "ZMW", exchangeRateToZmw: "1", expenseDate: new Date().toISOString().slice(0, 10), paid: false, reference: "", notes: "" };
@@ -52,6 +58,11 @@ export default function MarketingWorkspace() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [report, setReport] = useState<MarketingReport | null>(null);
+  const [reportFrom, setReportFrom] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
+  const [reportTo, setReportTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [reportLoading, setReportLoading] = useState(false);
+  const [selectedSegment, setSelectedSegment] = useState("repeat");
 
   async function load() {
     setLoading(true);
@@ -64,6 +75,14 @@ export default function MarketingWorkspace() {
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
+  async function runReport() {
+    setError(""); setReportLoading(true);
+    try {
+      const query = new URLSearchParams({ from: reportFrom, to: reportTo });
+      setReport(await request(`/api/marketing/reports?${query.toString()}`));
+    } catch (reason) { setError(displayError(reason)); }
+    finally { setReportLoading(false); }
+  }
 
   async function submitCampaign(event: FormEvent) {
     event.preventDefault(); setError(""); setMessage("");
@@ -153,6 +172,31 @@ export default function MarketingWorkspace() {
           </section>
         </div>
       )}
+      <section className="panel marketing-report">
+        <div className="panel-heading"><div><h2>Marketing reports</h2><span>Campaign sales include fulfilled orders linked to a campaign. Customer groups use lifetime fulfilled orders.</span></div></div>
+        <div className="marketing-report-controls">
+          <label>From<input type="date" value={reportFrom} onChange={(e) => setReportFrom(e.target.value)} /></label>
+          <label>To<input type="date" value={reportTo} onChange={(e) => setReportTo(e.target.value)} /></label>
+          <button className="button button-primary button-small" disabled={reportLoading} onClick={() => void runReport()}>{reportLoading ? "Loading…" : "Run report"}</button>
+        </div>
+        {report && <>
+          <div className="marketing-report-cards">
+            <div><span>Marketing spend</span><strong>{money(report.totals.spendZmw)}</strong></div>
+            <div><span>Attributed sales</span><strong>{money(report.totals.attributedRevenueZmw)}</strong></div>
+            <div><span>Attributed orders</span><strong>{report.totals.attributedOrders}</strong></div>
+            <div><span>Sales per ZMW spent</span><strong>{report.totals.revenueToSpend ?? "—"}</strong></div>
+          </div>
+          <div className="marketing-report-grid">
+            <div className="table-wrap"><table><thead><tr><th>Campaign</th><th>Orders</th><th>Sales</th><th>Spend</th><th>Sales / spend</th></tr></thead><tbody>{report.campaigns.map((c) => <tr key={c.id}><td>{c.name} · {c.status}</td><td>{c.orderCount}</td><td>{money(c.attributedRevenueZmw)}</td><td>{money(c.spendZmw)}</td><td>{c.revenueToSpend ?? "—"}</td></tr>)}{report.campaigns.length === 0 && <tr><td colSpan={5}>No campaigns in the report yet.</td></tr>}</tbody></table></div>
+            <div className="table-wrap"><table><thead><tr><th>Customer group</th><th>Customers</th><th>Orders</th><th>Lifetime sales</th></tr></thead><tbody>{report.segments.map((segment) => <tr key={segment.key}><td>{segment.name}</td><td>{segment.customerCount}</td><td>{segment.fulfilledOrders}</td><td>{money(segment.salesZmw)}</td></tr>)}</tbody></table></div>
+          </div>
+          <div className="marketing-segment-list">
+            <label>Show customer group<select value={selectedSegment} onChange={(e) => setSelectedSegment(e.target.value)}>{report.segments.map((segment) => <option key={segment.key} value={segment.key}>{segment.name} ({segment.customerCount})</option>)}</select></label>
+            <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th></tr></thead><tbody>{(report.segments.find((segment) => segment.key === selectedSegment)?.customers ?? []).map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.salesZmw)}</td></tr>)}</tbody></table></div>
+          </div>
+          <p className="marketing-report-note">Unattributed fulfilled sales: {money(report.totals.unattributedRevenueZmw)} across {report.totals.unattributedOrders} orders. Link orders to a campaign on the Sales orders page to include them in campaign results.</p>
+        </>}
+      </section>
     </>
   );
 }
