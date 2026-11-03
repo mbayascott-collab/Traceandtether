@@ -2,7 +2,7 @@ import { and, asc, desc, eq, gt, inArray, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import {
-  inventoryAdjustmentInputSchema, inventoryReservationInputSchema,
+  inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
   importExpenses, inventoryMovements, inventoryReservations, products, purchaseOrderLines, purchaseOrders,
@@ -225,6 +225,35 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
           });
         }
       }
+      return { movement };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.status(201).json({ movement: result.movement });
+  });
+
+  app.post("/api/inventory/opening-stock", owner, async (req, res) => {
+    const parsed = openingStockInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the opening stock details.");
+    const result = await db.transaction(async (tx) => {
+      const [product] = await tx.select({ id: products.id, name: products.name })
+        .from(products).where(eq(products.id, parsed.data.productId)).for("update").limit(1);
+      if (!product) return { error: "Product not found.", status: 404 };
+      const [existing] = await tx.select({ id: inventoryMovements.id }).from(inventoryMovements)
+        .where(and(eq(inventoryMovements.productId, product.id), eq(inventoryMovements.kind, "opening_stock"))).limit(1);
+      if (existing) return { error: "Opening stock was already recorded for this product. Use a stock adjustment for later changes.", status: 409 };
+      const totalValue = cents(parsed.data.unitCostZmw) * BigInt(parsed.data.quantity);
+      const movement = (await tx.insert(inventoryMovements).values({
+        productId: product.id, kind: "opening_stock", quantityDelta: parsed.data.quantity,
+        reason: "Opening stock recorded", reference: parsed.data.reference, sourceKey: `opening-stock:${product.id}`,
+      }).returning())[0]!;
+      await postJournal(tx, {
+        sourceKey: `opening-stock:${product.id}`, sourceType: "opening_stock", sourceId: movement.id,
+        memo: `Opening stock for ${product.name}`,
+        lines: [
+          { accountKey: "inventory", productId: product.id, debitZmw: formatCents(totalValue), description: "Existing stock opening value" },
+          { accountKey: "owner_equity", creditZmw: formatCents(totalValue), description: "Opening inventory balance" },
+        ],
+      });
       return { movement };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });

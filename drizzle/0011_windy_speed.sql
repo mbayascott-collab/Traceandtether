@@ -1,0 +1,1 @@
+ALTER TYPE "public"."inventory_movement_kind" ADD VALUE 'opening_stock';

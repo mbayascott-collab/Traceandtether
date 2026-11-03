@@ -342,6 +342,9 @@ export async function fulfillReservation(id: number): Promise<void> {
 export async function createInventoryAdjustment(input: { productId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
   await request("/api/inventory/adjustments", { method: "POST", body: JSON.stringify(input) });
 }
+export async function createOpeningStock(input: { productId: number; quantity: number; unitCostZmw: string; reference: string | null }): Promise<void> {
+  await request("/api/inventory/opening-stock", { method: "POST", body: JSON.stringify(input) });
+}
 export async function fetchCustomers(): Promise<Customer[]> {
   return (await request<{ customers: Customer[] }>("/api/customers")).customers;
 }

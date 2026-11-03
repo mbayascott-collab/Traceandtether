@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
@@ -144,6 +144,15 @@ test("validates reservation quantities and non-zero reasoned stock adjustments",
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: -2, reference: null, reason: "Cycle count correction" }).success, true);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 0, reference: null, reason: "No change" }).success, false);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 2, reference: null, reason: " " }).success, false);
+});
+
+test("validates opening stock quantity and positive ZMW average cost", () => {
+  const opening = { productId: 1, quantity: 4, unitCostZmw: "25.50", reference: "First count" };
+  assert.equal(openingStockInputSchema.safeParse(opening).success, true);
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, quantity: 0 }).success, false);
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "0" }).success, false);
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "-1" }).success, false);
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, quantity: 1_000_000, unitCostZmw: "9999999999.99" }).success, false);
 });
 
 test("validates customer contacts and ZMW sales order lines", () => {

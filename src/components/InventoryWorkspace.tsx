@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
-  createInventoryAdjustment, createReservation, fetchInventory, fetchInventoryMovements,
+  createInventoryAdjustment, createOpeningStock, createReservation, fetchInventory, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
   releaseReservation, type InventoryItem, type InventoryMovement, type InventoryReceipt,
   type InventoryReservation,
@@ -63,7 +63,20 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Change quantity<input name="quantityDelta" type="number" required placeholder="Positive to add; negative to remove" /></label>
         <label>Reference<input name="reference" /></label><label>Reason<input name="reason" required maxLength={500} /></label>
         <button className="button button-primary">Save adjustment</button>
-      </form><MovementTable movements={movements.filter((m) => m.kind === "adjustment")} />
+      </form>
+      <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createOpeningStock({
+        productId: Number(d.get("productId")), quantity: Number(d.get("quantity")),
+        unitCostZmw: String(d.get("unitCostZmw")), reference: String(d.get("reference") || "") || null,
+      }))}>
+        <h2>Add stock you already have</h2>
+        <p className="report-footnote field-full">Enter the extra quantity and its average landed cost per unit in ZMW. The value is recorded as opening stock, not sales income. Use this once per product; later changes belong in stock adjustments.</p>
+        <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku} · currently {p.onHand}</option>)}</select></label>
+        <label>Quantity to add<input name="quantity" type="number" min="1" max="1000000" step="1" required /></label>
+        <label>Average cost per unit (ZMW)<input name="unitCostZmw" type="number" min="0.01" step="0.01" required /></label>
+        <label>Reference<input name="reference" maxLength={120} placeholder="Opening count or source note" /></label>
+        <button className="button button-primary">Add opening stock</button>
+      </form>
+      <MovementTable movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock")} />
     </>}
   </section>;
 }

@@ -213,6 +213,18 @@ export const inventoryAdjustmentInputSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 }).strict();
 
+export const openingStockInputSchema = z.object({
+  productId: positiveInteger,
+  quantity: positiveInteger,
+  unitCostZmw: z.string().trim().regex(/^\d{1,10}(?:\.\d{1,2})?$/, "Enter a unit cost in ZMW with up to two decimals.")
+    .refine((value) => toMinorUnits(value)! > 0n, "Unit cost must be greater than ZMW 0.00."),
+  reference: nullableText(120),
+}).strict().superRefine((input, context) => {
+  if (toMinorUnits(input.unitCostZmw)! * BigInt(input.quantity) > 99_999_999_999_999n) {
+    context.addIssue({ code: "custom", path: ["unitCostZmw"], message: "Total opening value is too large." });
+  }
+});
+
 export const customerInputSchema = z.object({
   name: z.string().trim().min(1).max(160),
   email: z.preprocess((value) => value === "" || value === undefined ? null : value,
