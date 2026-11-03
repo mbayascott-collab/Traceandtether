@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { productInputSchema } from "./product-validation";
+import { productInputSchema, supplierInputSchema, supplierQuoteInputSchema } from "./product-validation";
 
 const validProduct = {
   sku: "mz-001",
@@ -54,4 +54,46 @@ test("rejects unsupported currency code shapes and negative reorder points", () 
     productInputSchema.safeParse({ ...validProduct, reorderThreshold: -1 }).success,
     false,
   );
+});
+
+test("validates supplier contacts, URLs, and non-negative lead times", () => {
+  const supplier = {
+    name: "  Pearl River Supply  ",
+    country: "China",
+    contactName: null,
+    email: "buyer@example.com",
+    phone: null,
+    website: "https://supplier.example",
+    paymentTerms: null,
+    defaultLeadTimeDays: "18",
+    notes: null,
+    status: "active",
+  };
+  assert.equal(supplierInputSchema.parse(supplier).name, "Pearl River Supply");
+  assert.equal(supplierInputSchema.safeParse({ ...supplier, email: "not-an-email" }).success, false);
+  assert.equal(supplierInputSchema.safeParse({ ...supplier, website: "not-a-url" }).success, false);
+  assert.equal(supplierInputSchema.safeParse({ ...supplier, defaultLeadTimeDays: "-1" }).success, false);
+});
+
+test("validates quotation currency, amounts, quantities, and calendar dates", () => {
+  const quote = {
+    supplierId: "1",
+    productId: "2",
+    quoteReference: null,
+    supplierProductCode: null,
+    unitPrice: "12.50",
+    currency: "cny",
+    minimumOrderQuantity: "1",
+    leadTimeDays: "20",
+    validUntil: "2026-12-31",
+    paymentTerms: null,
+    shippingTerms: null,
+    notes: null,
+    status: "received",
+  };
+  assert.equal(supplierQuoteInputSchema.parse(quote).currency, "CNY");
+  assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, unitPrice: "-0.01" }).success, false);
+  assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, unitPrice: "2.999" }).success, false);
+  assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, minimumOrderQuantity: "0" }).success, false);
+  assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, validUntil: "2026-02-30" }).success, false);
 });

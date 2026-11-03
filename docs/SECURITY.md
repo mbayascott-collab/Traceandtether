@@ -16,6 +16,7 @@
 - Product APIs validate all submitted fields server-side.
 - Express applies a bounded JSON request size and returns generic unexpected-error messages.
 - Private supplier references and cost information are only served from owner-protected routes.
+- Supplier profiles and quotations are also private owner-only data; suppliers do not receive accounts or direct access.
 - No product images or private files are stored in temporary application storage.
 - Logs do not include passwords, tokens, or product/customer data.
 

@@ -27,3 +27,5 @@
 - This milestone does not reserve or decrement inventory.
 - It does not create purchase orders, shipments, customer orders, payments, refunds, tax calculations, or accounting entries.
 - It does not estimate tax/customs rates or automatically select suppliers.
+- Supplier records are internal sourcing records, not seller accounts.
+- Quotations retain the supplier's stated currency. Comparisons do not convert currencies or infer freight, tax, or landed costs.

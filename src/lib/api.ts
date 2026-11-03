@@ -1,5 +1,7 @@
 export type ProductStatus = "draft" | "active" | "inactive";
 export type CategoryStatus = "active" | "inactive";
+export type SupplierStatus = "active" | "inactive";
+export type SupplierQuoteStatus = "received" | "accepted" | "rejected";
 
 export interface CurrentUser {
   authorized: boolean;
@@ -15,6 +17,64 @@ export interface Category {
   status: CategoryStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Supplier {
+  id: number;
+  name: string;
+  country: string | null;
+  contactName: string | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  paymentTerms: string | null;
+  defaultLeadTimeDays: number;
+  notes: string | null;
+  status: SupplierStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupplierInput extends Omit<Supplier, "id" | "createdAt" | "updatedAt"> {}
+
+export interface SupplierQuote {
+  id: number;
+  supplierId: number;
+  productId: number;
+  quoteReference: string | null;
+  supplierProductCode: string | null;
+  unitPrice: string;
+  currency: string;
+  minimumOrderQuantity: number;
+  leadTimeDays: number;
+  validUntil: string | null;
+  paymentTerms: string | null;
+  shippingTerms: string | null;
+  notes: string | null;
+  status: SupplierQuoteStatus;
+  quotedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  supplierName: string;
+  supplierStatus: SupplierStatus;
+  productName: string;
+  productSku: string;
+}
+
+export interface SupplierQuoteInput {
+  supplierId: number;
+  productId: number;
+  quoteReference: string | null;
+  supplierProductCode: string | null;
+  unitPrice: string;
+  currency: string;
+  minimumOrderQuantity: number;
+  leadTimeDays: number;
+  validUntil: string | null;
+  paymentTerms: string | null;
+  shippingTerms: string | null;
+  notes: string | null;
+  status: SupplierQuoteStatus;
 }
 
 export interface Product {
@@ -131,6 +191,60 @@ export async function updateCategory(
     body: JSON.stringify(input),
   });
   return result.category;
+}
+
+export async function fetchSuppliers(params: { q?: string; status?: "all" | SupplierStatus } = {}): Promise<Supplier[]> {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.status) query.set("status", params.status);
+  const result = await request<{ suppliers: Supplier[] }>(`/api/suppliers?${query.toString()}`);
+  return result.suppliers;
+}
+
+export async function createSupplier(input: SupplierInput): Promise<Supplier> {
+  const result = await request<{ supplier: Supplier }>("/api/suppliers", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return result.supplier;
+}
+
+export async function updateSupplier(id: number, input: SupplierInput): Promise<Supplier> {
+  const result = await request<{ supplier: Supplier }>(`/api/suppliers/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return result.supplier;
+}
+
+export async function fetchSupplierQuotes(productId?: number): Promise<SupplierQuote[]> {
+  const query = new URLSearchParams();
+  if (productId) query.set("productId", String(productId));
+  type QuoteRow = {
+    quote: Omit<SupplierQuote, "supplierName" | "supplierStatus" | "productName" | "productSku">;
+    supplierName: string;
+    supplierStatus: SupplierStatus;
+    productName: string;
+    productSku: string;
+  };
+  const result = await request<{ quotes: QuoteRow[] }>(
+    `/api/supplier-quotes?${query.toString()}`,
+  );
+  return result.quotes.map((row) => ({ ...row.quote, supplierName: row.supplierName, supplierStatus: row.supplierStatus, productName: row.productName, productSku: row.productSku }));
+}
+
+export async function createSupplierQuote(input: SupplierQuoteInput): Promise<void> {
+  await request<{ quote: unknown }>("/api/supplier-quotes", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateSupplierQuote(id: number, input: SupplierQuoteInput): Promise<void> {
+  await request<{ quote: unknown }>(`/api/supplier-quotes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function fetchProducts(

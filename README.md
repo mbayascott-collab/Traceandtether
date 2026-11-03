@@ -1,6 +1,6 @@
 # Trade Desk
 
-Trade Desk is a private business operations workspace for managing a product catalogue for a Zambia-focused importing and resale business. This first milestone covers product and category management only; it does not contain the public shop, inventory, purchasing, payments, accounting, or marketing modules.
+Trade Desk is a private business operations workspace for a Zambia-focused importing and resale business. It now includes product/category management, internal supplier records, product quotations, and source-currency comparisons. It does not contain the public shop, inventory, purchase orders, shipment tracking, payments, accounting, or marketing modules.
 
 ## Technology
 
@@ -31,7 +31,7 @@ The current development database was empty when this schema was added. No produc
 
 ## Tests and build
 
-- `npm test` runs unit tests for money calculations and server-side product validation.
+- `npm test` runs unit tests for exact-decimal money calculations and product, supplier, and quotation validation.
 - `npm run build` builds the frontend and type-checks the project.
 
 See [docs/TESTING.md](docs/TESTING.md) for manual checks and known limitations.

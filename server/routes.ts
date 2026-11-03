@@ -3,9 +3,14 @@ import type { RequestHandler } from "express";
 import { and, asc, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
-import { appUsers, productAuditLogs, productCategories, products } from "../shared/schema";
+import {
+  appUsers, productAuditLogs, productCategories, products, supplierQuotes, suppliers,
+} from "../shared/schema";
 import { db } from "./db";
-import { categoryInputSchema, productInputSchema } from "./product-validation";
+import { databaseErrorStatus } from "./database-errors";
+import {
+  categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
+} from "./product-validation";
 
 type Actor = { clerkUserId: string; email: string };
 type OwnerResolution =
@@ -99,23 +104,6 @@ function serializeProduct(product: typeof products.$inferSelect) {
   };
 }
 
-function databaseErrorStatus(error: unknown): { status: number; message: string } | null {
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code: unknown }).code)
-      : "";
-  if (code === "23505") {
-    return { status: 409, message: "That SKU or category name is already in use." };
-  }
-  if (code === "23503") {
-    return { status: 400, message: "The selected category is no longer available." };
-  }
-  if (code === "23514") {
-    return { status: 400, message: "One or more values are outside the allowed range." };
-  }
-  return null;
-}
-
 function validationMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Check the submitted values and try again.";
 }
@@ -159,6 +147,168 @@ export function registerApiRoutes(app: import("express").Express) {
       .from(productCategories)
       .orderBy(asc(productCategories.name));
     res.json({ categories });
+  });
+
+  app.get("/api/suppliers", requireOwner, async (req, res) => {
+    const parsed = z.object({
+      q: z.string().trim().max(160).optional(),
+      status: z.enum(["all", "active", "inactive"]).default("all"),
+    }).safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    const conditions: SQL[] = [];
+    if (parsed.data.q) {
+      const escaped = parsed.data.q.replace(/[\\%_]/g, "\\$&");
+      conditions.push(ilike(suppliers.name, `%${escaped}%`));
+    }
+    if (parsed.data.status !== "all") conditions.push(eq(suppliers.status, parsed.data.status));
+    const rows = await db.select().from(suppliers)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(asc(suppliers.name));
+    res.json({ suppliers: rows });
+  });
+
+  app.post("/api/suppliers", requireOwner, async (req, res) => {
+    const parsed = supplierInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    try {
+      const [supplier] = await db.insert(suppliers).values(parsed.data).returning();
+      res.status(201).json({ supplier });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error, "A supplier with this name already exists.");
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/api/suppliers/:id", requireOwner, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid supplier identifier." });
+      return;
+    }
+    const parsed = supplierInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    try {
+      const [supplier] = await db.update(suppliers)
+        .set({ ...parsed.data, updatedAt: new Date() })
+        .where(eq(suppliers.id, id)).returning();
+      if (!supplier) {
+        res.status(404).json({ error: "Supplier not found." });
+        return;
+      }
+      res.json({ supplier });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(error, "A supplier with this name already exists.");
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/supplier-quotes", requireOwner, async (req, res) => {
+    const parsed = z.object({ productId: z.string().regex(/^\d+$/).optional() }).safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid product filter." });
+      return;
+    }
+    const rows = await db.select({
+      quote: supplierQuotes,
+      supplierName: suppliers.name,
+      supplierStatus: suppliers.status,
+      productName: products.name,
+      productSku: products.sku,
+    })
+      .from(supplierQuotes)
+      .innerJoin(suppliers, eq(supplierQuotes.supplierId, suppliers.id))
+      .innerJoin(products, eq(supplierQuotes.productId, products.id))
+      .where(parsed.data.productId ? eq(supplierQuotes.productId, Number(parsed.data.productId)) : undefined)
+      .orderBy(asc(products.name), asc(supplierQuotes.currency), asc(supplierQuotes.unitPrice));
+    res.json({ quotes: rows });
+  });
+
+  app.post("/api/supplier-quotes", requireOwner, async (req, res) => {
+    const parsed = supplierQuoteInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    try {
+      const [supplier] = await db.select({ status: suppliers.status }).from(suppliers)
+        .where(eq(suppliers.id, parsed.data.supplierId)).limit(1);
+      if (!supplier || supplier.status !== "active") {
+        res.status(400).json({ error: "Choose an active supplier for this quote." });
+        return;
+      }
+      const [quote] = await db.insert(supplierQuotes).values(parsed.data).returning();
+      res.status(201).json({ quote });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(
+        error,
+        "That quote reference is already recorded for this supplier and product.",
+      );
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/api/supplier-quotes/:id", requireOwner, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid quotation identifier." });
+      return;
+    }
+    const parsed = supplierQuoteInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+    try {
+      const [existing] = await db.select({ supplierId: supplierQuotes.supplierId }).from(supplierQuotes)
+        .where(eq(supplierQuotes.id, id)).limit(1);
+      if (!existing) {
+        res.status(404).json({ error: "Quotation not found." });
+        return;
+      }
+      if (existing.supplierId !== parsed.data.supplierId) {
+        const [supplier] = await db.select({ status: suppliers.status }).from(suppliers)
+          .where(eq(suppliers.id, parsed.data.supplierId)).limit(1);
+        if (!supplier || supplier.status !== "active") {
+          res.status(400).json({ error: "Choose an active supplier for this quote." });
+          return;
+        }
+      }
+      const [quote] = await db.update(supplierQuotes)
+        .set({ ...parsed.data, updatedAt: new Date() })
+        .where(eq(supplierQuotes.id, id)).returning();
+      res.json({ quote });
+    } catch (error) {
+      const databaseError = databaseErrorStatus(
+        error,
+        "That quote reference is already recorded for this supplier and product.",
+      );
+      if (databaseError) {
+        res.status(databaseError.status).json({ error: databaseError.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.post("/api/categories", requireOwner, async (req, res) => {

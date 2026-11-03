@@ -27,6 +27,13 @@ Products reference a category with `products.category_id`. Deactivating a catego
 - `name`, `description`, `brand`.
 - `category_id` — optional foreign key to `product_categories`.
 - `supplier_name`, `supplier_product_code` — optional supplier reference fields.
+
+## Suppliers and quotations
+
+- `suppliers` stores internal contact and commercial details with an active/inactive status. Inactivation preserves records and history.
+- `supplier_quotes` links a supplier to a product and stores quoted unit price, currency, MOQ, lead time, validity, terms, reference, and received/accepted/rejected status.
+- Quote prices remain in their source currency. The comparison view does not rank values across currencies or claim a landed-cost total.
+- Supplier and quote records are exposed only through owner-protected API routes.
 - `purchase_currency` — three-letter currency code, default `CNY`.
 - `purchase_price` — optional `NUMERIC(14,2)` in the purchase currency.
 - `estimated_landed_cost_zmw` — optional `NUMERIC(14,2)`.

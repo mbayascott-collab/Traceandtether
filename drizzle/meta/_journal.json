@@ -15,6 +15,13 @@
       "when": 1793256344825,
       "tag": "0001_exotic_enchantress",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793730525248,
+      "tag": "0002_glamorous_bucky",
+      "breakpoints": true
     }
   ]
 }

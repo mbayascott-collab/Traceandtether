@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   AlertCircle,
+  ArrowLeftRight,
   ArrowUpRight,
   BadgeDollarSign,
   Boxes,
@@ -10,6 +11,7 @@ import {
   CircleCheck,
   CircleOff,
   FolderOpen,
+  FileText,
   Info,
   LayoutDashboard,
   LockKeyhole,
@@ -24,6 +26,7 @@ import {
   ShieldCheck,
   Tags,
   Truck,
+  Users,
   X,
 } from "lucide-react";
 import { Link, useLocation } from "wouter";
@@ -42,6 +45,7 @@ import {
   type ProductListResult,
   type ProductStatus,
 } from "../lib/api";
+import SupplierWorkspace from "./SupplierWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -244,7 +248,10 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isDashboard = location === "/dashboard";
   const isProducts = location === "/products";
   const isCategories = location === "/categories";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : "Dashboard";
+  const isSuppliers = location === "/suppliers";
+  const isQuotes = location === "/supplier-quotes";
+  const isComparison = location === "/supplier-comparisons";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : "Dashboard";
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -387,6 +394,15 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/categories" aria-current={isCategories ? "page" : undefined}>
             <Tags aria-hidden="true" /><span>Categories</span>
+          </Link>
+          <Link href="/suppliers" aria-current={isSuppliers ? "page" : undefined}>
+            <Users aria-hidden="true" /><span>Suppliers</span>
+          </Link>
+          <Link href="/supplier-quotes" aria-current={isQuotes ? "page" : undefined}>
+            <FileText aria-hidden="true" /><span>Quotations</span>
+          </Link>
+          <Link href="/supplier-comparisons" aria-current={isComparison ? "page" : undefined}>
+            <ArrowLeftRight aria-hidden="true" /><span>Compare offers</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -743,6 +759,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
               </div>
             </>
           )}
+          {isSuppliers && <SupplierWorkspace mode="suppliers" />}
+          {isQuotes && <SupplierWorkspace mode="quotes" />}
+          {isComparison && <SupplierWorkspace mode="comparison" />}
         </div>
       </main>
 

@@ -4,7 +4,7 @@
 
 Run:
 
-- `npm test` — unit tests for exact-decimal profitability calculations and product input validation.
+- `npm test` — unit tests for exact-decimal profitability calculations and product, supplier, and quotation input validation.
 - `npm run build` — Vite production build and TypeScript type-check.
 
 Database migration application is verified separately with `npm run db:migrate` against the development database.
@@ -24,4 +24,4 @@ Database migration application is verified separately with `npm run db:migrate` 
 
 ## Limitations
 
-The public landing and mobile sign-in pages were visually checked. Health, unauthenticated `/api/me`, and unauthenticated product API behavior were checked. The signed-in product/category flows were not verified in a real owner browser session; the app preview browser cannot sign in on the user's behalf. No sample business records are created for tests.
+The public landing page was visually checked. Health and unauthenticated product, supplier, and quotation API behavior were checked. A temporary supplier and quotation were created, read through a separate database connection, edited, and removed. The signed-in UI and API flows were not verified in a real owner browser session; the preview capture is signed out.
