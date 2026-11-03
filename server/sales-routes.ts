@@ -29,6 +29,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       id: products.id,
       name: products.name,
       description: products.description,
+      imageUrls: products.imageUrls,
       unit: products.unit,
       sellingPriceZmw: products.sellingPriceZmw,
     }).from(products).where(and(eq(products.status, "active"))).orderBy(asc(products.name));

@@ -469,9 +469,13 @@ export function registerApiRoutes(app: import("express").Express) {
         if (!existing) return null;
 
         const changedFields = Object.keys(parsed.data).filter(
-          (key) =>
-            existing[key as keyof typeof existing] !==
-            parsed.data[key as keyof typeof parsed.data],
+          (key) => {
+            const previous = existing[key as keyof typeof existing];
+            const next = parsed.data[key as keyof typeof parsed.data];
+            return Array.isArray(previous) && Array.isArray(next)
+              ? JSON.stringify(previous) !== JSON.stringify(next)
+              : previous !== next;
+          },
         );
         const [updated] = await tx
           .update(products)

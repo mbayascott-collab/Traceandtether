@@ -2,11 +2,41 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowLeft, ArrowRight, Minus, Plus, ShoppingBag } from "lucide-react";
 import { Link } from "wouter";
 
-type ShopProduct = { id: number; name: string; description: string | null; unit: string; sellingPriceZmw: string };
+type ShopProduct = { id: number; name: string; description: string | null; imageUrls: string[]; unit: string; sellingPriceZmw: string };
 type Cart = Record<number, number>;
 
 function money(value: string) {
   return `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function ProductGallery({ product, index }: { product: ShopProduct; index: number }) {
+  const [selected, setSelected] = useState(0);
+  const images = product.imageUrls ?? [];
+  return (
+    <div className={`shop-product-art art-${index % 4}`}>
+      {images.length ? (
+        <>
+          <img className="shop-product-image" src={images[selected]} alt={product.name} loading="lazy" />
+          {images.length > 1 && (
+            <div className="shop-image-thumbs" aria-label={`${images.length} product photos`}>
+              {images.map((url, imageIndex) => (
+                <button
+                  type="button"
+                  key={`${url}-${imageIndex}`}
+                  className={selected === imageIndex ? "is-selected" : ""}
+                  onClick={() => setSelected(imageIndex)}
+                  aria-label={`Show product photo ${imageIndex + 1}`}
+                  aria-pressed={selected === imageIndex}
+                >
+                  <img src={url} alt="" loading="lazy" />
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      ) : <span>TD</span>}
+    </div>
+  );
 }
 
 export default function PublicShop() {
@@ -88,7 +118,7 @@ export default function PublicShop() {
           <div className="shop-product-grid">
             {products.map((product, index) => (
               <article className="shop-product-card" key={product.id}>
-                <div className={`shop-product-art art-${index % 4}`}><span>TD</span></div>
+                <ProductGallery product={product} index={index} />
                 <div className="shop-product-info">
                   <span className="shop-stock">AVAILABLE</span>
                   <h3>{product.name}</h3>

@@ -58,6 +58,7 @@ export const products = pgTable(
     sku: varchar("sku", { length: 60 }).notNull(),
     name: varchar("name", { length: 160 }).notNull(),
     description: text("description"),
+    imageUrls: jsonb("image_urls").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     brand: varchar("brand", { length: 100 }),
     categoryId: integer("category_id").references(() => productCategories.id, {
       onDelete: "set null",

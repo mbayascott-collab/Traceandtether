@@ -50,6 +50,7 @@ export interface Category {
   id: number;
   name: string;
   description: string | null;
+  imageUrls: string[];
   status: CategoryStatus;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +119,7 @@ export interface Product {
   sku: string;
   name: string;
   description: string | null;
+  imageUrls: string[];
   brand: string | null;
   categoryId: number | null;
   supplierName: string | null;
@@ -139,6 +141,7 @@ export interface ProductInput {
   sku: string;
   name: string;
   description: string | null;
+  imageUrls: string[];
   brand: string | null;
   categoryId: number | null;
   supplierName: string | null;
