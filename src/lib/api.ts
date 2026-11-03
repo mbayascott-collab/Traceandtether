@@ -360,6 +360,9 @@ export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
 export async function saveCustomerQuote(input: CustomerQuoteInput, id?: number): Promise<void> {
   await request(id ? `/api/customer-quotes/${id}` : "/api/customer-quotes", { method: id ? "PATCH" : "POST", body: JSON.stringify(input) });
 }
+export async function deleteCustomerQuote(id: number): Promise<void> {
+  await request(`/api/customer-quotes/${id}`, { method: "DELETE" });
+}
 export async function convertCustomerQuote(id: number): Promise<string> {
   const result = await request<{ order: { orderNumber: string } }>(`/api/customer-quotes/${id}/convert`, { method: "POST" });
   return result.order.orderNumber;
@@ -372,6 +375,9 @@ export async function setSalesOrderAttribution(id: number, campaignId: number | 
 }
 export async function createSalesOrder(input: { customerId: number; deliveryAddress: string | null; notes: string | null; lines: { productId: number; quantity: number; unitPriceZmw: string }[] }): Promise<void> {
   await request("/api/sales-orders", { method: "POST", body: JSON.stringify(input) });
+}
+export async function deleteSalesOrder(id: number): Promise<void> {
+  await request(`/api/sales-orders/${id}`, { method: "DELETE" });
 }
 export async function updateSalesOrderStatus(id: number, action: "confirm" | "fulfill" | "cancel"): Promise<void> {
   await request(`/api/sales-orders/${id}/${action}`, { method: "POST" });

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
-  createSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
+  createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type MarketingCampaignOption, type Product, type SalesOrder,
 } from "../lib/api";
 
@@ -30,10 +30,16 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     try { await action(new FormData(form)); form.reset(); setLines([emptyLine()]); setEditingCustomer(null); setNotice("Saved."); setReload((n) => n + 1); }
     catch (e) { setError(e instanceof Error ? e.message : "Could not save this record."); }
   }
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, successMessage = "Order updated.") {
     setError(""); setNotice("");
-    try { await action(); setNotice("Order updated."); setReload((n) => n + 1); }
+    try { await action(); setNotice(successMessage); setReload((n) => n + 1); }
     catch (e) { setError(e instanceof Error ? e.message : "Could not update this order."); }
+  }
+  function removeOrder(order: SalesOrder) {
+    const quoteNote = order.notes?.match(/Created from (CQ-\d{4}-[A-Z0-9]+)/)?.[1];
+    const detail = quoteNote ? ` The source quote ${quoteNote} will become accepted again.` : "";
+    if (!window.confirm(`Delete draft order ${order.orderNumber}? This cannot be undone.${detail}`)) return;
+    void run(() => deleteSalesOrder(order.id), "Draft order deleted.");
   }
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
@@ -68,7 +74,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <button type="button" className="button button-secondary" onClick={() => setLines((old) => [...old, emptyLine()])}>Add product line</button>
         <label>Notes<input name="notes" /></label><button className="button button-primary">Save draft</button>
       </form>
-       <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>{o.status === "draft" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"))}>Confirm & reserve</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button></>}{o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"))}>Fulfill</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button></>}</td></tr>)}</tbody></table></div>
+        <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>{o.status === "draft" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"))}>Confirm & reserve</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}{o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"))}>Fulfill</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button></>}</td></tr>)}</tbody></table></div>
     </>}
   </section>;
 }

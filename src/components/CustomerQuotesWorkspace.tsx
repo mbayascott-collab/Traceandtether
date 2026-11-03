@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { convertCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
+import { convertCustomerQuote, deleteCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
 
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
 const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw: "" });
@@ -53,6 +53,15 @@ export default function CustomerQuotesWorkspace() {
       setReload((n) => n + 1);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not convert this quote."); }
   }
+  async function removeQuote(quote: CustomerQuote) {
+    if (!window.confirm(`Delete quote ${quote.quoteNumber}? This cannot be undone.`)) return;
+    setError(""); setNotice("");
+    try {
+      await deleteCustomerQuote(quote.id);
+      setNotice(`${quote.quoteNumber} deleted.`);
+      setReload((n) => n + 1);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete this quote."); }
+  }
 
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>Customer quotes</h1><p>Prepare a price offer, mark it accepted, then turn it into a draft sales order.</p></div></header>
@@ -81,6 +90,7 @@ export default function CustomerQuotesWorkspace() {
       {quotes.map((quote) => <tr key={quote.id}><td>{quote.quoteNumber}</td><td>{quote.customerName}</td><td>{quote.lines.map((line) => `${line.productName} × ${line.quantity}`).join(", ")}</td><td>{money(quote.totalZmw)}</td><td>{quote.validUntil || "—"}</td><td>{quote.status}</td><td>
         {(quote.status === "draft" || quote.status === "sent") && <button className="button button-secondary button-small" onClick={() => editQuote(quote)}>Edit</button>}
         {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>Convert to order</button>}
+        {quote.status !== "converted" && <button className="button button-danger button-small" onClick={() => removeQuote(quote)}>Delete</button>}
         {quote.status === "converted" && <span>{quote.salesOrderNumber || "Order created"}</span>}
       </td></tr>)}
     </tbody></table>{!quotes.length && <p className="report-footnote">No customer quotes yet.</p>}</div>

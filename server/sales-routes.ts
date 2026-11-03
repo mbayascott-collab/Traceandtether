@@ -181,6 +181,22 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
   });
+  app.delete("/api/customer-quotes/:id", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid quote.");
+    const result = await db.transaction(async (tx) => {
+      const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
+      if (!quote) return { error: "Customer quote not found.", status: 404 };
+      if (quote.status === "converted" || quote.salesOrderId) {
+        return { error: "Delete the linked draft sales order before deleting this quote.", status: 409 };
+      }
+      await tx.delete(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id));
+      await tx.delete(customerQuotes).where(eq(customerQuotes.id, id));
+      return { ok: true };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json(result);
+  });
   app.post("/api/customer-quotes/:id/convert", owner, async (req, res) => {
     const id = idOf(req.params.id);
     if (!id) return bad(res, "Invalid quote.");
@@ -243,6 +259,27 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       return created;
     });
     res.status(201).json({ order });
+  });
+  app.delete("/api/sales-orders/:id", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid sales order.");
+    const result = await db.transaction(async (tx) => {
+      const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).for("update").limit(1);
+      if (!order) return { error: "Sales order not found.", status: 404 };
+      if (order.status !== "draft") return { error: "Only draft orders without stock or accounting history can be deleted. Cancel an active order instead.", status: 409 };
+      const [reservation] = await tx.select({ id: inventoryReservations.id })
+        .from(inventoryReservations).where(eq(inventoryReservations.salesOrderId, id)).limit(1);
+      if (reservation) return { error: "This order has stock reservation history and cannot be deleted. Cancel it instead.", status: 409 };
+
+      await tx.update(customerQuotes)
+        .set({ status: "accepted", salesOrderId: null, updatedAt: new Date() })
+        .where(eq(customerQuotes.salesOrderId, id));
+      await tx.delete(salesOrderLines).where(eq(salesOrderLines.salesOrderId, id));
+      await tx.delete(salesOrders).where(eq(salesOrders.id, id));
+      return { ok: true };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json(result);
   });
   app.post("/api/sales-orders/:id/confirm", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
