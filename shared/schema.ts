@@ -271,6 +271,7 @@ export const customers = pgTable(
     id: serial("id").primaryKey(),
     name: varchar("name", { length: 160 }).notNull(),
     contactPerson: varchar("contact_person", { length: 120 }),
+    contactPersonPhone: varchar("contact_person_phone", { length: 60 }),
     email: varchar("email", { length: 254 }),
     phone: varchar("phone", { length: 60 }),
     address: text("address"),
