@@ -2732,8 +2732,11 @@ textarea:focus-visible {
   .quote-preview-panel { display: block !important; width: auto !important; max-height: none !important; }
   .quote-preview-toolbar { display: none !important; }
   #customer-quote-print,
-  #customer-quote-print * { visibility: visible !important; }
-  #customer-quote-print {
+  #customer-quote-print *,
+  #sales-invoice-print,
+  #sales-invoice-print * { visibility: visible !important; }
+  #customer-quote-print,
+  #sales-invoice-print {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;

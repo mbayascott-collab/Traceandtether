@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import companyLogo from "../../attached_assets/google_profile_1793751250209.jpg";
 import {
   createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type MarketingCampaignOption, type Product, type SalesOrder,
@@ -8,6 +9,7 @@ type Mode = "customers" | "orders";
 type Line = { productId: string; quantity: string; unitPriceZmw: string };
 const emptyLine = (): Line => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const zmw = (amount: string) => `ZMW ${Number(amount).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const companyName = "Trace and Tether Craft Studio Limited";
 export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
@@ -20,6 +22,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [notice, setNotice] = useState("");
   const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
+  const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
   useEffect(() => {
     let alive = true;
     Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
@@ -53,6 +56,12 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     const orderType = order.status === "cancelled" ? "cancelled order" : "draft order";
     if (!window.confirm(`Delete ${orderType} ${order.orderNumber}? This cannot be undone.${detail}`)) return;
     void run(() => deleteSalesOrder(order.id), "Order deleted.");
+  }
+  function documentDate(value: string) {
+    return new Date(value).toLocaleDateString("en-ZM", { day: "numeric", month: "long", year: "numeric" });
+  }
+  function invoiceNumber(order: SalesOrder) {
+    return `INV-${order.orderNumber.replace(/^SO-/, "")}`;
   }
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
@@ -91,8 +100,50 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
           {o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"), "Sale recorded and stock updated.", o.id)}>{busyOrderId === o.id ? "Updating…" : "Fulfill"}</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button></>}
+           {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
         </td></tr>)}</tbody></table></div>
     </>}
+    {mode === "orders" && invoiceOrder && (() => {
+      const customer = customers.find((item) => item.id === invoiceOrder.customerId);
+      const invoiceRef = invoiceNumber(invoiceOrder);
+      const date = invoiceOrder.fulfilledAt || invoiceOrder.orderDate;
+      return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="invoice-preview-title">
+        <div className="quote-preview-panel">
+          <div className="quote-preview-toolbar">
+            <div><strong id="invoice-preview-title">Invoice preview</strong><span>Choose “Save as PDF” in the print window.</span></div>
+            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setInvoiceOrder(null)}>Close</button></div>
+          </div>
+          <article className="customer-quote-document" id="sales-invoice-print">
+            <header className="customer-quote-document-header">
+              <div className="customer-quote-document-brand"><img src={companyLogo} alt={`${companyName} logo`} /><strong>{companyName}</strong></div>
+              <div className="customer-quote-document-title">
+                <div><span className="customer-quote-document-kicker">SALES INVOICE</span><h1>{invoiceRef}</h1></div>
+                <div className="customer-quote-document-meta">
+                  <div><span>Invoice date</span><strong>{documentDate(date)}</strong></div>
+                  <div><span>Sales order</span><strong>{invoiceOrder.orderNumber}</strong></div>
+                </div>
+              </div>
+            </header>
+            <section className="customer-quote-document-customer">
+              <span>INVOICE FOR</span><strong>{invoiceOrder.customerName}</strong>
+              {customer?.email && <p>{customer.email}</p>}
+              {customer?.phone && <p>{customer.phone}</p>}
+              {customer?.address && <p><b>Billing address:</b> {customer.address}</p>}
+              {invoiceOrder.deliveryAddress && <p><b>Delivery address:</b> {invoiceOrder.deliveryAddress}</p>}
+            </section>
+            <table className="customer-quote-document-table">
+              <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Qty</th><th className="quote-number-cell">Unit price</th><th className="quote-number-cell">Amount</th></tr></thead>
+              <tbody>{invoiceOrder.lines.map((line) => <tr key={line.id}>
+                <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td><td className="quote-number-cell">{zmw(line.unitPriceZmw)}</td><td className="quote-number-cell">{zmw(line.lineTotalZmw)}</td>
+              </tr>)}</tbody>
+            </table>
+            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoiceOrder.totalZmw)}</strong></div>
+            {invoiceOrder.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{invoiceOrder.notes}</p></section>}
+            <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoiceRef} · Sales order: {invoiceOrder.orderNumber}</footer>
+          </article>
+        </div>
+      </div>;
+    })()}
   </section>;
 }
