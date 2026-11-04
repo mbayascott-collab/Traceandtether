@@ -2609,16 +2609,17 @@ textarea:focus-visible {
   inset: 0;
   z-index: 1300;
   display: grid;
-  place-items: start center;
+  place-items: center;
   overflow: auto;
   padding: 22px;
   background: rgba(14, 34, 32, 0.78);
 }
 .quote-preview-panel {
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
   width: min(960px, 100%);
+  max-height: calc(100dvh - 44px);
 }
 .quote-preview-toolbar {
   display: flex;
@@ -2637,14 +2638,11 @@ textarea:focus-visible {
 .customer-quote-document {
   width: min(210mm, 100%);
   min-height: 280mm;
-  height: auto;
   margin: 0 auto;
   padding: 20mm;
   color: #193c39;
   background: #fff;
   box-shadow: 0 14px 50px rgba(0, 0, 0, 0.2);
-  print-color-adjust: exact;
-  -webkit-print-color-adjust: exact;
 }
 .customer-quote-document-header {
   display: grid;
@@ -2713,64 +2711,10 @@ textarea:focus-visible {
 .order-action-error { display: block; max-width: 260px; margin-top: 7px; color: #a14332; font-size: 11px; line-height: 1.4; }
 
 @media (max-width: 700px) {
-  .quote-preview-overlay {
-    display: block;
-    overflow-y: auto;
-    overflow-x: hidden;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-    padding: 10px;
-  }
-  .quote-preview-panel {
-    display: flex;
-    flex-direction: column;
-    width: 100%;
-    max-height: none;
-  }
-  .quote-preview-toolbar {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    align-items: stretch;
-    flex-direction: column;
-    width: 100%;
-  }
-  .quote-preview-toolbar > div:last-child {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    width: 100%;
-  }
-  .quote-preview-toolbar .button {
-    width: 100%;
-    min-height: 46px;
-  }
-  .customer-quote-document {
-    flex: 0 0 auto;
-    width: 100%;
-    min-height: 0;
-    height: auto;
-    overflow: visible;
-    padding: 22px 18px;
-    background-color: #fff;
-  }
-  .customer-quote-document,
-  .customer-quote-document * {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .customer-quote-document-table {
-    width: 100%;
-    table-layout: fixed;
-    font-size: 9px;
-  }
-  .customer-quote-document-table th,
-  .customer-quote-document-table td {
-    padding-right: 3px;
-    padding-left: 3px;
-  }
-  .quote-number-cell {
-    white-space: normal;
-  }
+  .quote-preview-overlay { place-items: start center; padding: 10px; }
+  .quote-preview-panel { max-height: calc(100dvh - 20px); }
+  .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
+  .customer-quote-document { min-height: 0; padding: 22px 18px; }
   .customer-quote-document-brand img { width: 90px; height: 90px; }
   .customer-quote-document-brand strong { font-size: 15px; }
   .customer-quote-document-title { gap: 12px; }
