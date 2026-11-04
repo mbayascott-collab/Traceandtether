@@ -26,7 +26,7 @@ export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"])
 export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment", "opening_stock"]);
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
 export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
-export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
+export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "partially_fulfilled", "fulfilled", "cancelled"]);
 export const customerQuoteStatus = pgEnum("customer_quote_status", ["draft", "sent", "accepted", "rejected", "converted"]);
 export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
 export const paymentDirection = pgEnum("payment_direction", ["customer_receipt", "supplier_payment"]);
@@ -333,6 +333,37 @@ export const salesOrderLines = pgTable(
     index("sales_order_lines_order_idx").on(table.salesOrderId),
     check("sales_order_lines_quantity_positive", sql`${table.quantity} > 0`),
     check("sales_order_lines_price_nonnegative", sql`${table.unitPriceZmw} >= 0`),
+  ],
+);
+
+export const salesDeliveries = pgTable(
+  "sales_deliveries",
+  {
+    id: serial("id").primaryKey(),
+    deliveryNumber: varchar("delivery_number", { length: 40 }).notNull(),
+    salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "restrict" }),
+    deliveryDate: date("delivery_date").notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_deliveries_number_unique").on(table.deliveryNumber),
+    index("sales_deliveries_order_date_idx").on(table.salesOrderId, table.deliveryDate),
+  ],
+);
+
+export const salesDeliveryLines = pgTable(
+  "sales_delivery_lines",
+  {
+    id: serial("id").primaryKey(),
+    deliveryId: integer("delivery_id").notNull().references(() => salesDeliveries.id, { onDelete: "restrict" }),
+    salesOrderLineId: integer("sales_order_line_id").notNull().references(() => salesOrderLines.id, { onDelete: "restrict" }),
+    quantity: integer("quantity").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_delivery_lines_delivery_order_line_unique").on(table.deliveryId, table.salesOrderLineId),
+    index("sales_delivery_lines_order_line_idx").on(table.salesOrderLineId),
+    check("sales_delivery_lines_quantity_positive", sql`${table.quantity} > 0`),
   ],
 );
 

@@ -1,8 +1,8 @@
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
-import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingExpenses, salesOrderLines, salesOrders } from "../shared/schema";
+import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { campaignSchema, contentSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import { cents, formatCents, postJournal } from "./accounting-posting";
 
@@ -101,32 +101,57 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
     };
     if (!validDay(from) || !validDay(to) || (from && to && from > to)) return res.status(400).json({ error: "Choose a valid report date range." });
-    const [campaigns, expenses, attributions, orders, lines, allCustomers] = await Promise.all([
+    const [campaigns, expenses, attributions, orders, lines, allCustomers, deliveryRows] = await Promise.all([
       db.select().from(marketingCampaigns),
       db.select().from(marketingExpenses),
       db.select().from(marketingAttributions),
-      db.select().from(salesOrders).where(eq(salesOrders.status, "fulfilled")),
+      db.select().from(salesOrders).where(inArray(salesOrders.status, ["partially_fulfilled", "fulfilled", "cancelled"])),
       db.select().from(salesOrderLines),
       db.select().from(customers),
+      db.select({
+        orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
     ]);
     const revenueByOrder = new Map<number, bigint>();
-    for (const line of lines) revenueByOrder.set(line.salesOrderId, (revenueByOrder.get(line.salesOrderId) ?? 0n) + cents(line.unitPriceZmw) * BigInt(line.quantity));
-    const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row.campaignId]));
+    const revenueByOrderInRange = new Map<number, bigint>();
+    const deliveredInRange = new Set<number>();
+    const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
     const inRange = (date: string) => (!from || date >= from) && (!to || date <= to);
+    for (const row of deliveryRows) {
+      const value = cents(row.unitPriceZmw) * BigInt(row.quantity);
+      revenueByOrder.set(row.orderId, (revenueByOrder.get(row.orderId) ?? 0n) + value);
+      if (inRange(row.deliveryDate)) {
+        deliveredInRange.add(row.orderId);
+        revenueByOrderInRange.set(row.orderId, (revenueByOrderInRange.get(row.orderId) ?? 0n) + value);
+      }
+    }
+    for (const line of lines) {
+      const order = orders.find((item) => item.id === line.salesOrderId);
+      if (order?.status !== "fulfilled" || ordersWithDeliveries.has(order.id)) continue;
+      const value = cents(line.unitPriceZmw) * BigInt(line.quantity);
+      revenueByOrder.set(order.id, (revenueByOrder.get(order.id) ?? 0n) + value);
+      if (inRange(order.orderDate)) {
+        deliveredInRange.add(order.id);
+        revenueByOrderInRange.set(order.id, (revenueByOrderInRange.get(order.id) ?? 0n) + value);
+      }
+    }
+    const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row.campaignId]));
     const campaignTotals = new Map(campaigns.map((c) => [c.id, { orderCount: 0, revenue: 0n, spend: 0n }]));
     let unattributedRevenue = 0n, unattributedOrders = 0, generalSpend = 0n;
-    const fulfilledOrders = orders.filter((o) => {
-      const revenue = revenueByOrder.get(o.id) ?? 0n;
-      if (inRange(o.orderDate)) {
-        const campaignId = attributedCampaign.get(o.id);
+    for (const order of orders) {
+      if (deliveredInRange.has(order.id)) {
+        const revenue = revenueByOrderInRange.get(order.id) ?? 0n;
+        const campaignId = attributedCampaign.get(order.id);
         if (campaignId == null) { unattributedRevenue += revenue; unattributedOrders += 1; }
         else {
           const stat = campaignTotals.get(campaignId);
           if (stat) { stat.orderCount += 1; stat.revenue += revenue; }
         }
       }
-      return true;
-    });
+    }
     for (const expense of expenses) {
       if (!inRange(expense.expenseDate)) continue;
       const amountCents = cents(expense.amount);
@@ -146,7 +171,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       };
     }).sort((a, b) => cents(b.attributedRevenueZmw) > cents(a.attributedRevenueZmw) ? 1 : cents(b.attributedRevenueZmw) < cents(a.attributedRevenueZmw) ? -1 : 0);
     const lifetime = new Map<number, { orders: number; revenue: bigint }>();
-    for (const order of fulfilledOrders) {
+    for (const order of orders.filter((item) => revenueByOrder.has(item.id))) {
       const value = lifetime.get(order.customerId) ?? { orders: 0, revenue: 0n };
       value.orders += 1; value.revenue += revenueByOrder.get(order.id) ?? 0n; lifetime.set(order.customerId, value);
     }

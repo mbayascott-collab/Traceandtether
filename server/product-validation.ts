@@ -251,6 +251,22 @@ export const salesOrderInputSchema = z.object({
   if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
 });
 
+export const salesDeliveryInputSchema = z.object({
+  deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "Enter a real delivery date."),
+  lines: z.array(z.object({
+    salesOrderLineId: positiveInteger,
+    quantity: positiveInteger,
+  }).strict()).min(1).max(100),
+}).strict().superRefine((delivery, context) => {
+  const lineIds = delivery.lines.map((line) => line.salesOrderLineId);
+  if (new Set(lineIds).size !== lineIds.length) {
+    context.addIssue({ code: "custom", path: ["lines"], message: "Each order line can appear only once in a delivery." });
+  }
+});
+
 export const customerQuoteInputSchema = z.object({
   customerId: positiveInteger,
   validUntil: validDate,

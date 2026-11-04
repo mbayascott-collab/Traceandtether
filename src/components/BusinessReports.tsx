@@ -57,7 +57,7 @@ export function BusinessDashboard() {
       </div>
       <p className="report-footnote">{data.cashForecast.assumption} Opening cash balances are not recorded yet, so this estimate may be incomplete.</p>
     </section>
-    <p className="report-footnote">Sales include fulfilled orders dated this month. Inventory value uses recorded accounting entries; stock without an opening value may be missing.</p>
+    <p className="report-footnote">Sales are counted as each delivery is recorded. Inventory value uses recorded accounting entries; stock without an opening value may be missing.</p>
   </section>;
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
@@ -167,6 +167,21 @@ test("validates customer contacts and ZMW sales order lines", () => {
   assert.equal(salesOrderInputSchema.safeParse(order).success, true);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPriceZmw: "-2" }] }).success, false);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
+});
+
+test("validates delivery dates, positive quantities, and unique order lines", () => {
+  assert.deepEqual(salesDeliveryInputSchema.parse({
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: "4", quantity: "2" }],
+  }), { deliveryDate: "2026-11-04", lines: [{ salesOrderLineId: 4, quantity: 2 }] });
+  assert.equal(salesDeliveryInputSchema.safeParse({
+    deliveryDate: "2026-02-30",
+    lines: [{ salesOrderLineId: 4, quantity: 2 }],
+  }).success, false);
+  assert.equal(salesDeliveryInputSchema.safeParse({
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2 }, { salesOrderLineId: 4, quantity: 1 }],
+  }).success, false);
 });
 
 test("validates public shop order requests without accepting client prices", () => {

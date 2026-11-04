@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
-  type Customer, type MarketingCampaignOption, type Product, type SalesOrder,
+  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
+  type Customer, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
 type Mode = "customers" | "orders";
@@ -26,7 +26,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
-  const [deliveryOrder, setDeliveryOrder] = useState<SalesOrder | null>(null);
+  const [deliveryFormOrder, setDeliveryFormOrder] = useState<SalesOrder | null>(null);
+  const [deliveryPrint, setDeliveryPrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
   useEffect(() => {
     let alive = true;
     Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
@@ -52,6 +53,24 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       if (orderId) setOrderActionErrors((current) => ({ ...current, [orderId]: message }));
     } finally {
       if (orderId) setBusyOrderId((current) => current === orderId ? null : current);
+    }
+  }
+  async function submitDelivery(event: FormEvent<HTMLFormElement>, order: SalesOrder) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const lines = order.lines.map((line) => ({
+      salesOrderLineId: line.id,
+      quantity: Number(form.get(`quantity-${line.id}`) || 0),
+    })).filter((line) => line.quantity > 0);
+    if (!lines.length) { setError("Enter a quantity for at least one item."); return; }
+    setError(""); setNotice("");
+    try {
+      await createSalesDelivery(order.id, { deliveryDate: String(form.get("deliveryDate")), lines });
+      setDeliveryFormOrder(null);
+      setNotice("Delivery recorded. Stock and the customer balance have been updated.");
+      setReload((value) => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not record this delivery.");
     }
   }
   function removeOrder(order: SalesOrder) {
@@ -108,14 +127,27 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <button type="button" className="button button-secondary" onClick={() => setLines((old) => [...old, emptyLine()])}>Add product line</button>
         <label>Notes<input name="notes" /></label><button className="button button-primary">Save draft</button>
       </form>
-        <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>
+         <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
-          {o.status === "confirmed" && <><button className="button button-secondary button-small" onClick={() => setDeliveryOrder(o)}>Delivery note</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"), "Sale recorded and stock updated.", o.id)}>{busyOrderId === o.id ? "Updating…" : "Fulfill"}</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button></>}
-           {o.status === "fulfilled" && <><button className="button button-secondary button-small" onClick={() => setDeliveryOrder(o)}>Delivery note</button> <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button></>}
+          {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => setDeliveryFormOrder(o)}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
+           {o.deliveries.map((delivery) => <button key={delivery.id} className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery })}>{delivery.deliveryNumber}</button>)}
+           {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
+           {o.status === "fulfilled" && !o.deliveries.length && <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery: null })}>Delivery note</button>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
         </td></tr>)}</tbody></table></div>
     </>}
+    {mode === "orders" && deliveryFormOrder && <div className="modal-backdrop" role="presentation">
+      <form className="modal form-grid delivery-entry-form" onSubmit={(event) => submitDelivery(event, deliveryFormOrder)}>
+        <h2>Record delivery · {deliveryFormOrder.orderNumber}</h2>
+        <label>Delivery date<input type="date" name="deliveryDate" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+        {deliveryFormOrder.lines.filter((line) => line.remainingQuantity > 0).map((line) => <label key={line.id}>
+          {line.productName} · {line.sku} · {line.remainingQuantity} remaining
+          <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
+        </label>)}
+        <div className="modal-footer-actions"><button type="button" className="button button-secondary" onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary">Save delivery</button></div>
+      </form>
+    </div>}
     {mode === "orders" && invoiceOrder && (() => {
       const customer = customers.find((item) => item.id === invoiceOrder.customerId);
       const invoiceRef = invoiceNumber(invoiceOrder);
@@ -157,14 +189,18 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>
       </div>;
     })()}
-    {mode === "orders" && deliveryOrder && (() => {
-      const customer = customers.find((item) => item.id === deliveryOrder.customerId);
-      const noteRef = deliveryNoteNumber(deliveryOrder);
+    {mode === "orders" && deliveryPrint && (() => {
+      const { order, delivery } = deliveryPrint;
+      const customer = customers.find((item) => item.id === order.customerId);
+      const noteRef = delivery?.deliveryNumber ?? deliveryNoteNumber(order);
+      const noteLines = delivery
+        ? delivery.lines.map((line) => ({ ...line }))
+        : order.lines.map((line) => ({ salesOrderLineId: line.id, productName: line.productName, sku: line.sku, quantity: line.quantity }));
       return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="delivery-note-preview-title">
         <div className="quote-preview-panel">
           <div className="quote-preview-toolbar">
             <div><strong id="delivery-note-preview-title">Delivery note preview</strong><span>Print this note or save it as a PDF.</span></div>
-            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setDeliveryOrder(null)}>Close</button></div>
+            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setDeliveryPrint(null)}>Close</button></div>
           </div>
           <article className="customer-quote-document" id="delivery-note-print">
             <header className="customer-quote-document-header">
@@ -175,24 +211,24 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
               <div className="customer-quote-document-title">
                 <div><span className="customer-quote-document-kicker">DELIVERY NOTE</span><h1>{noteRef}</h1></div>
                 <div className="customer-quote-document-meta">
-                  <div><span>Note date</span><strong>{documentDate(new Date().toISOString())}</strong></div>
-                  <div><span>Sales order</span><strong>{deliveryOrder.orderNumber}</strong></div>
+                  <div><span>Note date</span><strong>{documentDate(delivery?.deliveryDate ?? order.fulfilledAt ?? order.orderDate)}</strong></div>
+                  <div><span>Sales order</span><strong>{order.orderNumber}</strong></div>
                 </div>
               </div>
             </header>
             <section className="customer-quote-document-customer">
-              <span>DELIVER TO</span><strong>{deliveryOrder.customerName}</strong>
+              <span>DELIVER TO</span><strong>{order.customerName}</strong>
               {customer?.contactPerson && <p>Attn: {customer.contactPerson}</p>}
               {customer?.contactPersonPhone && <p>{customer.contactPersonPhone}</p>}
-              {(deliveryOrder.deliveryAddress || customer?.address) && <p>{deliveryOrder.deliveryAddress || customer?.address}</p>}
+              {(order.deliveryAddress || customer?.address) && <p>{order.deliveryAddress || customer?.address}</p>}
             </section>
             <table className="customer-quote-document-table">
               <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Quantity</th></tr></thead>
-              <tbody>{deliveryOrder.lines.map((line) => <tr key={line.id}>
+              <tbody>{noteLines.map((line) => <tr key={line.salesOrderLineId}>
                 <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td>
               </tr>)}</tbody>
             </table>
-            {deliveryOrder.notes && <section className="customer-quote-document-notes"><span>ORDER NOTES</span><p>{deliveryOrder.notes}</p></section>}
+            {order.notes && <section className="customer-quote-document-notes"><span>ORDER NOTES</span><p>{order.notes}</p></section>}
             <section className="delivery-note-signatures" aria-label="Delivery confirmation">
               <div><span>Delivered by</span><span>Name and signature</span><span>Date</span></div>
               <div><span>Received by</span><span>Name and signature</span><span>Date</span></div>

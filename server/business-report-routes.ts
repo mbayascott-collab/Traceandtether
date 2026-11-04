@@ -2,7 +2,7 @@ import { desc, eq } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
   accountingAccounts, customers, inventoryMovements, inventoryReservations, journalEntries, journalLines,
-  products, purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
+  products, purchaseOrderLines, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
 import { calculateProductProfitability, toMinorUnits } from "../shared/money";
 import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/business-planning";
@@ -24,7 +24,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
   app.get("/api/business-dashboard", owner, async (_req, res) => {
     const monthStart = `${new Date().toISOString().slice(0, 8)}01`;
     const salesWindowStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const [allProducts, allCustomers, orders, movements, reservations, lines, purchaseHeaders, purchaseLines, postedShipLines, accountBalances] = await Promise.all([
+    const [allProducts, allCustomers, orders, movements, reservations, lines, deliveryRows, purchaseHeaders, purchaseLines, postedShipLines, accountBalances] = await Promise.all([
       db.select().from(products).orderBy(desc(products.updatedAt)),
       db.select({ id: customers.id }).from(customers),
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
@@ -33,6 +33,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       db.select({ productId: inventoryReservations.productId, quantity: inventoryReservations.quantity })
         .from(inventoryReservations).where(eq(inventoryReservations.status, "active")),
       db.select({ orderId: salesOrderLines.salesOrderId, productId: salesOrderLines.productId, quantity: salesOrderLines.quantity, price: salesOrderLines.unitPriceZmw }).from(salesOrderLines),
+      db.select({
+        orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+        productId: salesOrderLines.productId, quantity: salesDeliveryLines.quantity, price: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
       db.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders),
       db.select().from(purchaseOrderLines),
       db.select({ purchaseOrderLineId: shipmentLines.purchaseOrderLineId, quantityStocked: shipmentLines.quantityStocked }).from(shipmentLines),
@@ -45,10 +51,16 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     const onHand = new Map<number, number>(), reserved = new Map<number, number>();
     for (const row of movements) onHand.set(row.productId, (onHand.get(row.productId) ?? 0) + row.quantityDelta);
     for (const row of reservations) reserved.set(row.productId, (reserved.get(row.productId) ?? 0) + row.quantity);
-    const fulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && order.orderDate >= monthStart).map(({ order }) => order.id));
-    const monthSales = lines.reduce((total, line) => fulfilledIds.has(line.orderId) ? total + cents(line.price) * BigInt(line.quantity) : total, 0n);
+    const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
+    const monthSales = deliveryRows.reduce((total, row) => row.deliveryDate >= monthStart ? total + cents(row.price) * BigInt(row.quantity) : total, 0n)
+      + lines.reduce((total, line) => {
+        const order = orders.find(({ order: row }) => row.id === line.orderId)?.order;
+        return order?.status === "fulfilled" && !ordersWithDeliveries.has(line.orderId) && order.orderDate >= monthStart
+          ? total + cents(line.price) * BigInt(line.quantity) : total;
+      }, 0n);
     const demand = new Map<number, number>();
-    const recentFulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && order.orderDate >= salesWindowStart).map(({ order }) => order.id));
+    for (const row of deliveryRows) if (row.deliveryDate >= salesWindowStart) demand.set(row.productId, (demand.get(row.productId) ?? 0) + row.quantity);
+    const recentFulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && !ordersWithDeliveries.has(order.id) && order.orderDate >= salesWindowStart).map(({ order }) => order.id));
     for (const line of lines) if (recentFulfilledIds.has(line.orderId)) demand.set(line.productId, (demand.get(line.productId) ?? 0) + line.quantity);
     const purchaseStatus = new Map(purchaseHeaders.map((order) => [order.id, order.status]));
     const stockedByLine = new Map<number, number>();
@@ -77,7 +89,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     res.json({
       metrics: {
         products: allProducts.length, activeProducts: allProducts.filter((p) => p.status === "active").length,
-        customers: allCustomers.length, openOrders: orders.filter(({ order }) => order.status === "draft" || order.status === "confirmed").length,
+        customers: allCustomers.length, openOrders: orders.filter(({ order }) => order.status === "draft" || order.status === "confirmed" || order.status === "partially_fulfilled").length,
         monthSalesZmw: from(monthSales), inStockProducts: allProducts.filter((p) => (onHand.get(p.id) ?? 0) - (reserved.get(p.id) ?? 0) > 0).length,
         inventoryValueZmw: from(inventoryValue),
       },
@@ -96,21 +108,32 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     if ((fromDate && !validDate(fromDate)) || (toDate && !validDate(toDate)) || (fromDate && toDate && fromDate > toDate)) {
       return res.status(400).json({ error: "Choose a valid date range." });
     }
-    const [allProducts, orders, lines, costLines] = await Promise.all([
+    const [allProducts, orders, lines, deliveryRows, costLines] = await Promise.all([
       db.select({ id: products.id, name: products.name, sku: products.sku, unit: products.unit, estimatedLandedCostZmw: products.estimatedLandedCostZmw })
         .from(products).orderBy(products.name),
-      db.select({ id: salesOrders.id, orderDate: salesOrders.orderDate }).from(salesOrders).where(eq(salesOrders.status, "fulfilled")),
+      db.select({ id: salesOrders.id, status: salesOrders.status, orderDate: salesOrders.orderDate }).from(salesOrders),
       db.select().from(salesOrderLines),
+      db.select({
+        orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+        productId: salesOrderLines.productId, quantity: salesDeliveryLines.quantity, price: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
       db.select({ productId: journalLines.productId, debitZmw: journalLines.debitZmw, entryDate: journalEntries.entryDate })
         .from(journalLines).innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
         .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
         .where(eq(accountingAccounts.systemKey, "cost_of_goods_sold")),
     ]);
-    const orderById = new Map(orders.map((order) => [order.id, order]));
+    const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
     const revenue = new Map<number, bigint>(), units = new Map<number, number>();
+    for (const row of deliveryRows) {
+      if ((fromDate && row.deliveryDate < fromDate) || (toDate && row.deliveryDate > toDate)) continue;
+      revenue.set(row.productId, (revenue.get(row.productId) ?? 0n) + cents(row.price) * BigInt(row.quantity));
+      units.set(row.productId, (units.get(row.productId) ?? 0) + row.quantity);
+    }
     for (const line of lines) {
-      const order = orderById.get(line.salesOrderId);
-      if (!order || (fromDate && order.orderDate < fromDate) || (toDate && order.orderDate > toDate)) continue;
+      const order = orders.find((item) => item.id === line.salesOrderId);
+      if (!order || order.status !== "fulfilled" || ordersWithDeliveries.has(order.id) || (fromDate && order.orderDate < fromDate) || (toDate && order.orderDate > toDate)) continue;
       revenue.set(line.productId, (revenue.get(line.productId) ?? 0n) + cents(line.unitPriceZmw) * BigInt(line.quantity));
       units.set(line.productId, (units.get(line.productId) ?? 0) + line.quantity);
     }

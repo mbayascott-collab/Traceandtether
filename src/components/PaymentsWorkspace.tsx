@@ -60,7 +60,7 @@ export default function PaymentsWorkspace() {
         <option value="supplier_payment">Money paid to supplier</option>
       </select></label>
       <form key={direction} className="form-grid payment-form" onSubmit={submit}>
-        <label>{direction === "customer_receipt" ? "Customer invoice" : "Supplier purchase order"}
+          <label>{direction === "customer_receipt" ? "Customer order balance" : "Supplier purchase order"}
           <select name="orderId" required defaultValue="">
             <option value="">Choose an outstanding balance</option>
             {options.map((option) => <option key={option.orderId} value={option.orderId}>

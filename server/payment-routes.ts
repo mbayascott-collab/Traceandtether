@@ -3,7 +3,7 @@ import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import {
   accountingAccounts, businessPayments, customers, journalEntries, journalLines, purchaseOrders,
-  salesOrderLines, salesOrders, suppliers,
+  salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
 import { cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
@@ -28,7 +28,7 @@ async function payableForPurchaseOrder(tx: any, orderNumber: string) {
 export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/payments", owner, async (_req, res) => {
     const accountMap = await ensureAccountingAccounts(db);
-    const [paymentRows, fulfilledOrders, orderLines, openPurchaseOrders] = await Promise.all([
+    const [paymentRows, eligibleOrders, orderLines, deliveryRows, openPurchaseOrders] = await Promise.all([
       db.select({
         payment: businessPayments, salesOrderNumber: salesOrders.orderNumber, customerName: customers.name,
         purchaseOrderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name,
@@ -40,8 +40,13 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .orderBy(desc(businessPayments.paymentDate), desc(businessPayments.createdAt)),
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id))
-        .where(eq(salesOrders.status, "fulfilled")),
+        .where(inArray(salesOrders.status, ["partially_fulfilled", "fulfilled", "cancelled"])),
       db.select().from(salesOrderLines),
+      db.select({
+        orderId: salesDeliveries.salesOrderId, quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
       db.select({ order: purchaseOrders, supplierName: suppliers.name }).from(purchaseOrders)
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(inArray(purchaseOrders.status, ["partially_received", "received"])),
@@ -56,9 +61,18 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       if (key !== null) target.set(key, (target.get(key) ?? 0n) + cents(payment.amountZmw));
     }
 
-    const invoices = fulfilledOrders.map(({ order, customerName }) => {
-      const total = orderLines.filter((line) => line.salesOrderId === order.id)
-        .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
+    const deliveredTotals = new Map<number, bigint>();
+    for (const row of deliveryRows) {
+      deliveredTotals.set(row.orderId, (deliveredTotals.get(row.orderId) ?? 0n) + cents(row.unitPriceZmw) * BigInt(row.quantity));
+    }
+    const ordersWithDelivery = new Set(deliveryRows.map((row) => row.orderId));
+    const invoices = eligibleOrders.map(({ order, customerName }) => {
+      const total = ordersWithDelivery.has(order.id)
+        ? deliveredTotals.get(order.id) ?? 0n
+        : order.status === "fulfilled"
+          ? orderLines.filter((line) => line.salesOrderId === order.id)
+            .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
+          : 0n;
       const outstanding = total - (paidSales.get(order.id) ?? 0n);
       return { orderId: order.id, orderNumber: order.orderNumber, customerName, totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n), outstandingZmw: formatCents(outstanding) };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
@@ -103,10 +117,23 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       if (input.direction === "customer_receipt") {
         const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, input.orderId)).for("update").limit(1);
         if (!order) return { error: "Sales order not found.", status: 404 };
-        if (order.status !== "fulfilled") return { error: "Only completed sales can receive payments.", status: 409 };
+        if (order.status !== "fulfilled" && order.status !== "partially_fulfilled" && order.status !== "cancelled") {
+          return { error: "Deliver goods before recording a customer payment.", status: 409 };
+        }
         orderNumber = order.orderNumber;
         invoiceId = order.id;
-        const lines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id));
+        const deliveredLines = await tx.select({
+          quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+        }).from(salesDeliveryLines)
+          .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+          .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+          .where(eq(salesDeliveries.salesOrderId, order.id));
+        const lines = deliveredLines.length
+          ? deliveredLines
+          : order.status === "fulfilled"
+            ? await tx.select({ quantity: salesOrderLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw })
+              .from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id))
+            : [];
         const total = lines.reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
         const existing = await tx.select({ amount: sum(businessPayments.amountZmw) }).from(businessPayments)
           .where(and(eq(businessPayments.direction, "customer_receipt"), eq(businessPayments.salesOrderId, order.id)));

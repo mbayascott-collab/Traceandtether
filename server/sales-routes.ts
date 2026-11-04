@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
-  customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesOrderInputSchema,
+  customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customerQuoteLines, customerQuotes, customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesOrderLines, salesOrders,
+  customerQuoteLines, customerQuotes, customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
@@ -22,6 +22,100 @@ async function stockBalance(tx: any, productId: number) {
   const [r] = await tx.select({ value: sum(inventoryReservations.quantity) }).from(inventoryReservations)
     .where(and(eq(inventoryReservations.productId, productId), eq(inventoryReservations.status, "active")));
   return { onHand: Number(m?.value ?? 0), reserved: Number(r?.value ?? 0) };
+}
+
+async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }) {
+  const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, orderId)).for("update").limit(1);
+  if (!order) return { error: "Sales order not found.", status: 404 };
+  if (order.status !== "confirmed" && order.status !== "partially_fulfilled") {
+    return { error: "Only confirmed or partly delivered orders can receive another delivery.", status: 409 };
+  }
+  const orderLines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, orderId)).orderBy(asc(salesOrderLines.productId));
+  const deliveredRows = await tx.select({
+    lineId: salesDeliveryLines.salesOrderLineId, quantity: sum(salesDeliveryLines.quantity),
+  }).from(salesDeliveryLines)
+    .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+    .where(eq(salesDeliveries.salesOrderId, orderId)).groupBy(salesDeliveryLines.salesOrderLineId);
+  const delivered = new Map<number, number>();
+  for (const row of deliveredRows) delivered.set(row.lineId, Number(row.quantity ?? 0));
+  const requested = new Map<number, number>();
+  for (const line of input.lines) requested.set(line.salesOrderLineId, line.quantity);
+  for (const [lineId, quantity] of requested) {
+    const line = orderLines.find((item: typeof salesOrderLines.$inferSelect) => item.id === lineId);
+    if (!line) return { error: "A delivery line does not belong to this sales order.", status: 400 };
+    const remaining = line.quantity - (delivered.get(lineId) ?? 0);
+    if (quantity > remaining) return { error: `Only ${remaining} more units can be delivered for product ${line.productId}.`, status: 409 };
+  }
+  const holdsByProduct = new Map<number, typeof inventoryReservations.$inferSelect>();
+  for (const lineInput of input.lines) {
+    const line = orderLines.find((item: typeof salesOrderLines.$inferSelect) => item.id === lineInput.salesOrderLineId)!;
+    const [hold] = await tx.select().from(inventoryReservations)
+      .where(and(eq(inventoryReservations.salesOrderId, orderId), eq(inventoryReservations.productId, line.productId), eq(inventoryReservations.status, "active")))
+      .for("update").limit(1);
+    if (!hold || hold.quantity < lineInput.quantity) {
+      return { error: `The reserved stock for product ${line.productId} is not enough for this delivery.`, status: 409 };
+    }
+    holdsByProduct.set(line.productId, hold);
+  }
+  const [delivery] = await tx.insert(salesDeliveries).values({
+    deliveryNumber: `DN-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
+    salesOrderId: orderId, deliveryDate: input.deliveryDate,
+  }).returning();
+  await tx.insert(salesDeliveryLines).values(input.lines.map((line) => ({
+    deliveryId: delivery.id, salesOrderLineId: line.salesOrderLineId, quantity: line.quantity,
+  })));
+
+  let revenue = 0n;
+  const cogsLines = [];
+  for (const lineInput of input.lines) {
+    const line = orderLines.find((item: typeof salesOrderLines.$inferSelect) => item.id === lineInput.salesOrderLineId)!;
+    const hold = holdsByProduct.get(line.productId)!;
+    const remainingReservation = hold.quantity - lineInput.quantity;
+    await tx.update(inventoryReservations).set({
+      quantity: remainingReservation > 0 ? remainingReservation : hold.quantity,
+      status: remainingReservation > 0 ? "active" : "fulfilled",
+      updatedAt: new Date(),
+    }).where(eq(inventoryReservations.id, hold.id));
+    const [movementTotal] = await tx.select({ value: sum(inventoryMovements.quantityDelta) })
+      .from(inventoryMovements).where(eq(inventoryMovements.productId, line.productId));
+    const onHand = Number(movementTotal?.value ?? 0);
+    const stockValue = await accountBalance(tx, "inventory", line.productId);
+    if (onHand > 0 && stockValue > 0n) {
+      const cost = (stockValue * BigInt(lineInput.quantity) + BigInt(onHand / 2)) / BigInt(onHand);
+      if (cost > 0n) cogsLines.push(
+        { accountKey: "cost_of_goods_sold", productId: line.productId, debitZmw: formatCents(cost), description: "Weighted-average cost of delivered goods" },
+        { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory delivered" },
+      );
+    }
+    await tx.insert(inventoryMovements).values({
+      productId: line.productId, kind: "reservation_fulfillment", quantityDelta: -lineInput.quantity,
+      reason: `Delivered on ${delivery.deliveryNumber}`, reference: delivery.deliveryNumber,
+      sourceKey: `sales-delivery-${delivery.id}-product-${line.productId}`, reservationId: hold.id,
+    });
+    revenue += cents(line.unitPriceZmw) * BigInt(lineInput.quantity);
+  }
+  if (revenue > 0n) await postJournal(tx, {
+    sourceKey: `sales-delivery-${delivery.id}-revenue`, sourceType: "sales_delivery", sourceId: delivery.id,
+    memo: `Delivery ${delivery.deliveryNumber} for ${order.orderNumber}`, entryDate: input.deliveryDate,
+    lines: [
+      { accountKey: "accounts_receivable", debitZmw: formatCents(revenue), description: "Customer balance for delivered goods" },
+      { accountKey: "sales_revenue", creditZmw: formatCents(revenue), description: "Sales delivered" },
+    ],
+  });
+  if (cogsLines.length) await postJournal(tx, {
+    sourceKey: `sales-delivery-${delivery.id}-cogs`, sourceType: "sales_delivery_cogs", sourceId: delivery.id,
+    memo: `Cost of delivery ${delivery.deliveryNumber}`, entryDate: input.deliveryDate, lines: cogsLines,
+  });
+
+  const deliveredAfter = new Map(delivered);
+  for (const [lineId, quantity] of requested) deliveredAfter.set(lineId, (deliveredAfter.get(lineId) ?? 0) + quantity);
+  const complete = orderLines.every((line: typeof salesOrderLines.$inferSelect) => (deliveredAfter.get(line.id) ?? 0) === line.quantity);
+  const [saved] = await tx.update(salesOrders).set({
+    status: complete ? "fulfilled" : "partially_fulfilled",
+    fulfilledAt: complete ? new Date() : null,
+    updatedAt: new Date(),
+  }).where(eq(salesOrders.id, orderId)).returning();
+  return { delivery, order: saved };
 }
 
 export function registerSalesRoutes(app: Express, owner: RequestHandler) {
@@ -108,20 +202,55 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
         .from(salesOrderLines).innerJoin(products, eq(salesOrderLines.productId, products.id)),
       db.select({ salesOrderId: marketingAttributions.salesOrderId, campaignId: marketingAttributions.campaignId, campaignName: marketingCampaigns.name })
         .from(marketingAttributions).innerJoin(marketingCampaigns, eq(marketingAttributions.campaignId, marketingCampaigns.id)),
+      db.select({
+        delivery: salesDeliveries, deliveryLine: salesDeliveryLines,
+        orderLine: salesOrderLines, productName: products.name, sku: products.sku,
+      }).from(salesDeliveries)
+        .innerJoin(salesDeliveryLines, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId))
+        .innerJoin(products, eq(products.id, salesOrderLines.productId))
+        .orderBy(desc(salesDeliveries.deliveryDate)),
     ]);
     const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
     res.json({ orders: orders.map(({ order, customerName }) => {
+      const orderDeliveries = deliveryRows.filter(({ delivery }) => delivery.salesOrderId === order.id);
+      const deliveredByLine = new Map<number, number>();
+      for (const row of orderDeliveries) {
+        deliveredByLine.set(row.orderLine.id, (deliveredByLine.get(row.orderLine.id) ?? 0) + row.deliveryLine.quantity);
+      }
       const items = lines.filter(({ line }) => line.salesOrderId === order.id)
-        .map(({ line, productName, sku }) => ({ ...line, productName, sku, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)) }));
+        .map(({ line, productName, sku }) => {
+          const deliveredQuantity = deliveredByLine.get(line.id) ?? (order.status === "fulfilled" ? line.quantity : 0);
+          return {
+            ...line, productName, sku, deliveredQuantity,
+            remainingQuantity: Math.max(0, line.quantity - deliveredQuantity),
+            lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+          };
+        });
       const attribution = attributionByOrder.get(order.id);
-      return { ...order, customerName, campaignId: attribution?.campaignId ?? null, campaignName: attribution?.campaignName ?? null, lines: items, totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
+      const deliveriesById = new Map<number, { id: number; deliveryNumber: string; deliveryDate: string; lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[] }>();
+      for (const row of orderDeliveries) {
+        const delivery = deliveriesById.get(row.delivery.id) ?? {
+          id: row.delivery.id, deliveryNumber: row.delivery.deliveryNumber, deliveryDate: row.delivery.deliveryDate, lines: [],
+        };
+        delivery.lines.push({
+          salesOrderLineId: row.orderLine.id, productName: row.productName, sku: row.sku, quantity: row.deliveryLine.quantity,
+        });
+        deliveriesById.set(row.delivery.id, delivery);
+      }
+      return {
+        ...order, customerName, campaignId: attribution?.campaignId ?? null, campaignName: attribution?.campaignName ?? null,
+        lines: items, deliveries: Array.from(deliveriesById.values()),
+        deliveredZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.deliveredQuantity), 0n)),
+        totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)),
+      };
     }) });
   });
   app.get("/api/customer-quotes", owner, async (_req, res) => {
@@ -311,60 +440,35 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json({ order: result.order });
   });
+  app.post("/api/sales-orders/:id/deliveries", owner, async (req, res) => {
+    const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
+    const parsed = salesDeliveryInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the delivery details.");
+    const result = await db.transaction((tx) => recordDelivery(tx, id, parsed.data));
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.status(201).json(result);
+  });
   app.post("/api/sales-orders/:id/fulfill", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
     const result = await db.transaction(async (tx) => {
       const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).for("update").limit(1);
       if (!order) return { error: "Sales order not found.", status: 404 };
-      if (order.status !== "confirmed") return { error: "Only confirmed orders can be fulfilled.", status: 409 };
-      const holds = await tx.select().from(inventoryReservations).where(and(eq(inventoryReservations.salesOrderId, id), eq(inventoryReservations.status, "active"))).orderBy(asc(inventoryReservations.productId));
-      if (!holds.length) return { error: "No active stock reservations were found.", status: 409 };
-      for (const hold of holds) await tx.select({ id: products.id }).from(products).where(eq(products.id, hold.productId)).for("update");
+      if (order.status !== "confirmed" && order.status !== "partially_fulfilled") return { error: "Only open confirmed orders can be fulfilled.", status: 409 };
       const orderLines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, id));
-      const revenue = orderLines.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
-      if (revenue > 0n) {
-        await postJournal(tx, {
-          sourceKey: `sales-order-${id}-revenue`, sourceType: "sales_order", sourceId: id,
-          memo: `Sales order ${order.orderNumber}`, entryDate: order.orderDate,
-          lines: [
-            { accountKey: "accounts_receivable", debitZmw: formatCents(revenue), description: "Unpaid customer balance" },
-            { accountKey: "sales_revenue", creditZmw: formatCents(revenue), description: "Sales" },
-          ],
-        });
-      }
-      const costLines = [];
-      for (const line of orderLines) {
-        const [movementTotal] = await tx.select({ value: sum(inventoryMovements.quantityDelta) })
-          .from(inventoryMovements).where(eq(inventoryMovements.productId, line.productId));
-        const onHand = Number(movementTotal?.value ?? 0);
-        const inventoryValue = await accountBalance(tx, "inventory", line.productId);
-        if (onHand <= 0 || inventoryValue <= 0n) continue;
-        const cost = (inventoryValue * BigInt(line.quantity) + BigInt(onHand / 2)) / BigInt(onHand);
-        if (cost <= 0n) continue;
-        costLines.push(
-          { accountKey: "cost_of_goods_sold", productId: line.productId, debitZmw: formatCents(cost), description: "Weighted-average cost of sale" },
-          { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory issued" },
-        );
-      }
-      if (costLines.length) {
-        await postJournal(tx, {
-          sourceKey: `sales-order-${id}-cogs`, sourceType: "sales_order_cogs", sourceId: id,
-          memo: `Cost of sales for ${order.orderNumber}`, entryDate: order.orderDate, lines: costLines,
-        });
-      }
-      for (const hold of holds) {
-        const [movement] = await tx.insert(inventoryMovements).values({
-          productId: hold.productId, kind: "reservation_fulfillment", quantityDelta: -hold.quantity,
-          reason: `Fulfilled sales order ${order.orderNumber}`, reference: order.orderNumber,
-          sourceKey: `sales-order-${id}-product-${hold.productId}`, reservationId: hold.id,
-        }).returning();
-        await tx.update(inventoryReservations).set({ status: "fulfilled", updatedAt: new Date() }).where(eq(inventoryReservations.id, hold.id));
-      }
-      const [saved] = await tx.update(salesOrders).set({ status: "fulfilled", fulfilledAt: new Date(), updatedAt: new Date() }).where(eq(salesOrders.id, id)).returning();
-      return { order: saved };
+      const deliveredRows = await tx.select({
+        lineId: salesDeliveryLines.salesOrderLineId, quantity: sum(salesDeliveryLines.quantity),
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .where(eq(salesDeliveries.salesOrderId, id)).groupBy(salesDeliveryLines.salesOrderLineId);
+      const delivered = new Map<number, number>(deliveredRows.map((row) => [row.lineId, Number(row.quantity ?? 0)]));
+      const remainingLines = orderLines.map((line) => ({
+        salesOrderLineId: line.id, quantity: line.quantity - (delivered.get(line.id) ?? 0),
+      })).filter((line) => line.quantity > 0);
+      if (!remainingLines.length) return { error: "This order has no remaining items to deliver.", status: 409 };
+      return recordDelivery(tx, id, { deliveryDate: new Date().toISOString().slice(0, 10), lines: remainingLines });
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
-    res.json({ order: result.order });
+    res.json(result);
   });
   app.post("/api/sales-orders/:id/cancel", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
