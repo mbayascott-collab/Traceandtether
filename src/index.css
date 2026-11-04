@@ -2659,6 +2659,8 @@ textarea:focus-visible {
   border-radius: 50%;
 }
 .customer-quote-document-brand strong { max-width: 320px; font-size: 19px; line-height: 1.35; }
+.customer-quote-document-brand > div { display: grid; gap: 5px; }
+.customer-quote-document-brand small { color: #526963; font-size: 10px; line-height: 1.4; }
 .customer-quote-document-title { display: flex; justify-content: space-between; gap: 24px; }
 .customer-quote-document-kicker,
 .customer-quote-document-customer > span,
