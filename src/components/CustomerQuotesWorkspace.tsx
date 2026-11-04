@@ -7,6 +7,7 @@ const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const companyName = "Trace and Tether Craft Studio Limited";
 const companyAddress = "164 Mpundu Street, Chelston Extension, Lusaka, Zambia";
+const companyEmail = "traceandtether@gmail.com";
 const emptyInput: CustomerQuoteInput = { customerId: 0, validUntil: null, deliveryAddress: null, notes: null, status: "draft", lines: [] };
 
 export default function CustomerQuotesWorkspace() {
@@ -112,7 +113,7 @@ export default function CustomerQuotesWorkspace() {
           <header className="customer-quote-document-header">
             <div className="customer-quote-document-brand">
               <img src={companyLogo} alt={`${companyName} logo`} />
-              <div><strong>{companyName}</strong><small>{companyAddress}</small></div>
+              <div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}</small></div>
             </div>
             <div className="customer-quote-document-title">
               <div><span className="customer-quote-document-kicker">CUSTOMER QUOTATION</span><h1>{printQuote.quoteNumber}</h1></div>

@@ -11,6 +11,7 @@ const emptyLine = (): Line => ({ productId: "", quantity: "1", unitPriceZmw: "" 
 const zmw = (amount: string) => `ZMW ${Number(amount).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const companyName = "Trace and Tether Craft Studio Limited";
 const companyAddress = "164 Mpundu Street, Chelston Extension, Lusaka, Zambia";
+const companyEmail = "traceandtether@gmail.com";
 export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
@@ -122,7 +123,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           </div>
           <article className="customer-quote-document" id="sales-invoice-print">
             <header className="customer-quote-document-header">
-              <div className="customer-quote-document-brand"><img src={companyLogo} alt={`${companyName} logo`} /><div><strong>{companyName}</strong><small>{companyAddress}</small></div></div>
+              <div className="customer-quote-document-brand"><img src={companyLogo} alt={`${companyName} logo`} /><div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}</small></div></div>
               <div className="customer-quote-document-title">
                 <div><span className="customer-quote-document-kicker">SALES INVOICE</span><h1>{invoiceRef}</h1></div>
                 <div className="customer-quote-document-meta">
