@@ -40,7 +40,7 @@ export interface SalesOrderLine { id: number; productId: number; productName: st
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "fulfilled" | "cancelled"; confirmedAt?: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
 export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
-export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; status: CustomerQuoteStatus; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
+export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; status: CustomerQuoteStatus; createdAt: string; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
 export interface CustomerQuoteInput { customerId: number; validUntil: string | null; deliveryAddress: string | null; notes: string | null; status: "draft" | "sent" | "accepted" | "rejected"; lines: { productId: number; quantity: number; unitPriceZmw: string }[]; }
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
 
