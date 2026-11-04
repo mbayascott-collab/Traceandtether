@@ -1272,7 +1272,7 @@ textarea:focus-visible {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px 13px;
 }
 
@@ -2529,7 +2529,7 @@ textarea:focus-visible {
 }
 
 .marketing-form textarea { resize: vertical; }
-.marketing-form .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.marketing-form .form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .marketing-form .marketing-checkbox { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .marketing-form .marketing-checkbox input { width: auto; min-height: 0; }
 
@@ -2549,7 +2549,7 @@ textarea:focus-visible {
 .marketing-row span { color: var(--muted); font-size: 9px; }
 .muted-empty { padding: 10px 16px; color: var(--muted); font-size: 10px; }
 .marketing-expenses { grid-column: 1 / -1; }
-.marketing-expenses .marketing-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.marketing-expenses .marketing-form { grid-template-columns: minmax(0, 1fr); }
 .marketing-expenses .marketing-form > label { min-width: 0; }
 .marketing-expenses .marketing-form > button { align-self: end; }
 .marketing-expenses .table-wrap { margin: 0; border: 0; border-radius: 0; }
