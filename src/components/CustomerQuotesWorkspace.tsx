@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { convertCustomerQuote, deleteCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 
@@ -103,7 +104,7 @@ export default function CustomerQuotesWorkspace() {
         <button className="button button-secondary button-small" onClick={() => setPrintQuote(quote)}>Save PDF</button>
       </td></tr>)}
     </tbody></table>{!quotes.length && <p className="report-footnote">No customer quotes yet.</p>}</div>
-    {printQuote && <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
+    {printQuote && createPortal(<div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
       <div className="quote-preview-panel">
         <div className="quote-preview-toolbar">
           <div><strong id="quote-preview-title">Customer quote preview</strong><span>Choose “Save as PDF” in the print window.</span></div>
@@ -139,6 +140,6 @@ export default function CustomerQuotesWorkspace() {
           <footer className="customer-quote-document-footer">All prices are in ZMW. Quote reference: {printQuote.quoteNumber}</footer>
         </article>
       </div>
-    </div>}
+    </div>, document.body)}
   </section>;
 }
