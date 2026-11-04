@@ -2749,3 +2749,174 @@ textarea:focus-visible {
     box-shadow: none !important;
   }
 }
+
+@media (max-width: 640px) {
+  .app-main {
+    padding-right: 12px;
+    padding-left: 12px;
+    scrollbar-gutter: auto;
+  }
+
+  .topbar {
+    gap: 8px;
+  }
+
+  .mobile-menu-button {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 auto;
+    margin-right: 4px;
+  }
+
+  .breadcrumbs {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .breadcrumbs strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .private-pill {
+    display: none;
+  }
+
+  .side-nav a {
+    min-height: 48px;
+  }
+
+  .signout-button {
+    width: 42px;
+    height: 42px;
+  }
+
+  .page-content,
+  .panel,
+  .metric-card {
+    min-width: 0;
+  }
+
+  .section-caption {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metric-card {
+    min-height: 100px;
+    padding: 12px;
+  }
+
+  .metric-top {
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  .metric-value {
+    overflow-wrap: anywhere;
+    font-size: clamp(20px, 7vw, 26px);
+  }
+
+  .metric-detail {
+    line-height: 1.4;
+  }
+
+  .button:not(.button-small) {
+    min-height: 44px;
+  }
+
+  .button-small {
+    min-height: 40px;
+  }
+
+  .field input,
+  .field select,
+  .field textarea,
+  .filter-select,
+  .toolbar input,
+  .toolbar select,
+  .marketing-report-controls input,
+  .profitability-controls input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .toolbar {
+    gap: 9px;
+  }
+
+  .table-wrap {
+    max-width: 100%;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .data-table {
+    min-width: 680px;
+  }
+
+  .data-table th,
+  .data-table td {
+    padding-right: 9px;
+    padding-left: 9px;
+  }
+
+  .modal-body {
+    max-height: calc(94dvh - 150px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .modal-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+  }
+
+  .customer-quote-line {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .profitability-controls,
+  .marketing-report-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .profitability-controls label,
+  .marketing-report-controls label {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 380px) {
+  .app-main {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .page-heading h1 {
+    font-size: 25px;
+  }
+
+  .modal-footer-actions {
+    flex-direction: column-reverse;
+  }
+
+  .modal-footer-actions .button {
+    width: 100%;
+  }
+}

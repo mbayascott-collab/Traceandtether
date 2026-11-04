@@ -286,7 +286,18 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   useEffect(() => {
     document.querySelector(".app-main")?.scrollTo(0, 0);
     window.scrollTo(0, 0);
+    setMobileNavOpen(false);
   }, [location]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
   const allProducts = productsResult?.products ?? [];
   const pagination = productsResult?.pagination;
 
@@ -420,7 +431,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </div>
         </div>
         <div className="nav-caption">Workspace</div>
-        <nav className="side-nav">
+        <nav className="side-nav" onClick={() => setMobileNavOpen(false)}>
           <Link href="/dashboard" aria-current={isDashboard ? "page" : undefined}>
             <LayoutDashboard aria-hidden="true" /><span>Dashboard</span>
           </Link>
