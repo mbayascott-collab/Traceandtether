@@ -26,6 +26,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
+  const [deliveryOrder, setDeliveryOrder] = useState<SalesOrder | null>(null);
   useEffect(() => {
     let alive = true;
     Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
@@ -65,6 +66,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   }
   function invoiceNumber(order: SalesOrder) {
     return `INV-${order.orderNumber.replace(/^SO-/, "")}`;
+  }
+  function deliveryNoteNumber(order: SalesOrder) {
+    return `DN-${order.orderNumber.replace(/^SO-/, "")}`;
   }
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
@@ -107,8 +111,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
-          {o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"), "Sale recorded and stock updated.", o.id)}>{busyOrderId === o.id ? "Updating…" : "Fulfill"}</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button></>}
-           {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
+          {o.status === "confirmed" && <><button className="button button-secondary button-small" onClick={() => setDeliveryOrder(o)}>Delivery note</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"), "Sale recorded and stock updated.", o.id)}>{busyOrderId === o.id ? "Updating…" : "Fulfill"}</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button></>}
+           {o.status === "fulfilled" && <><button className="button button-secondary button-small" onClick={() => setDeliveryOrder(o)}>Delivery note</button> <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button></>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
         </td></tr>)}</tbody></table></div>
     </>}
@@ -149,6 +153,51 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoiceOrder.totalZmw)}</strong></div>
             {invoiceOrder.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{invoiceOrder.notes}</p></section>}
             <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoiceRef} · Sales order: {invoiceOrder.orderNumber}</footer>
+          </article>
+        </div>
+      </div>;
+    })()}
+    {mode === "orders" && deliveryOrder && (() => {
+      const customer = customers.find((item) => item.id === deliveryOrder.customerId);
+      const noteRef = deliveryNoteNumber(deliveryOrder);
+      return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="delivery-note-preview-title">
+        <div className="quote-preview-panel">
+          <div className="quote-preview-toolbar">
+            <div><strong id="delivery-note-preview-title">Delivery note preview</strong><span>Print this note or save it as a PDF.</span></div>
+            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setDeliveryOrder(null)}>Close</button></div>
+          </div>
+          <article className="customer-quote-document" id="delivery-note-print">
+            <header className="customer-quote-document-header">
+              <div className="customer-quote-document-brand">
+                <img src={companyLogo} alt={`${companyName} logo`} />
+                <div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}<br />{companyPhone}</small></div>
+              </div>
+              <div className="customer-quote-document-title">
+                <div><span className="customer-quote-document-kicker">DELIVERY NOTE</span><h1>{noteRef}</h1></div>
+                <div className="customer-quote-document-meta">
+                  <div><span>Note date</span><strong>{documentDate(new Date().toISOString())}</strong></div>
+                  <div><span>Sales order</span><strong>{deliveryOrder.orderNumber}</strong></div>
+                </div>
+              </div>
+            </header>
+            <section className="customer-quote-document-customer">
+              <span>DELIVER TO</span><strong>{deliveryOrder.customerName}</strong>
+              {customer?.contactPerson && <p>Attn: {customer.contactPerson}</p>}
+              {customer?.contactPersonPhone && <p>{customer.contactPersonPhone}</p>}
+              {(deliveryOrder.deliveryAddress || customer?.address) && <p>{deliveryOrder.deliveryAddress || customer?.address}</p>}
+            </section>
+            <table className="customer-quote-document-table">
+              <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Quantity</th></tr></thead>
+              <tbody>{deliveryOrder.lines.map((line) => <tr key={line.id}>
+                <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td>
+              </tr>)}</tbody>
+            </table>
+            {deliveryOrder.notes && <section className="customer-quote-document-notes"><span>ORDER NOTES</span><p>{deliveryOrder.notes}</p></section>}
+            <section className="delivery-note-signatures" aria-label="Delivery confirmation">
+              <div><span>Delivered by</span><span>Name and signature</span><span>Date</span></div>
+              <div><span>Received by</span><span>Name and signature</span><span>Date</span></div>
+            </section>
+            <footer className="customer-quote-document-footer">Please check the items and quantities above when receiving this delivery. This note does not serve as an invoice or payment receipt.</footer>
           </article>
         </div>
       </div>;
