@@ -113,6 +113,16 @@ export const appUsers = pgTable("app_users", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const appUserAccess = pgTable("app_user_access", {
+  email: varchar("email", { length: 320 }).primaryKey(),
+  displayName: varchar("display_name", { length: 120 }),
+  role: appRole("role").notNull().default("manager"),
+  active: boolean("active").notNull().default(true),
+  createdByClerkUserId: varchar("created_by_clerk_user_id", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const productAuditLogs = pgTable("product_audit_logs", {
   id: serial("id").primaryKey(),
   productId: integer("product_id")

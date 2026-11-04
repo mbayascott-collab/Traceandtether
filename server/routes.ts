@@ -4,7 +4,7 @@ import { and, asc, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
 import {
-  appUsers, productAuditLogs, productCategories, products, supplierQuotes, suppliers,
+  appUserAccess, appUsers, productAuditLogs, productCategories, products, supplierQuotes, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
 import { databaseErrorStatus } from "./database-errors";
@@ -19,8 +19,8 @@ import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 
-type Actor = { clerkUserId: string; email: string };
-type OwnerResolution =
+type Actor = { clerkUserId: string; email: string; role: "owner" | "manager" };
+type UserResolution =
   | { authorized: true; actor: Actor }
   | {
       authorized: false;
@@ -28,7 +28,7 @@ type OwnerResolution =
       reason: "owner_not_configured" | "email_not_approved" | "email_not_verified";
     };
 
-async function resolveOwner(userId: string): Promise<OwnerResolution> {
+async function resolveUser(userId: string): Promise<UserResolution> {
   const user = await clerkClient.users.getUser(userId);
   const primaryEmail = user.emailAddresses.find(
     (address) => address.id === user.primaryEmailAddressId,
@@ -43,28 +43,26 @@ async function resolveOwner(userId: string): Promise<OwnerResolution> {
   if (!configuredOwner) {
     return { authorized: false, email, reason: "owner_not_configured" };
   }
-  if (email !== configuredOwner) {
-    return { authorized: false, email, reason: "email_not_approved" };
+  if (email === configuredOwner) {
+    await db.insert(appUserAccess).values({ email, role: "owner", active: true })
+      .onConflictDoNothing();
   }
 
-  await db
-    .insert(appUsers)
-    .values({ clerkUserId: userId, email, role: "owner" })
-    .onConflictDoNothing();
-
-  const [appUser] = await db
-    .select({ role: appUsers.role, email: appUsers.email })
-    .from(appUsers)
-    .where(eq(appUsers.clerkUserId, userId))
+  const [grant] = await db
+    .select({ role: appUserAccess.role, email: appUserAccess.email, active: appUserAccess.active })
+    .from(appUserAccess)
+    .where(eq(appUserAccess.email, email))
     .limit(1);
 
-  if (!appUser || appUser.role !== "owner" || appUser.email !== email) {
+  if (!grant || !grant.active || grant.email !== email || !["owner", "manager"].includes(grant.role)) {
     return { authorized: false, email, reason: "email_not_approved" };
   }
-  return { authorized: true, actor: { clerkUserId: userId, email } };
+  await db.insert(appUsers).values({ clerkUserId: userId, email, role: grant.role })
+    .onConflictDoUpdate({ target: appUsers.clerkUserId, set: { email, role: grant.role, updatedAt: new Date() } });
+  return { authorized: true, actor: { clerkUserId: userId, email, role: grant.role as "owner" | "manager" } };
 }
 
-export const requireOwner: RequestHandler = async (req, res, next) => {
+export const requireBusinessAccess: RequestHandler = async (req, res, next) => {
   const { userId } = getAuth(req);
   if (!userId) {
     res.status(401).json({ error: "Sign in to access the administration area." });
@@ -72,13 +70,13 @@ export const requireOwner: RequestHandler = async (req, res, next) => {
   }
 
   try {
-    const result = await resolveOwner(userId);
+    const result = await resolveUser(userId);
     if (!result.authorized) {
       const status = result.reason === "owner_not_configured" ? 503 : 403;
       const message =
         result.reason === "owner_not_configured"
           ? "Owner access is not configured yet."
-          : "This verified account is not approved for owner access.";
+          : "This verified account is not approved for business access.";
       res.status(status).json({ error: message });
       return;
     }
@@ -89,7 +87,7 @@ export const requireOwner: RequestHandler = async (req, res, next) => {
       "Unable to verify administrator access.",
       error instanceof Error ? error.name : "UnknownError",
     );
-    res.status(503).json({ error: "Administrator access could not be verified. Try again shortly." });
+    res.status(503).json({ error: "Business access could not be verified. Try again shortly." });
   }
 };
 
@@ -133,12 +131,12 @@ export function registerApiRoutes(app: import("express").Express) {
     }
 
     try {
-      const result = await resolveOwner(userId);
+      const result = await resolveUser(userId);
       if (!result.authorized) {
         res.json({ authorized: false, email: result.email, role: null, reason: result.reason });
         return;
       }
-      res.json({ authorized: true, email: result.actor.email, role: "owner" });
+      res.json({ authorized: true, email: result.actor.email, role: result.actor.role });
     } catch (error) {
       console.error(
         "Unable to load the current application user.",
@@ -148,7 +146,64 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/categories", requireOwner, async (_req, res) => {
+  app.get("/api/user-access", requireBusinessAccess, async (_req, res) => {
+    const users = await db.select().from(appUserAccess).orderBy(asc(appUserAccess.email));
+    res.json({ users });
+  });
+
+  app.post("/api/user-access", requireBusinessAccess, async (req, res) => {
+    const parsed = z.object({
+      email: z.string().trim().email().max(320),
+      displayName: z.string().trim().max(120).nullable().optional(),
+    }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Enter a valid email address and name." });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase();
+    if (email === process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase()) {
+      res.status(409).json({ error: "The primary owner account cannot be added as a manager." });
+      return;
+    }
+    const [existing] = await db.select({ role: appUserAccess.role }).from(appUserAccess)
+      .where(eq(appUserAccess.email, email)).limit(1);
+    if (existing?.role === "owner") {
+      res.status(409).json({ error: "The primary owner account cannot be changed here." });
+      return;
+    }
+    await db.insert(appUserAccess).values({
+      email, displayName: parsed.data.displayName || null, role: "manager", active: true,
+      createdByClerkUserId: (res.locals.actor as Actor).clerkUserId,
+    }).onConflictDoUpdate({
+      target: appUserAccess.email,
+      set: { displayName: parsed.data.displayName || null, role: "manager", active: true, updatedAt: new Date() },
+    });
+    res.status(201).json({ email, displayName: parsed.data.displayName || null, role: "manager", active: true });
+  });
+
+  app.patch("/api/user-access/:email", requireBusinessAccess, async (req, res) => {
+    const parsed = z.object({ active: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Choose whether this account should have access." });
+      return;
+    }
+    const email = String(req.params.email).trim().toLowerCase();
+    const actor = res.locals.actor as Actor;
+    if (email === actor.email || email === process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase()) {
+      res.status(409).json({ error: "You cannot change access for the primary owner or your own account." });
+      return;
+    }
+    const [updated] = await db.update(appUserAccess).set({ active: parsed.data.active, updatedAt: new Date() })
+      .where(and(eq(appUserAccess.email, email), eq(appUserAccess.role, "manager")))
+      .returning({ email: appUserAccess.email, active: appUserAccess.active });
+    if (!updated) {
+      res.status(404).json({ error: "Manager account not found." });
+      return;
+    }
+    res.json(updated);
+  });
+
+  app.get("/api/categories", requireBusinessAccess, async (_req, res) => {
     const categories = await db
       .select()
       .from(productCategories)
@@ -156,7 +211,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ categories });
   });
 
-  app.get("/api/suppliers", requireOwner, async (req, res) => {
+  app.get("/api/suppliers", requireBusinessAccess, async (req, res) => {
     const parsed = z.object({
       q: z.string().trim().max(160).optional(),
       status: z.enum(["all", "active", "inactive"]).default("all"),
@@ -177,7 +232,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ suppliers: rows });
   });
 
-  app.post("/api/suppliers", requireOwner, async (req, res) => {
+  app.post("/api/suppliers", requireBusinessAccess, async (req, res) => {
     const parsed = supplierInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -196,7 +251,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/suppliers/:id", requireOwner, async (req, res) => {
+  app.patch("/api/suppliers/:id", requireBusinessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid supplier identifier." });
@@ -226,7 +281,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/supplier-quotes", requireOwner, async (req, res) => {
+  app.get("/api/supplier-quotes", requireBusinessAccess, async (req, res) => {
     const parsed = z.object({ productId: z.string().regex(/^\d+$/).optional() }).safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid product filter." });
@@ -247,7 +302,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ quotes: rows });
   });
 
-  app.post("/api/supplier-quotes", requireOwner, async (req, res) => {
+  app.post("/api/supplier-quotes", requireBusinessAccess, async (req, res) => {
     const parsed = supplierQuoteInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -275,7 +330,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/supplier-quotes/:id", requireOwner, async (req, res) => {
+  app.patch("/api/supplier-quotes/:id", requireBusinessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid quotation identifier." });
@@ -318,7 +373,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.post("/api/categories", requireOwner, async (req, res) => {
+  app.post("/api/categories", requireBusinessAccess, async (req, res) => {
     const parsed = categoryInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -341,7 +396,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/categories/:id", requireOwner, async (req, res) => {
+  app.patch("/api/categories/:id", requireBusinessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid category identifier." });
@@ -374,7 +429,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/products", requireOwner, async (req, res) => {
+  app.get("/api/products", requireBusinessAccess, async (req, res) => {
     const parsedFilters = productFiltersSchema.safeParse(req.query);
     if (!parsedFilters.success) {
       res.status(400).json({ error: validationMessage(parsedFilters.error) });
@@ -424,7 +479,7 @@ export function registerApiRoutes(app: import("express").Express) {
     });
   });
 
-  app.post("/api/products", requireOwner, async (req, res) => {
+  app.post("/api/products", requireBusinessAccess, async (req, res) => {
     const parsed = productInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -454,7 +509,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.put("/api/products/:id", requireOwner, async (req, res) => {
+  app.put("/api/products/:id", requireBusinessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid product identifier." });
@@ -509,11 +564,11 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  registerProcurementRoutes(app, requireOwner);
-  registerInventoryRoutes(app, requireOwner);
-  registerSalesRoutes(app, requireOwner);
-  registerAccountingRoutes(app, requireOwner);
-  registerMarketingRoutes(app, requireOwner);
-  registerBusinessReportRoutes(app, requireOwner);
-  registerPaymentRoutes(app, requireOwner);
+  registerProcurementRoutes(app, requireBusinessAccess);
+  registerInventoryRoutes(app, requireBusinessAccess);
+  registerSalesRoutes(app, requireBusinessAccess);
+  registerAccountingRoutes(app, requireBusinessAccess);
+  registerMarketingRoutes(app, requireBusinessAccess);
+  registerBusinessReportRoutes(app, requireBusinessAccess);
+  registerPaymentRoutes(app, requireBusinessAccess);
 }

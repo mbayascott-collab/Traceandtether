@@ -136,12 +136,11 @@ function LandingPage() {
               Visit the shop
             </a>
             <a className="button button-secondary" href={`${basePath}/sign-up`}>
-              Create owner account
+              Create account
             </a>
           </div>
           <p className="landing-note">
-            Administration access is limited to the verified owner email configured for
-            this workspace.
+            Business access is limited to approved, verified email addresses.
           </p>
         </div>
         <div className="landing-foot">
@@ -247,11 +246,11 @@ function ProtectedWorkspace() {
       <main className="auth-screen">
         <section className="access-card">
           <img src={`${basePath}/logo.svg`} alt="" />
-          <p className="eyebrow">{ownerNotConfigured ? "OWNER SETUP" : "OWNER ACCESS ONLY"}</p>
+          <p className="eyebrow">{ownerNotConfigured ? "OWNER SETUP" : "BUSINESS ACCESS ONLY"}</p>
           <h1>
             {ownerNotConfigured
               ? "The initial owner account has not been configured."
-              : "This account is not on the owner access list."}
+              : "This account is not on the business access list."}
           </h1>
           <p>
             {ownerNotConfigured ? (
@@ -301,7 +300,7 @@ function ClerkRoutes() {
         },
         signUp: {
           start: {
-            title: "Set up your owner account",
+            title: "Create your account",
             subtitle: "Use the verified email approved for this workspace",
           },
         },
@@ -335,6 +334,7 @@ function ClerkRoutes() {
         <Route path="/accounting" component={ProtectedWorkspace} />
         <Route path="/marketing" component={ProtectedWorkspace} />
         <Route path="/profitability" component={ProtectedWorkspace} />
+        <Route path="/user-access" component={ProtectedWorkspace} />
         <Route component={() => <Redirect to="/" />} />
       </Switch>
     </ClerkProvider>

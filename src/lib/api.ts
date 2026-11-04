@@ -52,8 +52,15 @@ export interface PaymentOverview { payments: BusinessPayment[]; invoices: Paymen
 export interface CurrentUser {
   authorized: boolean;
   email: string | null;
-  role: "owner" | null;
+  role: "owner" | "manager" | null;
   reason?: "owner_not_configured" | "email_not_approved" | "email_not_verified";
+}
+export interface UserAccess {
+  email: string;
+  displayName: string | null;
+  role: "owner" | "manager";
+  active: boolean;
+  createdAt: string;
 }
 
 export interface Category {
@@ -210,6 +217,21 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   return request<CurrentUser>("/api/me");
+}
+
+export async function fetchUserAccess(): Promise<UserAccess[]> {
+  return (await request<{ users: UserAccess[] }>("/api/user-access")).users;
+}
+
+export async function grantUserAccess(input: { email: string; displayName: string | null }): Promise<void> {
+  await request("/api/user-access", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function setUserAccessActive(email: string, active: boolean): Promise<void> {
+  await request(`/api/user-access/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ active }),
+  });
 }
 
 export async function fetchCategories(): Promise<Category[]> {

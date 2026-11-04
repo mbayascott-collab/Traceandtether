@@ -60,6 +60,7 @@ import AccountingWorkspace from "./AccountingWorkspace";
 import MarketingWorkspace from "./MarketingWorkspace";
 import ProfitabilityWorkspace, { BusinessDashboard } from "./BusinessReports";
 import PaymentsWorkspace from "./PaymentsWorkspace";
+import UserAccessWorkspace from "./UserAccessWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -280,7 +281,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isAccounting = location === "/accounting";
   const isMarketing = location === "/marketing";
   const isProfitability = location === "/profitability";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : "Dashboard";
+  const isUserAccess = location === "/user-access";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : isUserAccess ? "User access" : "Dashboard";
   useEffect(() => {
     document.querySelector(".app-main")?.scrollTo(0, 0);
     window.scrollTo(0, 0);
@@ -414,7 +416,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           <div className="brand-mark" aria-hidden="true"><Boxes /></div>
           <div>
             <div className="brand-name">TRACE&TETHER</div>
-            <div className="brand-subtitle">Owner workspace</div>
+            <div className="brand-subtitle">Business workspace</div>
           </div>
         </div>
         <div className="nav-caption">Workspace</div>
@@ -481,6 +483,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/profitability" aria-current={isProfitability ? "page" : undefined}>
             <BadgeDollarSign aria-hidden="true" /><span>Profitability</span>
+          </Link>
+          <Link href="/user-access" aria-current={isUserAccess ? "page" : undefined}>
+            <ShieldCheck aria-hidden="true" /><span>User access</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -860,6 +865,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isAccounting && <AccountingWorkspace />}
           {isMarketing && <MarketingWorkspace />}
           {isProfitability && <ProfitabilityWorkspace />}
+          {isUserAccess && <UserAccessWorkspace />}
         </div>
       </main>
 
