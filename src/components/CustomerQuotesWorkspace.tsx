@@ -1,9 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { convertCustomerQuote, deleteCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
+import companyLogo from "../../attached_assets/google_profile_1793751250209.jpg";
 
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
 const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const companyName = "Trace and Tether Craft Studi Limited";
 const emptyInput: CustomerQuoteInput = { customerId: 0, validUntil: null, deliveryAddress: null, notes: null, status: "draft", lines: [] };
 
 export default function CustomerQuotesWorkspace() {
@@ -107,10 +109,16 @@ export default function CustomerQuotesWorkspace() {
         </div>
         <article className="customer-quote-document" id="customer-quote-print">
           <header className="customer-quote-document-header">
-            <div><span className="customer-quote-document-kicker">CUSTOMER QUOTATION</span><h1>{printQuote.quoteNumber}</h1></div>
-            <div className="customer-quote-document-meta">
-              <div><span>Quote date</span><strong>{quoteDate(printQuote.createdAt)}</strong></div>
-              <div><span>Valid until</span><strong>{printQuote.validUntil ? quoteDate(printQuote.validUntil) : "No expiry date"}</strong></div>
+            <div className="customer-quote-document-brand">
+              <img src={companyLogo} alt={`${companyName} logo`} />
+              <strong>{companyName}</strong>
+            </div>
+            <div className="customer-quote-document-title">
+              <div><span className="customer-quote-document-kicker">CUSTOMER QUOTATION</span><h1>{printQuote.quoteNumber}</h1></div>
+              <div className="customer-quote-document-meta">
+                <div><span>Quote date</span><strong>{quoteDate(printQuote.createdAt)}</strong></div>
+                <div><span>Valid until</span><strong>{printQuote.validUntil ? quoteDate(printQuote.validUntil) : "No expiry date"}</strong></div>
+              </div>
             </div>
           </header>
           <section className="customer-quote-document-customer">

@@ -2645,12 +2645,21 @@ textarea:focus-visible {
   box-shadow: 0 14px 50px rgba(0, 0, 0, 0.2);
 }
 .customer-quote-document-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
+  display: grid;
+  gap: 20px;
   padding-bottom: 22px;
   border-bottom: 2px solid #1d6e64;
 }
+.customer-quote-document-brand { display: flex; align-items: center; gap: 15px; }
+.customer-quote-document-brand img {
+  width: 76px;
+  height: 76px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  border-radius: 50%;
+}
+.customer-quote-document-brand strong { max-width: 290px; font-size: 16px; line-height: 1.35; }
+.customer-quote-document-title { display: flex; justify-content: space-between; gap: 24px; }
 .customer-quote-document-kicker,
 .customer-quote-document-customer > span,
 .customer-quote-document-notes > span {
@@ -2703,7 +2712,9 @@ textarea:focus-visible {
   .quote-preview-panel { max-height: calc(100dvh - 20px); }
   .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
   .customer-quote-document { min-height: 0; padding: 22px 18px; }
-  .customer-quote-document-header { gap: 12px; }
+  .customer-quote-document-brand img { width: 62px; height: 62px; }
+  .customer-quote-document-brand strong { font-size: 14px; }
+  .customer-quote-document-title { gap: 12px; }
 }
 
 @page { size: A4; margin: 15mm; }
