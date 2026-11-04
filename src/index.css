@@ -2716,6 +2716,7 @@ textarea:focus-visible {
   .quote-preview-overlay {
     display: block;
     overflow-y: auto;
+    overflow-x: hidden;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     padding: 10px;
@@ -2726,7 +2727,23 @@ textarea:focus-visible {
     width: 100%;
     max-height: none;
   }
-  .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
+  .quote-preview-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+  .quote-preview-toolbar > div:last-child {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+  .quote-preview-toolbar .button {
+    width: 100%;
+    min-height: 46px;
+  }
   .customer-quote-document {
     flex: 0 0 auto;
     width: 100%;
@@ -2735,6 +2752,24 @@ textarea:focus-visible {
     overflow: visible;
     padding: 22px 18px;
     background-color: #fff;
+  }
+  .customer-quote-document,
+  .customer-quote-document * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .customer-quote-document-table {
+    width: 100%;
+    table-layout: fixed;
+    font-size: 9px;
+  }
+  .customer-quote-document-table th,
+  .customer-quote-document-table td {
+    padding-right: 3px;
+    padding-left: 3px;
+  }
+  .quote-number-cell {
+    white-space: normal;
   }
   .customer-quote-document-brand img { width: 90px; height: 90px; }
   .customer-quote-document-brand strong { font-size: 15px; }
