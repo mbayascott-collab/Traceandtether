@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { Search } from "lucide-react";
 import {
   createInventoryAdjustment, createOpeningStock, createReservation, fetchInventory, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
@@ -15,7 +16,13 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [search, setSearch] = useState("");
   const heading = mode === "overview" ? "Inventory" : mode === "receipts" ? "Stock receipts" : mode === "reservations" ? "Reservations" : "Stock adjustments";
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const filteredInventory = inventory.filter((product) =>
+    product.name.toLocaleLowerCase().includes(normalizedSearch) ||
+    product.sku.toLocaleLowerCase().includes(normalizedSearch)
+  );
 
   useEffect(() => {
     let alive = true;
@@ -39,7 +46,11 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
     <header className="page-heading"><div><p className="eyebrow">Stock control · traceable ledger</p><h1>{heading}</h1><p>On-hand stock comes from permanent movement records. Reservations reduce available stock but do not change on-hand quantity.</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
     {mode === "overview" && <>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Unit</th></tr></thead><tbody>{inventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.unit}</td></tr>)}</tbody></table></div>
+      <div className="toolbar">
+        <label className="search-field"><Search aria-hidden="true" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name or SKU" aria-label="Search inventory by product name or SKU" /></label>
+        <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>
+      </div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={6}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
       <MovementTable movements={movements} />
     </>}
     {mode === "receipts" && <div className="panel data-table-wrap"><p>Post received shipment quantities into stock. Posting is incremental and cannot be duplicated.</p><table><thead><tr><th>Order / shipment</th><th>Supplier</th><th>Product</th><th>Received</th><th>Already in stock</th><th>To post</th><th /></tr></thead><tbody>{receipts.map((r) => <tr key={r.id}><td>{r.orderNumber} · {r.shipmentReference || "shipment"}</td><td>{r.supplierName}</td><td>{r.productName} · {r.sku}</td><td>{r.quantityReceived}</td><td>{r.quantityStocked}</td><td>{r.quantityToPost}</td><td><button className="button button-primary" onClick={() => run(() => postInventoryReceipt(r.id))}>Post receipt</button></td></tr>)}{!receipts.length && <tr><td colSpan={7}>No received shipment quantities are waiting to be posted.</td></tr>}</tbody></table></div>}
