@@ -5,7 +5,7 @@ import companyLogo from "../../attached_assets/google_profile_1793751250209.jpg"
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
 const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const companyName = "Trace and Tether Craft Studi Limited";
+const companyName = "Trace and Tether Craft Studio Limited";
 const emptyInput: CustomerQuoteInput = { customerId: 0, validUntil: null, deliveryAddress: null, notes: null, status: "draft", lines: [] };
 
 export default function CustomerQuotesWorkspace() {
