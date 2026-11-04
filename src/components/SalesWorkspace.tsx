@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import companyLogo from "../../attached_assets/google_profile_1793751250209.jpg";
+import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
   createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type MarketingCampaignOption, type Product, type SalesOrder,

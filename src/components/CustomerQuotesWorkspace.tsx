@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { convertCustomerQuote, deleteCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
-import companyLogo from "../../attached_assets/google_profile_1793751250209.jpg";
+import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
 const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw: "" });
