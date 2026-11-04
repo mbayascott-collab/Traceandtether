@@ -2652,13 +2652,13 @@ textarea:focus-visible {
 }
 .customer-quote-document-brand { display: flex; align-items: center; gap: 15px; }
 .customer-quote-document-brand img {
-  width: 76px;
-  height: 76px;
+  width: 90px;
+  height: 90px;
   flex: 0 0 auto;
   object-fit: contain;
   border-radius: 50%;
 }
-.customer-quote-document-brand strong { max-width: 290px; font-size: 16px; line-height: 1.35; }
+.customer-quote-document-brand strong { max-width: 320px; font-size: 19px; line-height: 1.35; }
 .customer-quote-document-title { display: flex; justify-content: space-between; gap: 24px; }
 .customer-quote-document-kicker,
 .customer-quote-document-customer > span,
@@ -2713,8 +2713,8 @@ textarea:focus-visible {
   .quote-preview-panel { max-height: calc(100dvh - 20px); }
   .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
   .customer-quote-document { min-height: 0; padding: 22px 18px; }
-  .customer-quote-document-brand img { width: 62px; height: 62px; }
-  .customer-quote-document-brand strong { font-size: 14px; }
+  .customer-quote-document-brand img { width: 70px; height: 70px; }
+  .customer-quote-document-brand strong { font-size: 16px; }
   .customer-quote-document-title { gap: 12px; }
 }
 
