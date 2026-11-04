@@ -18,6 +18,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
+  const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
     Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
@@ -30,10 +32,20 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     try { await action(new FormData(form)); form.reset(); setLines([emptyLine()]); setEditingCustomer(null); setNotice("Saved."); setReload((n) => n + 1); }
     catch (e) { setError(e instanceof Error ? e.message : "Could not save this record."); }
   }
-  async function run(action: () => Promise<void>, successMessage = "Order updated.") {
+  async function run(action: () => Promise<void>, successMessage = "Order updated.", orderId?: number) {
     setError(""); setNotice("");
+    if (orderId) {
+      setBusyOrderId(orderId);
+      setOrderActionErrors((current) => ({ ...current, [orderId]: "" }));
+    }
     try { await action(); setNotice(successMessage); setReload((n) => n + 1); }
-    catch (e) { setError(e instanceof Error ? e.message : "Could not update this order."); }
+    catch (e) {
+      const message = e instanceof Error ? e.message : "Could not update this order.";
+      setError(message);
+      if (orderId) setOrderActionErrors((current) => ({ ...current, [orderId]: message }));
+    } finally {
+      if (orderId) setBusyOrderId((current) => current === orderId ? null : current);
+    }
   }
   function removeOrder(order: SalesOrder) {
     const quoteNote = order.notes?.match(/Created from (CQ-\d{4}-[A-Z0-9]+)/)?.[1];
@@ -75,7 +87,12 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <button type="button" className="button button-secondary" onClick={() => setLines((old) => [...old, emptyLine()])}>Add product line</button>
         <label>Notes<input name="notes" /></label><button className="button button-primary">Save draft</button>
       </form>
-        <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>{o.status === "draft" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"))}>Confirm & reserve</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}{o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}{o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"))}>Fulfill</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"))}>Cancel</button></>}</td></tr>)}</tbody></table></div>
+        <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.quantity}`).join(", ")}</td><td>{zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status}</td><td>
+          {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
+          {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
+          {o.status === "confirmed" && <><button onClick={() => run(() => updateSalesOrderStatus(o.id, "fulfill"), "Sale recorded and stock updated.", o.id)}>{busyOrderId === o.id ? "Updating…" : "Fulfill"}</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button></>}
+          {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
+        </td></tr>)}</tbody></table></div>
     </>}
   </section>;
 }

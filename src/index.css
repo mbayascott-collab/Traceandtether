@@ -2706,6 +2706,7 @@ textarea:focus-visible {
 .customer-quote-document-acceptance div { display: flex; gap: 35px; }
 .customer-quote-document-acceptance span { flex: 1; padding-top: 8px; border-top: 1px solid #aab9b3; color: #657a75; }
 .customer-quote-document-footer { margin-top: 35px; padding-top: 10px; border-top: 1px solid #e1e8e4; color: #657a75; font-size: 9px; }
+.order-action-error { display: block; max-width: 260px; margin-top: 7px; color: #a14332; font-size: 11px; line-height: 1.4; }
 
 @media (max-width: 700px) {
   .quote-preview-overlay { place-items: start center; padding: 10px; }
