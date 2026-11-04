@@ -2658,7 +2658,7 @@ textarea:focus-visible {
   object-fit: contain;
   border-radius: 50%;
 }
-.customer-quote-document-brand strong { max-width: 320px; font-size: 19px; line-height: 1.35; }
+.customer-quote-document-brand strong { max-width: 320px; font-size: 18px; line-height: 1.35; }
 .customer-quote-document-brand > div { display: grid; gap: 5px; }
 .customer-quote-document-brand small { color: #526963; font-size: 10px; line-height: 1.4; }
 .customer-quote-document-title { display: flex; justify-content: space-between; gap: 24px; }
@@ -2716,7 +2716,7 @@ textarea:focus-visible {
   .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
   .customer-quote-document { min-height: 0; padding: 22px 18px; }
   .customer-quote-document-brand img { width: 90px; height: 90px; }
-  .customer-quote-document-brand strong { font-size: 16px; }
+  .customer-quote-document-brand strong { font-size: 15px; }
   .customer-quote-document-title { gap: 12px; }
 }
 
