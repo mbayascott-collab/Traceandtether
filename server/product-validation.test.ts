@@ -156,9 +156,11 @@ test("validates opening stock quantity and positive ZMW average cost", () => {
 });
 
 test("validates customer contacts and ZMW sales order lines", () => {
-  const customer = { name: "Kabwe Retail", email: "orders@example.com", phone: null, address: null, notes: null, status: "active" };
+  const customer = { name: "Kabwe Retail", contactPerson: "  Sarah Banda  ", email: "orders@example.com", phone: null, address: null, notes: null, status: "active" };
   assert.equal(customerInputSchema.safeParse(customer).success, true);
+  assert.equal(customerInputSchema.parse(customer).contactPerson, "Sarah Banda");
   assert.equal(customerInputSchema.safeParse({ ...customer, email: "bad-email" }).success, false);
+  assert.equal(customerInputSchema.safeParse({ ...customer, contactPerson: "x".repeat(121) }).success, false);
   const order = { customerId: 1, deliveryAddress: null, notes: null, lines: [{ productId: 2, quantity: 3, unitPriceZmw: "120.50" }] };
   assert.equal(salesOrderInputSchema.safeParse(order).success, true);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPriceZmw: "-2" }] }).success, false);

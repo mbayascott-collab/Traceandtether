@@ -69,16 +69,19 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
     {mode === "customers" && <>
       <form key={editingCustomer?.id ?? "new-customer"} className="panel form-grid" onSubmit={(e) => submit(e, async (d) => saveCustomer({
-        name: String(d.get("name")), email: String(d.get("email") || "") || null, phone: String(d.get("phone") || "") || null,
+        name: String(d.get("name")), contactPerson: String(d.get("contactPerson") || "") || null,
+        email: String(d.get("email") || "") || null, phone: String(d.get("phone") || "") || null,
         address: String(d.get("address") || "") || null, notes: String(d.get("notes") || "") || null,
         status: String(d.get("status") || "active") as "active" | "inactive",
       }, editingCustomer?.id))}>
-        <h2>{editingCustomer ? "Edit customer" : "Add customer"}</h2><label>Name<input name="name" required maxLength={160} defaultValue={editingCustomer?.name ?? ""} /></label><label>Email<input name="email" type="email" defaultValue={editingCustomer?.email ?? ""} /></label>
+        <h2>{editingCustomer ? "Edit customer" : "Add customer"}</h2><label>Name<input name="name" required maxLength={160} defaultValue={editingCustomer?.name ?? ""} /></label>
+        <label>Contact person<input name="contactPerson" maxLength={120} defaultValue={editingCustomer?.contactPerson ?? ""} /></label>
+        <label>Email<input name="email" type="email" defaultValue={editingCustomer?.email ?? ""} /></label>
         <label>Phone<input name="phone" defaultValue={editingCustomer?.phone ?? ""} /></label><label>Delivery address<input name="address" defaultValue={editingCustomer?.address ?? ""} /></label><label>Notes<input name="notes" defaultValue={editingCustomer?.notes ?? ""} /></label>
         <label>Status<select name="status" defaultValue={editingCustomer?.status ?? "active"}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
         <button className="button button-primary">{editingCustomer ? "Save changes" : "Save customer"}</button>{editingCustomer && <button type="button" onClick={() => setEditingCustomer(null)}>Cancel edit</button>}
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Address</th><th>Status</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{c.email || "—"}<br />{c.phone || ""}</td><td>{c.address || "—"}</td><td>{c.status}</td><td><button onClick={() => setEditingCustomer(c)}>Edit details</button></td></tr>)}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Contact person</th><th>Contact details</th><th>Address</th><th>Status</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{c.contactPerson || "—"}</td><td>{c.email || "—"}<br />{c.phone || ""}</td><td>{c.address || "—"}</td><td>{c.status}</td><td><button onClick={() => setEditingCustomer(c)}>Edit details</button></td></tr>)}</tbody></table></div>
     </>}
     {mode === "orders" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createSalesOrder({

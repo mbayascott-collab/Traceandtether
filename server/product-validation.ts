@@ -227,6 +227,7 @@ export const openingStockInputSchema = z.object({
 
 export const customerInputSchema = z.object({
   name: z.string().trim().min(1).max(160),
+  contactPerson: nullableText(120),
   email: z.preprocess((value) => value === "" || value === undefined ? null : value,
     z.string().trim().email().max(254).nullable()),
   phone: nullableText(60),
