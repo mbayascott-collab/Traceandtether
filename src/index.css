@@ -2711,34 +2711,10 @@ textarea:focus-visible {
 .order-action-error { display: block; max-width: 260px; margin-top: 7px; color: #a14332; font-size: 11px; line-height: 1.4; }
 
 @media (max-width: 700px) {
-  .quote-preview-overlay {
-    display: block;
-    overflow-y: auto;
-    padding: 10px;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-  }
-  .quote-preview-panel {
-    display: block;
-    width: min(960px, 100%);
-    max-height: none;
-    margin: 0 auto;
-  }
-  .quote-preview-toolbar {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .customer-quote-document {
-    min-height: 0;
-    height: auto;
-    margin-bottom: 10px;
-    padding: 22px 18px;
-    overflow: visible;
-    background: #fff;
-  }
+  .quote-preview-overlay { place-items: start center; padding: 10px; }
+  .quote-preview-panel { max-height: calc(100dvh - 20px); }
+  .quote-preview-toolbar { align-items: flex-start; flex-direction: column; }
+  .customer-quote-document { min-height: 0; padding: 22px 18px; }
   .customer-quote-document-brand img { width: 90px; height: 90px; }
   .customer-quote-document-brand strong { font-size: 15px; }
   .customer-quote-document-title { gap: 12px; }
