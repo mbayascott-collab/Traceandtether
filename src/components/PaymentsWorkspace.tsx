@@ -12,6 +12,10 @@ export default function PaymentsWorkspace() {
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
   const options = direction === "customer_receipt" ? data.invoices : data.bills;
+  const pendingBalances = [
+    ...data.invoices.map((item) => ({ ...item, balanceType: "Customer owes us" })),
+    ...data.bills.map((item) => ({ ...item, balanceType: "We owe supplier" })),
+  ].sort((a, b) => Number(b.outstandingZmw) - Number(a.outstandingZmw));
 
   useEffect(() => {
     let active = true;
@@ -80,6 +84,17 @@ export default function PaymentsWorkspace() {
       </form>
       {!options.length && <p className="report-footnote">No outstanding balances are available for this payment type.</p>}
       <p className="report-footnote">Payments are recorded in ZMW. Supplier payments are matched to received purchase-order stock.</p>
+    </div>
+    <div className="panel data-table-wrap">
+      <h2>Pending payments</h2>
+      <p className="report-footnote">These balances are still unpaid. Customer balances include goods already delivered.</p>
+      <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th></tr></thead>
+        <tbody>{pendingBalances.map((item) => <tr key={`${item.balanceType}-${item.orderId}`}>
+          <td>{item.balanceType}</td><td>{item.partyName}</td><td>{item.orderNumber}</td>
+          <td>{money(item.totalZmw)}</td><td>{money(item.paidZmw)}</td><td><strong>{money(item.outstandingZmw)}</strong></td>
+        </tr>)}</tbody>
+      </table>
+      {!pendingBalances.length && <p className="report-footnote">There are no unpaid customer or supplier balances.</p>}
     </div>
     <div className="panel data-table-wrap">
       <h2>Payment history</h2>

@@ -74,7 +74,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
             .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
           : 0n;
       const outstanding = total - (paidSales.get(order.id) ?? 0n);
-      return { orderId: order.id, orderNumber: order.orderNumber, customerName, totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n), outstandingZmw: formatCents(outstanding) };
+      return { orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n), outstandingZmw: formatCents(outstanding) };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
 
     let payableRows: Array<{ memo: string; total: string | null }> = [];
@@ -92,7 +92,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     const bills = openPurchaseOrders.map(({ order, supplierName }) => {
       const total = payableByMemo.get(`Stock receipt for ${order.orderNumber}`) ?? 0n;
       const paid = paidPurchases.get(order.id) ?? 0n;
-      return { orderId: order.id, orderNumber: order.orderNumber, supplierName, totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid) };
+      return { orderId: order.id, orderNumber: order.orderNumber, partyName: supplierName, totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid) };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
 
     res.json({
