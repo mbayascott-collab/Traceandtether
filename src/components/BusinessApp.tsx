@@ -413,7 +413,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true"><Boxes /></div>
           <div>
-            <div className="brand-name">TRADE DESK</div>
+            <div className="brand-name">TRACE&TETHER</div>
             <div className="brand-subtitle">Owner workspace</div>
           </div>
         </div>
@@ -512,7 +512,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
               {mobileNavOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
             </button>
             <div className="breadcrumbs">
-              <span>Trade Desk</span><ChevronRight aria-hidden="true" /><strong>{currentSection}</strong>
+              <span>Trace&Tether</span><ChevronRight aria-hidden="true" /><strong>{currentSection}</strong>
             </div>
           </div>
           <span className="private-pill"><LockKeyhole aria-hidden="true" />Owner-only workspace</span>

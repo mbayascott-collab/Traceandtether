@@ -1,6 +1,6 @@
-# Trade Desk
+# Trace&Tether
 
-Trade Desk is a private business operations workspace for a Zambia-focused importing and resale business. It now includes product/category management, internal supplier records, product quotations, and source-currency comparisons. It does not contain the public shop, inventory, purchase orders, shipment tracking, payments, accounting, or marketing modules.
+Trace&Tether is a private business operations workspace for a Zambia-focused importing and resale business. It now includes product/category management, internal supplier records, product quotations, and source-currency comparisons. It does not contain the public shop, inventory, purchase orders, shipment tracking, payments, accounting, or marketing modules.
 
 ## Technology
 

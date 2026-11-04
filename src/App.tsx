@@ -118,7 +118,7 @@ function LandingPage() {
       <section className="landing-panel">
         <div className="landing-brand">
           <img src={`${basePath}/logo.svg`} alt="" />
-          <span>TRADE DESK</span>
+          <span>TRACE&TETHER</span>
         </div>
         <div className="landing-copy">
           <p className="eyebrow">PRIVATE BUSINESS WORKSPACE</p>
@@ -157,7 +157,7 @@ function SignInPage() {
   return (
     <main className="auth-screen">
       <div className="auth-context">
-        <span className="auth-context-label">TRADE DESK</span>
+        <span className="auth-context-label">TRACE&TETHER</span>
         <span>Business operations</span>
       </div>
       <SignIn
@@ -173,7 +173,7 @@ function SignUpPage() {
   return (
     <main className="auth-screen">
       <div className="auth-context">
-        <span className="auth-context-label">TRADE DESK</span>
+        <span className="auth-context-label">TRACE&TETHER</span>
         <span>Owner account setup</span>
       </div>
       <SignUp

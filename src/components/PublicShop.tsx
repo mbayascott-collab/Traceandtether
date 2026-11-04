@@ -68,12 +68,12 @@ export default function PublicShop() {
   return (
     <main className="public-shop">
       <header className="shop-header">
-        <Link href="/" className="shop-brand"><span className="shop-brand-mark">T</span> TRADE DESK</Link>
+        <Link href="/" className="shop-brand"><span className="shop-brand-mark">T</span> TRACE&TETHER</Link>
         <a className="shop-cart-link" href="#checkout"><ShoppingBag size={18} /> Bag <b>{Object.values(cart).reduce((a, b) => a + b, 0)}</b></a>
       </header>
       <section className="shop-hero">
         <div>
-          <p className="shop-eyebrow">TRADE DESK · ZAMBIA</p>
+          <p className="shop-eyebrow">TRACE&TETHER · ZAMBIA</p>
           <h1>Good products.<br /><em>Fair prices.</em></h1>
           <p>Browse our current selection and send an order request. We’ll contact you to confirm availability, delivery, and payment.</p>
         </div>
@@ -88,7 +88,7 @@ export default function PublicShop() {
           <div className="shop-product-grid">
             {products.map((product, index) => (
               <article className="shop-product-card" key={product.id}>
-                <div className={`shop-product-art art-${index % 4}`}><span>TD</span></div>
+                <div className={`shop-product-art art-${index % 4}`}><span>T&amp;T</span></div>
                 <div className="shop-product-info">
                   <span className="shop-stock">AVAILABLE</span>
                   <h3>{product.name}</h3>
@@ -132,7 +132,7 @@ export default function PublicShop() {
           <p>Your reference is <strong>{orderNumber}</strong>. We’ll contact you to confirm stock, delivery, and payment. No payment has been taken.</p>
         </div>
       )}
-      <footer className="shop-footer"><span>TRADE DESK</span><span>Order requests only · Payment confirmed separately</span><Link href="/dashboard"><ArrowLeft size={15} /> Owner sign in</Link></footer>
+      <footer className="shop-footer"><span>TRACE&TETHER</span><span>Order requests only · Payment confirmed separately</span><Link href="/dashboard"><ArrowLeft size={15} /> Owner sign in</Link></footer>
     </main>
   );
 }
