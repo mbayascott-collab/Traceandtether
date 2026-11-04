@@ -331,6 +331,7 @@ function ClerkRoutes() {
         <Route path="/customers" component={ProtectedWorkspace} />
         <Route path="/customer-quotes" component={ProtectedWorkspace} />
         <Route path="/sales-orders" component={ProtectedWorkspace} />
+        <Route path="/payments" component={ProtectedWorkspace} />
         <Route path="/accounting" component={ProtectedWorkspace} />
         <Route path="/marketing" component={ProtectedWorkspace} />
         <Route path="/profitability" component={ProtectedWorkspace} />

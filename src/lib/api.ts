@@ -43,6 +43,11 @@ export interface CustomerQuoteLine { id: number; productId: number; productName:
 export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; status: CustomerQuoteStatus; createdAt: string; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
 export interface CustomerQuoteInput { customerId: number; validUntil: string | null; deliveryAddress: string | null; notes: string | null; status: "draft" | "sent" | "accepted" | "rejected"; lines: { productId: number; quantity: number; unitPriceZmw: string }[]; }
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
+export type PaymentDirection = "customer_receipt" | "supplier_payment";
+export type PaymentMethod = "cash" | "bank_transfer" | "mobile_money" | "other";
+export interface PaymentOption { orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string; }
+export interface BusinessPayment { id: number; paymentNumber: string; direction: PaymentDirection; amountZmw: string; paymentDate: string; method: PaymentMethod; reference: string | null; notes: string | null; orderNumber: string; partyName: string; }
+export interface PaymentOverview { payments: BusinessPayment[]; invoices: PaymentOption[]; bills: PaymentOption[]; }
 
 export interface CurrentUser {
   authorized: boolean;

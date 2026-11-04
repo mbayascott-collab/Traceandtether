@@ -29,6 +29,8 @@ export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
 export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "fulfilled", "cancelled"]);
 export const customerQuoteStatus = pgEnum("customer_quote_status", ["draft", "sent", "accepted", "rejected", "converted"]);
 export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
+export const paymentDirection = pgEnum("payment_direction", ["customer_receipt", "supplier_payment"]);
+export const paymentMethod = pgEnum("payment_method", ["cash", "bank_transfer", "mobile_money", "other"]);
 export const marketingCampaignStatus = pgEnum("marketing_campaign_status", ["draft", "active", "paused", "completed", "cancelled"]);
 export const marketingContentStatus = pgEnum("marketing_content_status", ["planned", "in_progress", "ready", "published", "cancelled"]);
 export const appRole = pgEnum("app_role", [
@@ -481,6 +483,34 @@ export const journalLines = pgTable(
     index("journal_lines_entry_idx").on(table.journalEntryId),
     index("journal_lines_account_product_idx").on(table.accountId, table.productId),
     check("journal_lines_one_sided", sql`(${table.debitZmw} > 0 and ${table.creditZmw} = 0) or (${table.creditZmw} > 0 and ${table.debitZmw} = 0)`),
+  ],
+);
+
+export const businessPayments = pgTable(
+  "business_payments",
+  {
+    id: serial("id").primaryKey(),
+    paymentNumber: varchar("payment_number", { length: 40 }).notNull(),
+    direction: paymentDirection("direction").notNull(),
+    salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
+    purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
+    paymentDate: date("payment_date").notNull(),
+    method: paymentMethod("method").notNull(),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("business_payments_number_unique").on(table.paymentNumber),
+    index("business_payments_sales_order_idx").on(table.salesOrderId),
+    index("business_payments_purchase_order_idx").on(table.purchaseOrderId),
+    index("business_payments_date_idx").on(table.paymentDate),
+    check("business_payments_positive_amount", sql`${table.amountZmw} > 0`),
+    check(
+      "business_payments_order_matches_direction",
+      sql`(${table.direction} = 'customer_receipt' and ${table.salesOrderId} is not null and ${table.purchaseOrderId} is null) or (${table.direction} = 'supplier_payment' and ${table.purchaseOrderId} is not null and ${table.salesOrderId} is null)`,
+    ),
   ],
 );
 

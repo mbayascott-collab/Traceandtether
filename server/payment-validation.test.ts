@@ -1,0 +1,22 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { paymentInputSchema } from "./payment-validation";
+
+const goodPayment = {
+  direction: "customer_receipt",
+  orderId: "2",
+  amountZmw: "125.50",
+  paymentDate: "2026-11-04",
+  method: "mobile_money",
+  reference: "",
+  notes: "",
+};
+
+test("validates positive ZMW payments and real dates", () => {
+  assert.equal(paymentInputSchema.safeParse(goodPayment).success, true);
+  assert.equal(paymentInputSchema.safeParse({ ...goodPayment, amountZmw: "0.00" }).success, false);
+  assert.equal(paymentInputSchema.safeParse({ ...goodPayment, amountZmw: "-1" }).success, false);
+  assert.equal(paymentInputSchema.safeParse({ ...goodPayment, amountZmw: "1.001" }).success, false);
+  assert.equal(paymentInputSchema.safeParse({ ...goodPayment, paymentDate: "2026-02-30" }).success, false);
+  assert.equal(paymentInputSchema.safeParse({ ...goodPayment, method: "cheque" }).success, false);
+});
