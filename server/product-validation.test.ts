@@ -125,10 +125,14 @@ test("validates purchase order rates, lines, and duplicate products", () => {
 
 test("validates shipment and expense inputs", () => {
   const shipment = {
-    purchaseOrderId: 1, shipmentReference: null, carrier: null, trackingNumber: null, shippedAt: null,
-    expectedAt: "2026-12-01", notes: null, lines: [{ purchaseOrderLineId: 3, quantityShipped: 4 }],
+    purchaseOrderIds: [1, 2], shipmentReference: null, carrier: null, trackingNumber: null, shippedAt: null,
+    expectedAt: "2026-12-01", notes: null, lines: [
+      { purchaseOrderLineId: 3, quantityShipped: 4 }, { purchaseOrderLineId: 7, quantityShipped: 2 },
+    ],
   };
   assert.equal(shipmentInputSchema.safeParse(shipment).success, true);
+  assert.equal(shipmentInputSchema.safeParse({ ...shipment, purchaseOrderIds: [1, 1] }).success, false);
+  assert.equal(shipmentInputSchema.safeParse({ ...shipment, purchaseOrderIds: [] }).success, false);
   assert.equal(shipmentReceiptSchema.safeParse({ lines: [{ shipmentLineId: 1, quantityReceived: -1 }] }).success, false);
   const expense = {
     purchaseOrderId: 1, category: "Freight", description: "Sea freight", amount: "120.00", currency: "USD",

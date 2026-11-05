@@ -15,11 +15,11 @@ export interface PurchaseOrder {
   lines: PurchaseOrderLine[];
 }
 export interface ShipmentLine {
-  id: number; purchaseOrderLineId: number; productName: string; sku: string; quantityShipped: number;
+  id: number; purchaseOrderLineId: number; productName: string; sku: string; orderNumber: string; supplierName: string; quantityShipped: number;
   quantityReceived: number; quantityOrdered: number;
 }
 export interface Shipment {
-  id: number; purchaseOrderId: number; orderNumber: string; supplierName: string; shipmentReference: string | null;
+  id: number; purchaseOrderId: number; orderNumber: string; supplierName: string; orderNumbers: string[]; supplierNames: string[]; shipmentReference: string | null;
   carrier: string | null; trackingNumber: string | null; status: ShipmentStatus; shippedAt: string | null;
   expectedAt: string | null; lines: ShipmentLine[];
 }
@@ -322,7 +322,7 @@ export async function fetchShipments(): Promise<Shipment[]> {
   return (await request<{ shipments: Shipment[] }>("/api/shipments")).shipments;
 }
 export async function createShipment(input: {
-  purchaseOrderId: number; shipmentReference: string | null; carrier: string | null; trackingNumber: string | null;
+  purchaseOrderIds: number[]; shipmentReference: string | null; carrier: string | null; trackingNumber: string | null;
   shippedAt: string | null; expectedAt: string | null; notes: string | null;
   lines: { purchaseOrderLineId: number; quantityShipped: number }[];
 }): Promise<void> {

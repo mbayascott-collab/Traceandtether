@@ -161,7 +161,7 @@ export const purchaseOrderUpdateSchema = z.object({
 }).strict();
 
 export const shipmentInputSchema = z.object({
-  purchaseOrderId: positiveInteger,
+  purchaseOrderIds: z.array(positiveInteger).min(1).max(100),
   shipmentReference: nullableText(100),
   carrier: nullableText(120),
   trackingNumber: nullableText(120),
@@ -174,6 +174,9 @@ export const shipmentInputSchema = z.object({
   }).strict()).min(1).max(100),
 }).strict().superRefine((shipment, context) => {
   const lineIds = shipment.lines.map((line) => line.purchaseOrderLineId);
+  if (new Set(shipment.purchaseOrderIds).size !== shipment.purchaseOrderIds.length) {
+    context.addIssue({ code: "custom", path: ["purchaseOrderIds"], message: "Each purchase order can only be added once." });
+  }
   if (new Set(lineIds).size !== lineIds.length) {
     context.addIssue({ code: "custom", path: ["lines"], message: "Each order line can appear only once per shipment." });
   }

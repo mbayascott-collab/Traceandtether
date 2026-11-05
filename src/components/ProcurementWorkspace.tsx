@@ -23,7 +23,8 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   const [notice, setNotice] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([{ productId: "", quantityOrdered: "1", unitPrice: "" }]);
   const [shipmentLineDrafts, setShipmentLineDrafts] = useState<ShipmentLineDraft[]>([{ purchaseOrderLineId: "", quantityShipped: "1" }]);
-  const [shipmentOrderId, setShipmentOrderId] = useState("");
+  const [shipmentOrderIds, setShipmentOrderIds] = useState<string[]>([]);
+  const [shipmentOrderToAdd, setShipmentOrderToAdd] = useState("");
   const heading = mode === "orders" ? "Purchase orders" : mode === "shipments" ? "Shipments" : mode === "expenses" ? "Import expenses" : "Landed costs";
 
   useEffect(() => {
@@ -37,11 +38,17 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
-    try { await action(new FormData(form)); setNotice("Saved."); setReload((n) => n + 1); form.reset(); setShipmentOrderId(""); setShipmentLineDrafts([{ purchaseOrderLineId: "", quantityShipped: "1" }]); }
+    try { await action(new FormData(form)); setNotice("Saved."); setReload((n) => n + 1); form.reset(); setShipmentOrderIds([]); setShipmentOrderToAdd(""); setShipmentLineDrafts([{ purchaseOrderLineId: "", quantityShipped: "1" }]); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not save this record."); }
   }
 
   const activeOrders = orders.filter((order) => order.status !== "cancelled" && order.status !== "received");
+  const selectedShipmentOrders = orders.filter((order) => shipmentOrderIds.includes(String(order.id)));
+  const availableShipmentOrderLines = selectedShipmentOrders.flatMap((order) => order.lines
+    .filter((line) => !shipmentLineDrafts.some((draft) => draft.purchaseOrderLineId === String(line.id)))
+    .map((line) => ({ ...line, orderNumber: order.orderNumber, supplierName: order.supplierName })));
+  const shipmentReady = selectedShipmentOrders.length > 0 && selectedShipmentOrders.every((order) =>
+    order.lines.some((line) => shipmentLineDrafts.some((draft) => draft.purchaseOrderLineId === String(line.id))));
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Purchasing · internal records</p><h1>{heading}</h1><p>Track orders, deliveries and import costs. Exchange rates are entered by you and are never inferred.</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
@@ -69,23 +76,34 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
     </>}
     {mode === "shipments" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createShipment({
-        purchaseOrderId: Number(d.get("purchaseOrderId")), shipmentReference: String(d.get("shipmentReference") || "") || null,
+        purchaseOrderIds: shipmentOrderIds.map(Number), shipmentReference: String(d.get("shipmentReference") || "") || null,
         carrier: String(d.get("carrier") || "") || null, trackingNumber: String(d.get("trackingNumber") || "") || null,
         shippedAt: String(d.get("shippedAt") || "") || null, expectedAt: String(d.get("expectedAt") || "") || null, notes: null,
         lines: shipmentLineDrafts.map((line) => ({ purchaseOrderLineId: Number(line.purchaseOrderLineId), quantityShipped: Number(line.quantityShipped) })),
       }))}>
-        <h2>Record shipment</h2><label>Purchase order<select name="purchaseOrderId" required value={shipmentOrderId} onChange={(e) => setShipmentOrderId(e.target.value)}><option value="">Select order</option>{activeOrders.map((o) => <option key={o.id} value={o.id}>{o.orderNumber} · {o.supplierName}</option>)}</select></label>
+        <h2>Record forwarder shipment</h2>
+        <p>Select each supplier purchase order included in this shipment, then add the products packed in it.</p>
+        <label>Add purchase order<select value={shipmentOrderToAdd} onChange={(e) => setShipmentOrderToAdd(e.target.value)}><option value="">Select order</option>{activeOrders.filter((o) => !shipmentOrderIds.includes(String(o.id))).map((o) => <option key={o.id} value={o.id}>{o.orderNumber} · {o.supplierName}</option>)}</select></label>
+        <button type="button" className="button button-secondary" disabled={!shipmentOrderToAdd} onClick={() => { setShipmentOrderIds((current) => [...current, shipmentOrderToAdd]); setShipmentOrderToAdd(""); }}>Add order to shipment</button>
+        {selectedShipmentOrders.map((order) => <div className="notice-strip" key={order.id}>
+          {order.orderNumber} · {order.supplierName}
+          <button type="button" onClick={() => { setShipmentOrderIds((current) => current.filter((id) => id !== String(order.id))); setShipmentLineDrafts((current) => current.filter((draft) => !order.lines.some((line) => String(line.id) === draft.purchaseOrderLineId))); }}>Remove order</button>
+        </div>)}
+        <h3>Products in this shipment</h3>
         {shipmentLineDrafts.map((line, i) => <div className="form-grid" key={i}>
-          <label>Order line<select required value={line.purchaseOrderLineId} onChange={(e) => setShipmentLineDrafts((current) => current.map((item, n) => n === i ? { ...item, purchaseOrderLineId: e.target.value } : item))}><option value="">Select product line</option>{orders.find((o) => String(o.id) === shipmentOrderId)?.lines.filter((candidate) => !shipmentLineDrafts.some((selected, n) => n !== i && selected.purchaseOrderLineId === String(candidate.id))).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.productName} · {candidate.sku} · ordered {candidate.quantityOrdered}</option>)}</select></label>
+          <label>Product and supplier order<select required value={line.purchaseOrderLineId} onChange={(e) => setShipmentLineDrafts((current) => current.map((item, n) => n === i ? { ...item, purchaseOrderLineId: e.target.value } : item))}><option value="">Select product</option>{selectedShipmentOrders.flatMap((order) => order.lines
+              .filter((candidate) => !shipmentLineDrafts.some((selected, n) => n !== i && selected.purchaseOrderLineId === String(candidate.id)))
+              .map((candidate) => ({ ...candidate, orderNumber: order.orderNumber, supplierName: order.supplierName })))
+            .map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.productName} · {candidate.sku} · {candidate.orderNumber} · {candidate.supplierName}</option>)}</select></label>
           <label>Quantity shipped<input type="number" min="1" required value={line.quantityShipped} onChange={(e) => setShipmentLineDrafts((current) => current.map((item, n) => n === i ? { ...item, quantityShipped: e.target.value } : item))} /></label>
           {shipmentLineDrafts.length > 1 && <button type="button" onClick={() => setShipmentLineDrafts((current) => current.filter((_, n) => n !== i))}>Remove line</button>}
         </div>)}
-        <button type="button" className="button button-secondary" disabled={!shipmentOrderId || shipmentLineDrafts.length >= (orders.find((o) => String(o.id) === shipmentOrderId)?.lines.length ?? 0)} onClick={() => setShipmentLineDrafts((current) => [...current, { purchaseOrderLineId: "", quantityShipped: "1" }])}>Add shipment line</button>
+        <button type="button" className="button button-secondary" disabled={!availableShipmentOrderLines.length} onClick={() => setShipmentLineDrafts((current) => [...current, { purchaseOrderLineId: "", quantityShipped: "1" }])}>Add product line</button>
         <label>Shipment reference<input name="shipmentReference" /></label><label>Carrier<input name="carrier" /></label><label>Tracking number<input name="trackingNumber" /></label>
         <label>Shipped date<input name="shippedAt" type="date" /></label><label>Expected date<input name="expectedAt" type="date" /></label>
-        <button className="button button-primary">Save shipment</button>
+        <button className="button button-primary" disabled={!shipmentReady}>Save shipment</button>
       </form>
-      {shipments.map((s) => <div className="panel data-table-wrap" key={s.id}><h2>{s.shipmentReference || `Shipment #${s.id}`} · {s.orderNumber}</h2><p>{s.carrier || "Carrier not recorded"} · {s.trackingNumber || "No tracking number"} · {s.status.replaceAll("_", " ")}</p><form onSubmit={(e) => submit(e, async (d) => receiveShipment(s.id, s.lines.map((line) => ({ shipmentLineId: line.id, quantityReceived: Number(d.get(`received-${line.id}`)) }))))}><table><thead><tr><th>Product</th><th>Shipped</th><th>Received</th><th>Update total received</th></tr></thead><tbody>{s.lines.map((line) => <tr key={line.id}><td>{line.productName} · {line.sku}</td><td>{line.quantityShipped}</td><td>{line.quantityReceived}</td><td><input name={`received-${line.id}`} type="number" min="0" max={line.quantityShipped} defaultValue={line.quantityReceived} /></td></tr>)}</tbody></table><button className="button button-primary">Update receipt</button></form></div>)}
+      {shipments.map((s) => <div className="panel data-table-wrap" key={s.id}><h2>{s.shipmentReference || `Shipment #${s.id}`}</h2><p>Orders: {s.orderNumbers.join(", ")} · Suppliers: {s.supplierNames.join(", ")}</p><p>{s.carrier || "Carrier not recorded"} · {s.trackingNumber || "No tracking number"} · {s.status.replaceAll("_", " ")}</p><form onSubmit={(e) => submit(e, async (d) => receiveShipment(s.id, s.lines.map((line) => ({ shipmentLineId: line.id, quantityReceived: Number(d.get(`received-${line.id}`)) }))))}><table><thead><tr><th>Product / order</th><th>Shipped</th><th>Received</th><th>Update total received</th></tr></thead><tbody>{s.lines.map((line) => <tr key={line.id}><td>{line.productName} · {line.sku}<br />{line.orderNumber} · {line.supplierName}</td><td>{line.quantityShipped}</td><td>{line.quantityReceived}</td><td><input name={`received-${line.id}`} type="number" min="0" max={line.quantityShipped} defaultValue={line.quantityReceived} /></td></tr>)}</tbody></table><button className="button button-primary">Update receipt</button></form></div>)}
     </>}
     {mode === "expenses" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createImportExpense({

@@ -3,7 +3,7 @@ import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import {
-  importExpenses, products, purchaseOrderLines, purchaseOrders, shipmentLines, shipments, suppliers,
+  importExpenses, products, purchaseOrderLines, purchaseOrders, shipmentLines, shipmentPurchaseOrders, shipments, suppliers,
 } from "../shared/schema";
 import {
   importExpenseInputSchema, purchaseOrderInputSchema, purchaseOrderUpdateSchema,
@@ -69,8 +69,9 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     if (current.status === "received" || current.status === "partially_received") return invalid(res, "Received orders cannot be cancelled or reopened.");
     if (current.status === "cancelled" && parsed.data.status !== "cancelled") return invalid(res, "Cancelled orders cannot be reopened.");
     if (parsed.data.status === "cancelled" && current.status !== "cancelled") {
-      const [openShipment] = await db.select({ id: shipments.id }).from(shipments)
-        .where(and(eq(shipments.purchaseOrderId, id), ne(shipments.status, "cancelled"))).limit(1);
+      const [openShipment] = await db.select({ id: shipments.id }).from(shipmentPurchaseOrders)
+        .innerJoin(shipments, eq(shipmentPurchaseOrders.shipmentId, shipments.id))
+        .where(and(eq(shipmentPurchaseOrders.purchaseOrderId, id), ne(shipments.status, "cancelled"))).limit(1);
       if (openShipment) return invalid(res, "Cancel or complete the shipment before cancelling this order.");
     }
     const [order] = await db.update(purchaseOrders).set({ ...parsed.data, updatedAt: new Date() })
@@ -79,39 +80,66 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/shipments", owner, async (_req, res) => {
-    const headers = await db.select({ shipment: shipments, orderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name })
-      .from(shipments).innerJoin(purchaseOrders, eq(shipments.purchaseOrderId, purchaseOrders.id))
-      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)).orderBy(asc(shipments.createdAt));
-    const rows = await db.select({ line: shipmentLines, productName: products.name, sku: products.sku, orderLine: purchaseOrderLines })
+    const headers = await db.select().from(shipments).orderBy(asc(shipments.createdAt));
+    const linkedOrders = await db.select({
+      shipmentId: shipmentPurchaseOrders.shipmentId, orderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name,
+    }).from(shipmentPurchaseOrders)
+      .innerJoin(purchaseOrders, eq(shipmentPurchaseOrders.purchaseOrderId, purchaseOrders.id))
+      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id));
+    const rows = await db.select({
+      line: shipmentLines, productName: products.name, sku: products.sku, orderLine: purchaseOrderLines,
+      orderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name,
+    })
       .from(shipmentLines).innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
-      .innerJoin(products, eq(purchaseOrderLines.productId, products.id));
-    res.json({ shipments: headers.map(({ shipment, orderNumber, supplierName }) => ({
-      ...shipment, orderNumber, supplierName,
+      .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+      .innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
+      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id));
+    res.json({ shipments: headers.map((shipment) => {
+      const associated = linkedOrders.filter((row) => row.shipmentId === shipment.id);
+      return {
+      ...shipment,
+      orderNumbers: associated.map((row) => row.orderNumber),
+      supplierNames: [...new Set(associated.map((row) => row.supplierName))],
+      orderNumber: associated.map((row) => row.orderNumber).join(", "),
+      supplierName: [...new Set(associated.map((row) => row.supplierName))].join(", "),
       lines: rows.filter(({ line }) => line.shipmentId === shipment.id)
-        .map(({ line, productName, sku, orderLine }) => ({ ...line, productName, sku, quantityOrdered: orderLine.quantityOrdered })),
-    })) });
+        .map(({ line, productName, sku, orderLine, orderNumber, supplierName }) => ({
+          ...line, productName, sku, orderNumber, supplierName, quantityOrdered: orderLine.quantityOrdered,
+        })),
+      };
+    }) });
   });
 
   app.post("/api/shipments", owner, async (req, res) => {
     const parsed = shipmentInputSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.issues[0]?.message ?? "Check shipment details.");
-    const { lines, ...input } = parsed.data;
-    const [order] = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.purchaseOrderId)).limit(1);
-    if (!order || order.status === "cancelled" || order.status === "received") return invalid(res, "Choose an open purchase order.");
+    const { lines, purchaseOrderIds, ...input } = parsed.data;
+    const orders = await db.select().from(purchaseOrders).where(inArray(purchaseOrders.id, purchaseOrderIds));
+    if (orders.length !== purchaseOrderIds.length || orders.some((order) => order.status === "cancelled" || order.status === "received")) {
+      return invalid(res, "Choose open purchase orders.");
+    }
     const lineIds = lines.map((line) => line.purchaseOrderLineId);
     const orderLines = await db.select().from(purchaseOrderLines)
-      .where(and(eq(purchaseOrderLines.purchaseOrderId, order.id), inArray(purchaseOrderLines.id, lineIds)));
-    if (orderLines.length !== lines.length) return invalid(res, "Every shipment line must belong to the selected purchase order.");
+      .where(inArray(purchaseOrderLines.id, lineIds));
+    if (orderLines.length !== lines.length || orderLines.some((line) => !purchaseOrderIds.includes(line.purchaseOrderId))) {
+      return invalid(res, "Every shipment product must belong to a selected purchase order.");
+    }
+    if (purchaseOrderIds.some((orderId) => !orderLines.some((line) => line.purchaseOrderId === orderId))) {
+      return invalid(res, "Add at least one product from each selected purchase order.");
+    }
     const shippedRows = await db.select({ lineId: shipmentLines.purchaseOrderLineId, quantity: sum(shipmentLines.quantityShipped) })
       .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-      .where(and(eq(shipments.purchaseOrderId, order.id), ne(shipments.status, "cancelled"))).groupBy(shipmentLines.purchaseOrderLineId);
+      .where(ne(shipments.status, "cancelled")).groupBy(shipmentLines.purchaseOrderLineId);
     const shipped = new Map(shippedRows.map((row) => [row.lineId, Number(row.quantity ?? 0)]));
     for (const item of lines) {
       const ordered = orderLines.find((line) => line.id === item.purchaseOrderLineId)?.quantityOrdered ?? 0;
       if ((shipped.get(item.purchaseOrderLineId) ?? 0) + item.quantityShipped > ordered) return invalid(res, "Shipment quantity exceeds the quantity ordered.");
     }
     const shipment = await db.transaction(async (tx) => {
-      const [created] = await tx.insert(shipments).values(input).returning();
+      const [created] = await tx.insert(shipments).values({ ...input, purchaseOrderId: purchaseOrderIds[0] }).returning();
+      await tx.insert(shipmentPurchaseOrders).values(purchaseOrderIds.map((purchaseOrderId) => ({
+        shipmentId: created.id, purchaseOrderId,
+      })));
       await tx.insert(shipmentLines).values(lines.map((line) => ({ ...line, shipmentId: created.id, quantityReceived: 0 })));
       return created;
     });
@@ -129,10 +157,13 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     if (currentLines.length !== parsed.data.lines.length || parsed.data.lines.some((item) => !currentLines.some((line) => line.id === item.shipmentLineId))) {
       return invalid(res, "Include a received quantity for every line in this shipment.");
     }
-    const orderLines = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, shipment.purchaseOrderId));
+    const currentOrderLines = await db.select().from(purchaseOrderLines)
+      .where(inArray(purchaseOrderLines.id, currentLines.map((line) => line.purchaseOrderLineId)));
+    const orderIds = [...new Set(currentOrderLines.map((line) => line.purchaseOrderId))];
+    const allOrderLines = await db.select().from(purchaseOrderLines).where(inArray(purchaseOrderLines.purchaseOrderId, orderIds));
     const receipts = await db.select({ shipmentId: shipmentLines.shipmentId, lineId: shipmentLines.purchaseOrderLineId, quantity: shipmentLines.quantityReceived })
       .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-      .where(and(eq(shipments.purchaseOrderId, shipment.purchaseOrderId), ne(shipments.status, "cancelled")));
+      .where(ne(shipments.status, "cancelled"));
     const next = new Map(parsed.data.lines.map((line) => [line.shipmentLineId, line.quantityReceived]));
     for (const line of currentLines) {
       const value = next.get(line.id)!;
@@ -140,7 +171,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       if (value < line.quantityStocked) return invalid(res, "Received quantity cannot be reduced below the quantity already posted to stock.");
       const otherReceived = receipts.filter((row) => row.lineId === line.purchaseOrderLineId && row.shipmentId !== id)
         .reduce((sumValue, row) => sumValue + row.quantity, 0);
-      const ordered = orderLines.find((row) => row.id === line.purchaseOrderLineId)?.quantityOrdered ?? 0;
+      const ordered = allOrderLines.find((row) => row.id === line.purchaseOrderLineId)?.quantityOrdered ?? 0;
       const sameShipmentOtherLines = currentLines.filter((row) => row.id !== line.id && row.purchaseOrderLineId === line.purchaseOrderLineId)
         .reduce((sumValue, row) => sumValue + (next.get(row.id) ?? row.quantityReceived), 0);
       if (otherReceived + sameShipmentOtherLines + value > ordered) return invalid(res, "Total received quantity cannot exceed the quantity ordered.");
@@ -155,13 +186,19 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       const [saved] = await tx.update(shipments).set({
         status, receivedAt: status === "received" ? new Date().toISOString().slice(0, 10) : null, updatedAt: new Date(),
       }).where(eq(shipments.id, id)).returning();
-      const allRows = await tx.select({ lineId: shipmentLines.purchaseOrderLineId, shipmentId: shipmentLines.shipmentId, quantity: shipmentLines.quantityReceived })
-        .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-        .where(and(eq(shipments.purchaseOrderId, shipment.purchaseOrderId), ne(shipments.status, "cancelled")));
-      const totalReceived = allRows.reduce((sumValue, row) => sumValue + row.quantity, 0);
-      const totalOrdered = orderLines.reduce((sumValue, line) => sumValue + line.quantityOrdered, 0);
-      const orderStatus = totalReceived === totalOrdered ? "received" : totalReceived > 0 ? "partially_received" : "ordered";
-      await tx.update(purchaseOrders).set({ status: orderStatus, updatedAt: new Date() }).where(eq(purchaseOrders.id, shipment.purchaseOrderId));
+      for (const orderId of orderIds) {
+        const orderLines = allOrderLines.filter((line) => line.purchaseOrderId === orderId);
+        const lineIds = orderLines.map((line) => line.id);
+        const receivedRows = await tx.select({ lineId: shipmentLines.purchaseOrderLineId, quantity: shipmentLines.quantityReceived })
+          .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
+          .where(and(inArray(shipmentLines.purchaseOrderLineId, lineIds), ne(shipments.status, "cancelled")));
+        const receivedByLine = new Map<number, number>();
+        receivedRows.forEach((row) => receivedByLine.set(row.lineId, (receivedByLine.get(row.lineId) ?? 0) + row.quantity));
+        const totalReceived = orderLines.reduce((total, line) => total + (receivedByLine.get(line.id) ?? 0), 0);
+        const totalOrdered = orderLines.reduce((total, line) => total + line.quantityOrdered, 0);
+        const orderStatus = totalReceived === totalOrdered ? "received" : totalReceived > 0 ? "partially_received" : "ordered";
+        await tx.update(purchaseOrders).set({ status: orderStatus, updatedAt: new Date() }).where(eq(purchaseOrders.id, orderId));
+      }
       return saved;
     });
     res.json({ shipment: updated });

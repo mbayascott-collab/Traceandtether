@@ -256,6 +256,19 @@ export const shipments = pgTable(
   ],
 );
 
+export const shipmentPurchaseOrders = pgTable(
+  "shipment_purchase_orders",
+  {
+    shipmentId: integer("shipment_id").notNull().references(() => shipments.id, { onDelete: "restrict" }),
+    purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("shipment_purchase_orders_pair_unique").on(table.shipmentId, table.purchaseOrderId),
+    index("shipment_purchase_orders_order_idx").on(table.purchaseOrderId),
+  ],
+);
+
 export const shipmentLines = pgTable(
   "shipment_lines",
   {

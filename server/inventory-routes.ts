@@ -52,9 +52,9 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       productName: products.name, sku: products.sku,
     }).from(shipmentLines)
       .innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-      .innerJoin(purchaseOrders, eq(shipments.purchaseOrderId, purchaseOrders.id))
-      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
       .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
+      .innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
+      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
       .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
       .where(and(gt(shipmentLines.quantityReceived, shipmentLines.quantityStocked), inArray(shipments.status, ["received", "partially_received"])))
       .orderBy(asc(shipments.receivedAt));
@@ -78,7 +78,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       if (!productLine) return { error: "Order product not found.", status: 404 };
       await tx.select({ id: products.id }).from(products).where(eq(products.id, productLine.productId)).for("update");
       const [orderLine] = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, line.purchaseOrderLineId)).limit(1);
-      const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, shipment.purchaseOrderId)).limit(1);
+      const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, orderLine?.purchaseOrderId ?? 0)).limit(1);
       if (!orderLine || !order) return { error: "Purchase order cost details could not be found.", status: 409 };
       const orderLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, order.id));
       const expenses = await tx.select().from(importExpenses).where(eq(importExpenses.purchaseOrderId, order.id));
