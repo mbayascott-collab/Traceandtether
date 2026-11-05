@@ -2606,6 +2606,81 @@ textarea:focus-visible {
 .cash-forecast-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 16px; }
 .cash-forecast-grid > div { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
 .cash-forecast-grid span { color: var(--muted); font-size: 10px; }
+
+/* Keep data-entry forms in one clear, full-width reading order. */
+.form-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.form-grid > h2 {
+  padding-bottom: 10px;
+  margin: 0;
+  color: var(--ink);
+  border-bottom: 1px solid #e7ece5;
+  font: 700 16px var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+.form-grid label {
+  display: grid;
+  gap: 7px;
+  color: #50645f;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.form-grid input:not([type="checkbox"]):not([type="radio"]),
+.form-grid select,
+.form-grid textarea,
+.shop-order-form input,
+.shop-order-form select,
+.shop-order-form textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fffefa;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.form-grid textarea,
+.shop-order-form textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.form-grid input:focus,
+.form-grid select:focus,
+.form-grid textarea:focus,
+.shop-order-form input:focus,
+.shop-order-form select:focus,
+.shop-order-form textarea:focus {
+  border-color: #4b8c7d;
+  outline: 3px solid rgb(75 140 125 / 15%);
+}
+
+.form-grid input[type="checkbox"],
+.form-grid input[type="radio"] {
+  width: 18px;
+  height: 18px;
+}
+
+.form-grid > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.form-grid .form-section-label {
+  margin-top: 4px;
+  padding-bottom: 10px;
+  font-size: 11px;
+}
 .cash-forecast-grid strong { color: var(--ink); font-size: 17px; }
 .customer-quote-line { grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(130px, 1fr)) auto; align-items: end; }
 .customer-quote-line label { min-width: 0; }
