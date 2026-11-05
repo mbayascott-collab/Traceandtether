@@ -21,6 +21,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
+  const [customerSearch, setCustomerSearch] = useState("");
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -93,6 +94,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   function customerCode(id: number) {
     return `CUS-${String(id).padStart(5, "0")}`;
   }
+  function matchesCustomer(customer: Customer, query: string) {
+    const value = query.trim().toLowerCase();
+    return !value || customer.name.toLowerCase().includes(value) || customerCode(customer.id).toLowerCase().includes(value);
+  }
+  const filteredCustomers = customers.filter((customer) => matchesCustomer(customer, customerSearch));
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>{title}</h1><p>{mode === "customers" ? "Keep customer contact and delivery details in the owner workspace." : "Draft orders, reserve available inventory on confirmation, and record stock leaving when fulfilled."}</p></div></header>
@@ -113,8 +119,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Status<select name="status" defaultValue={editingCustomer?.status ?? "active"}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
         <button className="button button-primary">{editingCustomer ? "Save changes" : "Save customer"}</button>{editingCustomer && <button type="button" onClick={() => setEditingCustomer(null)}>Cancel edit</button>}
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table></div>
-      {historyCustomer && (() => {
+      <label>Search customers by name or ID<input type="search" placeholder="Name or ID, such as CUS-00001" value={customerSearch} onChange={(event) => {
+        const value = event.target.value;
+        setCustomerSearch(value);
+        if (historyCustomer && !matchesCustomer(historyCustomer, value)) setHistoryCustomer(null);
+      }} /></label>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
+      {historyCustomer && filteredCustomers.some((item) => item.id === historyCustomer.id) && (() => {
         const customer = customers.find((item) => item.id === historyCustomer.id) ?? historyCustomer;
         const purchases = orders
           .filter((order) => order.customerId === customer.id && Number(order.deliveredZmw) > 0)
