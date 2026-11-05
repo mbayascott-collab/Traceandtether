@@ -127,6 +127,13 @@
       "when": 1793860845285,
       "tag": "0017_lively_skrulls",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793863841444,
+      "tag": "0018_lush_zarda",
+      "breakpoints": true
     }
   ]
 }

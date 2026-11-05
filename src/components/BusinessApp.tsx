@@ -71,6 +71,7 @@ type ProductDraft = {
   sku: string;
   name: string;
   description: string;
+  imageUrl: string;
   brand: string;
   categoryId: string;
   supplierName: string;
@@ -134,6 +135,7 @@ function emptyProductDraft(): ProductDraft {
     sku: "",
     name: "",
     description: "",
+    imageUrl: "",
     brand: "",
     categoryId: "",
     supplierName: "",
@@ -153,6 +155,7 @@ function productToDraft(product: Product): ProductDraft {
     sku: product.sku,
     name: product.name,
     description: product.description ?? "",
+    imageUrl: product.imageUrl ?? "",
     brand: product.brand ?? "",
     categoryId: product.categoryId == null ? "" : String(product.categoryId),
     supplierName: product.supplierName ?? "",
@@ -172,6 +175,7 @@ function toProductInput(draft: ProductDraft): ProductInput {
     sku: draft.sku.trim(),
     name: draft.name.trim(),
     description: draft.description.trim() || null,
+    imageUrl: draft.imageUrl.trim() || null,
     brand: draft.brand.trim() || null,
     categoryId: draft.categoryId ? Number(draft.categoryId) : null,
     supplierName: draft.supplierName.trim() || null,
@@ -715,6 +719,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
                         {productsResult.products.map((product) => (
                           <tr key={product.id}>
                             <td>
+                              {product.imageUrl && <img className="product-image-thumb" src={product.imageUrl} alt="" loading="lazy" />}
                               <span className="product-primary" title={product.name}>{product.name}</span>
                               <span className="product-secondary">{product.sku}{product.brand ? ` · ${product.brand}` : ""}</span>
                             </td>
@@ -990,6 +995,12 @@ function ProductModal({
               <div className="field field-full">
                 <label htmlFor="product-description">Description</label>
                 <textarea id="product-description" value={draft.description} onChange={(event) => update("description", event.target.value)} maxLength={2000} placeholder="A short description for your own reference" />
+              </div>
+              <div className="field field-full">
+                <label htmlFor="product-image-url">Product picture link</label>
+                <input id="product-image-url" type="url" value={draft.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} maxLength={1000} placeholder="https://…" />
+                <small>Optional. You can add a picture link now, or leave this blank until you have one.</small>
+                {draft.imageUrl && /^https?:\/\//i.test(draft.imageUrl) && <img className="product-image-preview" src={draft.imageUrl} alt={`Preview of ${draft.name || "product"}`} />}
               </div>
 
               <div className="form-section-label field-full"><Truck aria-hidden="true" /> Supplier & sourcing</div>

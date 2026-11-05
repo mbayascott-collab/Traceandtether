@@ -9,6 +9,7 @@ const validProduct = {
   sku: "mz-001",
   name: "Portable lamp",
   description: "",
+  imageUrl: "",
   brand: "",
   categoryId: "",
   supplierName: "Example supplier",
@@ -28,7 +29,13 @@ test("normalizes product identifiers, text and currency", () => {
   assert.equal(result.purchaseCurrency, "CNY");
   assert.equal(result.categoryId, null);
   assert.equal(result.description, null);
+  assert.equal(result.imageUrl, null);
   assert.equal(result.reorderThreshold, 5);
+});
+
+test("accepts optional product image links and rejects unsafe links", () => {
+  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrl: "https://images.example/lamp.jpg" }).success, true);
+  assert.equal(productInputSchema.safeParse({ ...validProduct, imageUrl: "javascript:alert(1)" }).success, false);
 });
 
 test("rejects negative monetary values", () => {

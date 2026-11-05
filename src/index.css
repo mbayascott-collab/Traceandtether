@@ -935,6 +935,27 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.product-image-thumb {
+  display: block;
+  width: 38px;
+  height: 38px;
+  margin-bottom: 6px;
+  border: 1px solid #e3e8e1;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.product-image-preview {
+  display: block;
+  width: 144px;
+  height: 144px;
+  margin-top: 8px;
+  border: 1px solid #e3e8e1;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #f8faf5;
+}
+
 .product-secondary {
   display: block;
   max-width: 265px;

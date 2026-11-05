@@ -136,6 +136,7 @@ export interface Product {
   sku: string;
   name: string;
   description: string | null;
+  imageUrl: string | null;
   brand: string | null;
   categoryId: number | null;
   supplierName: string | null;
@@ -157,6 +158,7 @@ export interface ProductInput {
   sku: string;
   name: string;
   description: string | null;
+  imageUrl: string | null;
   brand: string | null;
   categoryId: number | null;
   supplierName: string | null;

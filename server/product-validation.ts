@@ -33,6 +33,15 @@ export const productInputSchema = z
     sku: z.string().trim().min(1).max(60).transform((value) => value.toUpperCase()),
     name: z.string().trim().min(1).max(160),
     description: nullableText(5_000),
+    imageUrl: nullableText(1_000).refine((value) => {
+      if (value === null) return true;
+      try {
+        const url = new URL(value);
+        return url.protocol === "https:" || url.protocol === "http:";
+      } catch {
+        return false;
+      }
+    }, "Enter a valid image link beginning with http:// or https://."),
     brand: nullableText(100),
     categoryId: nullableCategoryId,
     supplierName: nullableText(160),
