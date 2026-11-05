@@ -90,6 +90,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   function deliveryNoteNumber(order: SalesOrder) {
     return `DN-${order.orderNumber.replace(/^SO-/, "")}`;
   }
+  function customerCode(id: number) {
+    return `CUS-${String(id).padStart(5, "0")}`;
+  }
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>{title}</h1><p>{mode === "customers" ? "Keep customer contact and delivery details in the owner workspace." : "Draft orders, reserve available inventory on confirmation, and record stock leaving when fulfilled."}</p></div></header>
@@ -110,13 +113,22 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Status<select name="status" defaultValue={editingCustomer?.status ?? "active"}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
         <button className="button button-primary">{editingCustomer ? "Save changes" : "Save customer"}</button>{editingCustomer && <button type="button" onClick={() => setEditingCustomer(null)}>Cancel edit</button>}
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Contact person</th><th>Contact person's phone</th><th>Customer contact details</th><th>Address</th><th>Status</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{c.contactPerson || "—"}</td><td>{c.contactPersonPhone || "—"}</td><td>{c.email || "—"}<br />{c.phone || ""}</td><td>{c.address || "—"}</td><td>{c.status}</td><td><button onClick={() => setEditingCustomer(c)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Hide purchases" : "View purchases"}</button></td></tr>)}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table></div>
       {historyCustomer && (() => {
+        const customer = customers.find((item) => item.id === historyCustomer.id) ?? historyCustomer;
         const purchases = orders
-          .filter((order) => order.customerId === historyCustomer.id && Number(order.deliveredZmw) > 0)
+          .filter((order) => order.customerId === customer.id && Number(order.deliveredZmw) > 0)
           .sort((a, b) => b.orderDate.localeCompare(a.orderDate));
         return <div className="panel data-table-wrap">
-          <div className="panel-heading"><div><h2>{historyCustomer.name} · Past purchases</h2><p>Only items already delivered are counted as purchases.</p></div><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close</button></div>
+          <div className="panel-heading"><div><p className="eyebrow">Customer account</p><h2>{customer.name}</h2><p>Customer ID: <strong>{customerCode(customer.id)}</strong></p></div><div><button className="button button-secondary button-small" onClick={() => setEditingCustomer(customer)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close customer</button></div></div>
+          <p><strong>Contact person:</strong> {customer.contactPerson || "—"}</p>
+          <p><strong>Contact person's phone:</strong> {customer.contactPersonPhone || "—"}</p>
+          <p><strong>Email:</strong> {customer.email || "—"}</p>
+          <p><strong>Phone:</strong> {customer.phone || "—"}</p>
+          <p><strong>Address:</strong> {customer.address || "—"}</p>
+          <p><strong>Status:</strong> {customer.status}</p>
+          {customer.notes && <p><strong>Notes:</strong> {customer.notes}</p>}
+          <h3>Past purchases</h3><p className="report-footnote">Only items already delivered are counted as purchases.</p>
           <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Status</th></tr></thead>
             <tbody>{purchases.map((order) => <tr key={order.id}>
               <td>{order.orderNumber}</td><td>{new Date(order.orderDate).toLocaleDateString("en-ZM")}</td>
