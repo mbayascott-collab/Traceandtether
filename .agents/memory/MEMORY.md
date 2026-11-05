@@ -4,3 +4,4 @@
 - [Online shop rollout](online-shop-rollout.md) — Use manual order requests until Shopify funding is available; Shopify remains a later storefront/checkout option.
 - [Accounting policy](accounting-policy.md) — Use weighted-average inventory costing and accrual posting for unpaid sales and supplier costs.
 - [Company identity](company-identity.md) — Use the corrected legal name on customer-facing documents.
+- [Future system tutorial](future-system-tutorial.md) — The user plans to request a guide to using this system later in the project.
