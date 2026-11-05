@@ -20,6 +20,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -109,7 +110,23 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Status<select name="status" defaultValue={editingCustomer?.status ?? "active"}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
         <button className="button button-primary">{editingCustomer ? "Save changes" : "Save customer"}</button>{editingCustomer && <button type="button" onClick={() => setEditingCustomer(null)}>Cancel edit</button>}
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Contact person</th><th>Contact person's phone</th><th>Customer contact details</th><th>Address</th><th>Status</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{c.contactPerson || "—"}</td><td>{c.contactPersonPhone || "—"}</td><td>{c.email || "—"}<br />{c.phone || ""}</td><td>{c.address || "—"}</td><td>{c.status}</td><td><button onClick={() => setEditingCustomer(c)}>Edit details</button></td></tr>)}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Contact person</th><th>Contact person's phone</th><th>Customer contact details</th><th>Address</th><th>Status</th><th /></tr></thead><tbody>{customers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{c.contactPerson || "—"}</td><td>{c.contactPersonPhone || "—"}</td><td>{c.email || "—"}<br />{c.phone || ""}</td><td>{c.address || "—"}</td><td>{c.status}</td><td><button onClick={() => setEditingCustomer(c)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Hide purchases" : "View purchases"}</button></td></tr>)}</tbody></table></div>
+      {historyCustomer && (() => {
+        const purchases = orders
+          .filter((order) => order.customerId === historyCustomer.id && Number(order.deliveredZmw) > 0)
+          .sort((a, b) => b.orderDate.localeCompare(a.orderDate));
+        return <div className="panel data-table-wrap">
+          <div className="panel-heading"><div><h2>{historyCustomer.name} · Past purchases</h2><p>Only items already delivered are counted as purchases.</p></div><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close</button></div>
+          <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Status</th></tr></thead>
+            <tbody>{purchases.map((order) => <tr key={order.id}>
+              <td>{order.orderNumber}</td><td>{new Date(order.orderDate).toLocaleDateString("en-ZM")}</td>
+              <td>{order.lines.filter((line) => line.deliveredQuantity > 0).map((line) => `${line.productName} × ${line.deliveredQuantity}`).join(", ")}</td>
+              <td>{zmw(order.deliveredZmw)}</td><td>{order.status.replace("_", " ")}</td>
+            </tr>)}</tbody>
+          </table>
+          {!purchases.length && <p className="report-footnote">This customer has no delivered purchases yet.</p>}
+        </div>;
+      })()}
     </>}
     {mode === "orders" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createSalesOrder({
