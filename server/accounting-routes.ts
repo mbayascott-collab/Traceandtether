@@ -1,11 +1,16 @@
 import { desc, eq, lte } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
 import { db } from "./db";
-import { ensureAccountingAccounts } from "./accounting-posting";
+import { ensureAccountingAccounts, journalLinesAreBalanced } from "./accounting-posting";
 
-const dateQuery = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const dateQuery = z.string().refine((value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+});
 const cents = (value: string) => {
   const [whole, fraction = ""] = value.split(".");
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
@@ -14,8 +19,63 @@ const money = (value: bigint) => {
   const abs = value < 0n ? -value : value;
   return `${value < 0n ? "-" : ""}${abs / 100n}.${String(abs % 100n).padStart(2, "0")}`;
 };
+const cashInSchema = z.object({
+  kind: z.enum(["owner_contribution", "business_loan"]),
+  amountZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  receivedAt: z.string().refine((value) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }),
+  method: z.enum(["cash", "bank_transfer", "mobile_money", "other"]),
+  reference: z.string().trim().max(120).optional().default(""),
+  notes: z.string().trim().max(500).optional().default(""),
+});
 
 export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
+  app.post("/api/accounting/funds", owner, async (req, res) => {
+    const parsed = cashInSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Check the cash-in details." });
+      return;
+    }
+    const input = parsed.data;
+    let amount: bigint;
+    try { amount = cents(input.amountZmw); } catch { amount = 0n; }
+    if (amount <= 0n) {
+      res.status(400).json({ error: "Enter an amount greater than zero." });
+      return;
+    }
+    const sourceKey = `funding-${randomUUID()}`;
+    await db.transaction(async (tx) => {
+      const accountMap = await ensureAccountingAccounts(tx);
+      const cashAccount = accountMap.get("cash_bank");
+      const offsetAccount = accountMap.get(input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable");
+      if (!cashAccount || !offsetAccount) throw new Error("Required accounting accounts are unavailable.");
+      if (!journalLinesAreBalanced([
+        { accountKey: "cash_bank", debitZmw: input.amountZmw },
+        { accountKey: input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable", creditZmw: input.amountZmw },
+      ])) throw new Error("Cash-in journal is not balanced.");
+      const [entry] = await tx.insert(journalEntries).values({
+        entryNumber: `JE-${input.receivedAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
+        sourceKey, sourceType: input.kind, sourceId: null,
+        entryDate: input.receivedAt,
+        memo: `${input.kind === "owner_contribution" ? "Owner contribution" : "Business loan received"}${input.reference ? ` · ${input.reference}` : ""}`,
+      }).returning();
+      await tx.insert(journalLines).values([
+        {
+          journalEntryId: entry.id, accountId: cashAccount.id, debitZmw: input.amountZmw, creditZmw: "0.00",
+          description: `Received by ${input.method}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`,
+        },
+        {
+          journalEntryId: entry.id, accountId: offsetAccount.id, debitZmw: "0.00", creditZmw: input.amountZmw,
+          description: input.kind === "owner_contribution" ? "Owner funds added" : "Loan principal received",
+        },
+      ]);
+    });
+    res.status(201).json({ message: "Cash-in recorded." });
+  });
+
   app.get("/api/accounting", owner, async (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     const year = today.slice(0, 4);

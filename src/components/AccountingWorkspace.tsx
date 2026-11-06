@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
 type TrialRow = ReportRow & { accountId: number; debitZmw: string; creditZmw: string; balanceZmw: string };
@@ -36,6 +36,7 @@ export default function AccountingWorkspace() {
   const [range, setRange] = useState({ from: `${currentYear}-01-01`, to: new Date().toISOString().slice(0, 10) });
   const [data, setData] = useState<ReportData | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -51,6 +52,24 @@ export default function AccountingWorkspace() {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [range]);
+
+  async function recordCashIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setNotice("");
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    try {
+      const response = await fetch("/api/accounting/funds", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Cash-in could not be recorded.");
+      form.reset();
+      setNotice("Cash-in recorded and added to the journal.");
+      setRange((current) => ({ ...current }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Cash-in could not be recorded.");
+    }
+  }
 
   const exportJournal = () => downloadCsv("journal-entries.csv", [
     ["Date", "Entry number", "Source", "Memo", "Account code", "Account", "Description", "Debit ZMW", "Credit ZMW"],
@@ -75,6 +94,23 @@ export default function AccountingWorkspace() {
   return <>
     <section className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Accounting</h1><p>Review and export the records posted from business activity.</p></div></section>
     {error && <div className="alert alert-error" role="alert">{error}</div>}
+    {notice && <div className="alert alert-success" role="status">{notice}</div>}
+    <form className="panel form-grid" style={{ padding: 16, marginBottom: 16 }} onSubmit={recordCashIn}>
+      <h2>Record cash added to the business</h2>
+      <label>What kind of money is this?<select name="kind" defaultValue="owner_contribution">
+        <option value="owner_contribution">Owner contribution</option>
+        <option value="business_loan">Business loan to repay</option>
+      </select></label>
+      <label>Amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
+      <label>Date received<input name="receivedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+      <label>Where was it received?<select name="method" defaultValue="cash">
+        <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
+        <option value="mobile_money">Mobile money</option><option value="other">Other</option>
+      </select></label>
+      <label>Reference<input name="reference" maxLength={120} placeholder="Receipt, transfer, or loan reference" /></label>
+      <label>Notes<textarea name="notes" maxLength={500} /></label>
+      <button className="button button-primary">Save cash-in</button>
+    </form>
     <section className="panel form-grid" style={{ padding: 16, marginBottom: 16 }}>
       <h2>Year-end report period</h2>
       <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>

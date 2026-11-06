@@ -8,6 +8,7 @@ export const accounts = [
   { code: "1150", name: "Landed cost clearing", type: "asset" as const, systemKey: "landed_cost_clearing" },
   { code: "1200", name: "Accounts receivable", type: "asset" as const, systemKey: "accounts_receivable" },
   { code: "2100", name: "Accounts payable", type: "liability" as const, systemKey: "accounts_payable" },
+  { code: "2200", name: "Business loans payable", type: "liability" as const, systemKey: "business_loans_payable" },
   { code: "3000", name: "Owner equity", type: "equity" as const, systemKey: "owner_equity" },
   { code: "4100", name: "Sales revenue", type: "income" as const, systemKey: "sales_revenue" },
   { code: "5100", name: "Cost of goods sold", type: "expense" as const, systemKey: "cost_of_goods_sold" },
