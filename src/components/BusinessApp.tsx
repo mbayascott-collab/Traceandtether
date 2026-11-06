@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   ArrowUpRight,
   BadgeDollarSign,
+  BarChart3,
   Boxes,
   Check,
   ChevronLeft,
@@ -61,6 +62,7 @@ import MarketingWorkspace from "./MarketingWorkspace";
 import ProfitabilityWorkspace, { BusinessDashboard } from "./BusinessReports";
 import PaymentsWorkspace from "./PaymentsWorkspace";
 import UserAccessWorkspace from "./UserAccessWorkspace";
+import BusinessAnalyticsWorkspace from "./BusinessAnalyticsWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -265,6 +267,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
 
   const productsRequest = useRef(0);
   const isDashboard = location === "/dashboard";
+  const isAnalytics = location === "/analytics";
   const isProducts = location === "/products";
   const isCategories = location === "/categories";
   const isSuppliers = location === "/suppliers";
@@ -286,7 +289,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isMarketing = location === "/marketing";
   const isProfitability = location === "/profitability";
   const isUserAccess = location === "/user-access";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : isUserAccess ? "User access" : "Dashboard";
+  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : isAnalytics ? "Analytics" : isUserAccess ? "User access" : "Dashboard";
   useEffect(() => {
     document.querySelector(".app-main")?.scrollTo(0, 0);
     window.scrollTo(0, 0);
@@ -438,6 +441,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
         <nav className="side-nav" onClick={() => setMobileNavOpen(false)}>
           <Link href="/dashboard" aria-current={isDashboard ? "page" : undefined}>
             <LayoutDashboard aria-hidden="true" /><span>Dashboard</span>
+          </Link>
+          <Link href="/analytics" aria-current={isAnalytics ? "page" : undefined}>
+            <BarChart3 aria-hidden="true" /><span>Analytics</span>
           </Link>
           <Link href="/products" aria-current={isProducts ? "page" : undefined}>
             <Package aria-hidden="true" /><span>Products</span>
@@ -648,6 +654,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
               </div>
             </>
           )}
+          {isAnalytics && <BusinessAnalyticsWorkspace />}
 
           {isProducts && (
             <>
