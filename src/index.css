@@ -159,8 +159,25 @@ textarea:focus-visible {
 
 .side-nav {
   display: grid;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 5px;
+  align-content: start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(184, 203, 194, 0.55) transparent;
+}
+
+.side-nav::-webkit-scrollbar {
+  width: 8px;
+}
+
+.side-nav::-webkit-scrollbar-thumb {
+  background: rgba(184, 203, 194, 0.55);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 99px;
 }
 
 .side-nav a {
@@ -212,7 +229,8 @@ textarea:focus-visible {
 }
 
 .sidebar-spacer {
-  flex: 1;
+  flex: 0 0 12px;
+  min-height: 12px;
 }
 
 .workspace-note {
