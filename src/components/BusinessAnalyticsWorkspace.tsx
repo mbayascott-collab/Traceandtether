@@ -16,6 +16,13 @@ type DashboardData = {
   replenishment: { id: number; name: string; sku: string; available: number; incoming: number; suggestedQuantity: number }[];
   cashForecast: { estimatedClosingZmw: string; assumption: string };
 };
+type SupplierAnalytics = {
+  totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number };
+  suppliers: {
+    supplierId: number; name: string; orders: number; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+    onTimeOrders: number; lateOrders: number; overdueOpenOrders: number; missingExpectedDateOrders: number; onTimeRatePercent: string | null;
+  }[];
+};
 const money = (value: string | null | undefined) => value == null ? "—" : `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const dateRange = () => {
   const end = new Date();
@@ -38,6 +45,7 @@ export default function BusinessAnalyticsWorkspace() {
   const [to, setTo] = useState(initial.to);
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [supplierReport, setSupplierReport] = useState<SupplierAnalytics | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -46,11 +54,12 @@ export default function BusinessAnalyticsWorkspace() {
     setLoading(true); setError("");
     try {
       const query = new URLSearchParams({ from, to });
-      const [sales, overview] = await Promise.all([
+      const [sales, overview, suppliers] = await Promise.all([
         getJson<AnalyticsReport>(`/api/profitability?${query.toString()}`),
         getJson<DashboardData>("/api/business-dashboard"),
+        getJson<SupplierAnalytics>(`/api/supplier-analytics?${query.toString()}`),
       ]);
-      setReport(sales); setDashboard(overview);
+      setReport(sales); setDashboard(overview); setSupplierReport(suppliers);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load analytics.");
     } finally { setLoading(false); }
@@ -81,7 +90,7 @@ export default function BusinessAnalyticsWorkspace() {
       <button className="button button-primary button-small" disabled={loading}>{loading ? "Loading…" : "Update analytics"}</button>
     </form>
     {error && <div className="alert alert-error" role="alert">{error}</div>}
-    {loading && !report ? <div className="panel panel-body">Loading business analytics…</div> : report && dashboard && <>
+    {loading && !report ? <div className="panel panel-body">Loading business analytics…</div> : report && dashboard && supplierReport && <>
       <div className="metric-grid analytics-metrics">
         {cards.map(([label, value]) => <article className="metric-card" key={label}><div className="metric-top"><span>{label}</span></div><strong className="metric-value">{value}</strong></article>)}
       </div>
@@ -138,6 +147,24 @@ export default function BusinessAnalyticsWorkspace() {
           </div>
         </section>
       </div>
+      <section className="panel analytics-panel analytics-supplier-panel">
+        <div className="panel-heading"><div><h2>Supplier spend and delivery</h2><span>Orders by order date; costs and payments by their recorded dates</span></div></div>
+        <div className="analytics-supplier-totals">
+          <div><span>Goods ordered</span><strong>{money(supplierReport.totals.orderedGoodsZmw)}</strong></div>
+          <div><span>Import costs recorded</span><strong>{money(supplierReport.totals.importCostsZmw)}</strong></div>
+          <div><span>Supplier payments recorded</span><strong>{money(supplierReport.totals.paymentsZmw)}</strong></div>
+          <div><span>Late / overdue orders</span><strong>{supplierReport.totals.lateOrders} / {supplierReport.totals.overdueOpenOrders}</strong></div>
+        </div>
+        <div className="table-wrap"><table><thead><tr><th>Supplier</th><th>Orders</th><th>Goods ordered</th><th>Import costs</th><th>Payments</th><th>On time</th><th>Late</th><th>Overdue open</th></tr></thead><tbody>
+          {supplierReport.suppliers.map((supplier) => <tr key={supplier.supplierId}>
+            <td>{supplier.name}</td><td>{supplier.orders}</td><td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td><td>{money(supplier.paymentsZmw)}</td>
+            <td>{supplier.onTimeOrders} {supplier.onTimeRatePercent == null ? "(not enough dates)" : `(${supplier.onTimeRatePercent}%)`}</td>
+            <td>{supplier.lateOrders}</td><td>{supplier.overdueOpenOrders}</td>
+          </tr>)}
+          {!supplierReport.suppliers.length && <tr><td colSpan={8}>No supplier orders in this period.</td></tr>}
+        </tbody></table></div>
+        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Payments and import costs use their own recorded dates and exchange rates. On-time rates include only fully received orders with expected and actual receipt dates; missing dates are not guessed.</p>
+      </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
     </>}
   </>;

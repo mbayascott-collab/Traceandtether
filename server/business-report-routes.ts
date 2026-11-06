@@ -1,8 +1,9 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
-  accountingAccounts, customers, inventoryMovements, inventoryReservations, journalEntries, journalLines,
-  products, purchaseOrderLines, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, shipmentLines,
+  accountingAccounts, businessPayments, customers, importExpenses, inventoryMovements, inventoryReservations, journalEntries, journalLines,
+  products, purchaseOrderLines, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders,
+  shipmentLines, shipmentPurchaseOrders, shipments, suppliers,
 } from "../shared/schema";
 import { calculateProductProfitability, toMinorUnits } from "../shared/money";
 import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/business-planning";
@@ -226,6 +227,123 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         unitsDelivered: [...units.values()].reduce((sum, quantity) => sum + quantity, 0),
       },
       topCustomers: customersWithSales.slice(0, 10),
+    });
+  });
+
+  app.get("/api/supplier-analytics", owner, async (req, res) => {
+    const fromDate = typeof req.query.from === "string" ? req.query.from : "";
+    const toDate = typeof req.query.to === "string" ? req.query.to : "";
+    if ((fromDate && !validDate(fromDate)) || (toDate && !validDate(toDate)) || (fromDate && toDate && fromDate > toDate)) {
+      return res.status(400).json({ error: "Choose a valid supplier report date range." });
+    }
+    const dateConditions = [
+      ...(fromDate ? [gte(purchaseOrders.orderedAt, fromDate)] : []),
+      ...(toDate ? [lte(purchaseOrders.orderedAt, toDate)] : []),
+    ];
+    const orderConditions = and(...dateConditions);
+    const paymentConditions = [
+      ...(fromDate ? [gte(businessPayments.paymentDate, fromDate)] : []),
+      ...(toDate ? [lte(businessPayments.paymentDate, toDate)] : []),
+    ];
+    const expenseConditions = [
+      ...(fromDate ? [gte(importExpenses.incurredAt, fromDate)] : []),
+      ...(toDate ? [lte(importExpenses.incurredAt, toDate)] : []),
+    ];
+    const [orders, purchaseLines, expenses, payments, shipmentRows, shipmentLinks] = await Promise.all([
+      db.select({
+        id: purchaseOrders.id, supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt,
+      }).from(purchaseOrders).innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(orderConditions),
+      db.select({
+        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name, orderId: purchaseOrders.id,
+        status: purchaseOrders.status,
+        totalZmw: sql<string>`round(${purchaseOrderLines.unitPrice}::numeric * ${purchaseOrderLines.quantityOrdered} * ${purchaseOrders.exchangeRateToZmw}::numeric, 2)::text`,
+      }).from(purchaseOrderLines).innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)).where(orderConditions),
+      db.select({
+        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        amountZmw: sql<string>`round(${importExpenses.amount}::numeric * ${importExpenses.exchangeRateToZmw}::numeric, 2)::text`,
+      }).from(importExpenses).innerJoin(purchaseOrders, eq(importExpenses.purchaseOrderId, purchaseOrders.id))
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(and(...expenseConditions)),
+      db.select({
+        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name, amountZmw: businessPayments.amountZmw,
+      }).from(businessPayments).innerJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(and(eq(businessPayments.direction, "supplier_payment"), ...paymentConditions)),
+      db.select({
+        id: shipments.id, purchaseOrderId: shipments.purchaseOrderId, status: shipments.status, receivedAt: shipments.receivedAt,
+      }).from(shipments),
+      db.select({ shipmentId: shipmentPurchaseOrders.shipmentId, purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
+        .from(shipmentPurchaseOrders),
+    ]);
+    type SupplierMetric = {
+      supplierId: number; name: string; orderedGoods: bigint; importCosts: bigint; payments: bigint;
+      orders: Set<number>; onTime: number; late: number; overdueOpen: number; missingExpected: number;
+    };
+    const bySupplier = new Map<number, SupplierMetric>();
+    const getSupplier = (supplierId: number, name: string) => {
+      let supplier = bySupplier.get(supplierId);
+      if (!supplier) {
+        supplier = { supplierId, name, orderedGoods: 0n, importCosts: 0n, payments: 0n, orders: new Set(), onTime: 0, late: 0, overdueOpen: 0, missingExpected: 0 };
+        bySupplier.set(supplierId, supplier);
+      }
+      return supplier;
+    };
+    const linkedShipmentIds = new Map<number, number[]>();
+    for (const link of shipmentLinks) linkedShipmentIds.set(link.purchaseOrderId, [...(linkedShipmentIds.get(link.purchaseOrderId) ?? []), link.shipmentId]);
+    const shipmentsById = new Map(shipmentRows.map((shipment) => [shipment.id, shipment]));
+    const shipmentsByPrimaryOrder = new Map<number, typeof shipmentRows>();
+    for (const shipment of shipmentRows) {
+      if (shipment.status !== "received" || !shipment.receivedAt) continue;
+      shipmentsByPrimaryOrder.set(shipment.purchaseOrderId, [...(shipmentsByPrimaryOrder.get(shipment.purchaseOrderId) ?? []), shipment]);
+    }
+    for (const order of orders) {
+      const supplier = getSupplier(order.supplierId, order.supplierName);
+      supplier.orders.add(order.id);
+      if (order.status === "cancelled") continue;
+      if (!order.expectedAt) supplier.missingExpected += 1;
+      else if (order.status === "received") {
+        const linked = linkedShipmentIds.get(order.id) ?? [];
+        const related = linked.length
+          ? linked.flatMap((shipmentId) => {
+            const shipment = shipmentsById.get(shipmentId);
+            return shipment?.receivedAt && shipment.status === "received" ? [shipment] : [];
+          })
+          : shipmentsByPrimaryOrder.get(order.id) ?? [];
+        const actualDates = related.map((shipment) => shipment.receivedAt!);
+        const completedAt = actualDates.sort().at(-1);
+        if (completedAt) {
+          if (completedAt <= order.expectedAt) supplier.onTime += 1;
+          else supplier.late += 1;
+        }
+      } else if (order.expectedAt < new Date().toISOString().slice(0, 10)) supplier.overdueOpen += 1;
+    }
+    for (const line of purchaseLines) {
+      if (line.status !== "cancelled") getSupplier(line.supplierId, line.supplierName).orderedGoods += cents(line.totalZmw);
+    }
+    for (const expense of expenses) getSupplier(expense.supplierId, expense.supplierName).importCosts += cents(expense.amountZmw);
+    for (const payment of payments) getSupplier(payment.supplierId, payment.supplierName).payments += cents(payment.amountZmw);
+    const rows = [...bySupplier.values()].map((supplier) => ({
+      supplierId: supplier.supplierId, name: supplier.name, orders: supplier.orders.size,
+      orderedGoodsZmw: from(supplier.orderedGoods), importCostsZmw: from(supplier.importCosts),
+      paymentsZmw: from(supplier.payments), onTimeOrders: supplier.onTime, lateOrders: supplier.late,
+      overdueOpenOrders: supplier.overdueOpen, missingExpectedDateOrders: supplier.missingExpected,
+      onTimeRatePercent: supplier.onTime + supplier.late > 0
+        ? ((supplier.onTime / (supplier.onTime + supplier.late)) * 100).toFixed(1) : null,
+    })).sort((a, b) => Number(b.orderedGoodsZmw) - Number(a.orderedGoodsZmw));
+    res.json({
+      period: { from: fromDate || null, to: toDate || null },
+      totals: {
+        suppliers: rows.length, orderedGoodsZmw: from(rows.reduce((sum, row) => sum + cents(row.orderedGoodsZmw), 0n)),
+        importCostsZmw: from(rows.reduce((sum, row) => sum + cents(row.importCostsZmw), 0n)),
+        paymentsZmw: from(rows.reduce((sum, row) => sum + cents(row.paymentsZmw), 0n)),
+        onTimeOrders: rows.reduce((sum, row) => sum + row.onTimeOrders, 0),
+        lateOrders: rows.reduce((sum, row) => sum + row.lateOrders, 0),
+        overdueOpenOrders: rows.reduce((sum, row) => sum + row.overdueOpenOrders, 0),
+      },
+      suppliers: rows,
     });
   });
 }

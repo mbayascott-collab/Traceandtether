@@ -2664,12 +2664,19 @@ textarea:focus-visible {
 .analytics-stock-list > div span, .analytics-stock-list p, .analytics-links p { margin: 0; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
 .analytics-links { display: grid; gap: 12px; }
 .analytics-links a { color: var(--teal-deep); font-size: 11px; font-weight: 650; }
+.analytics-supplier-panel { margin-bottom: 16px; }
+.analytics-supplier-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 15px 16px; }
+.analytics-supplier-totals > div { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--line); border-radius: 7px; }
+.analytics-supplier-totals span { color: var(--muted); font-size: 9px; }
+.analytics-supplier-totals strong { color: var(--ink); font: 650 13px var(--font-mono); }
+.analytics-supplier-note { padding: 0 16px 14px; }
 
 @media (max-width: 980px) {
   .analytics-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
   .analytics-grid { grid-template-columns: 1fr; }
+  .analytics-supplier-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .analytics-rank-row, .analytics-customer-row { grid-template-columns: minmax(90px, 1fr) minmax(45px, 0.7fr) auto; gap: 7px; }
   .analytics-rank-values span { font-size: 8px; }
 }
