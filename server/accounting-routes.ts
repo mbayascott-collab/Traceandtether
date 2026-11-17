@@ -1,11 +1,12 @@
-import { desc, eq, lte } from "drizzle-orm";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
+import { accountingAccounts, businessExpenses, journalEntries, journalLines } from "../shared/schema";
 import { db } from "./db";
 import {
-  buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts, journalLinesAreBalanced,
+  buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts,
+  journalLinesAreBalanced, operatingExpenseAccountKey, postJournal,
 } from "./accounting-posting";
 
 const dateQuery = z.string().refine((value) => {
@@ -22,7 +23,7 @@ const money = (value: bigint) => {
   return `${value < 0n ? "-" : ""}${abs / 100n}.${String(abs % 100n).padStart(2, "0")}`;
 };
 const cashInSchema = z.object({
-  kind: z.enum(["owner_contribution", "business_loan"]),
+  kind: z.enum(["owner_contribution", "business_loan", "owner_withdrawal"]),
   amountZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   receivedAt: z.string().refine((value) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -32,6 +33,15 @@ const cashInSchema = z.object({
   method: z.enum(["cash", "bank_transfer", "mobile_money", "other"]),
   reference: z.string().trim().max(120).optional().default(""),
   notes: z.string().trim().max(500).optional().default(""),
+});
+const expenseSchema = z.object({
+  category: z.enum(["rent", "office_supplies", "utilities", "transport", "repairs", "other"]),
+  description: z.string().trim().min(2).max(240),
+  amountZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  expenseDate: dateQuery,
+  method: z.enum(["cash", "bank_transfer", "mobile_money", "other"]),
+  reference: z.string().trim().max(120).optional().default(""),
+  notes: z.string().trim().max(1000).optional().default(""),
 });
 const openingBalanceSchema = z.object({
   effectiveAt: dateQuery,
@@ -48,6 +58,50 @@ const openingBalanceSchema = z.object({
 const OPENING_BALANCE_SOURCE_KEY = "opening-balances-v1";
 
 export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
+  app.post("/api/accounting/expenses", owner, async (req, res) => {
+    const parsed = expenseSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Check the expense details." });
+      return;
+    }
+    const input = parsed.data;
+    const amount = cents(input.amountZmw);
+    if (amount <= 0n) {
+      res.status(400).json({ error: "Enter an expense amount greater than zero." });
+      return;
+    }
+    const result = await db.transaction(async (tx) => {
+      const [expense] = await tx.insert(businessExpenses).values({
+        category: input.category,
+        description: input.description,
+        amountZmw: input.amountZmw,
+        expenseDate: input.expenseDate,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+      }).returning();
+      const accountKey = operatingExpenseAccountKey(input.category);
+      const cashKey = cashAccountKeyForMethod(input.method);
+      const accountNames = await ensureAccountingAccounts(tx);
+      const expenseAccount = accountNames.get(accountKey);
+      const cashAccount = accountNames.get(cashKey);
+      if (!expenseAccount || !cashAccount) throw new Error("A required expense account is unavailable.");
+      const journal = await postJournal(tx, {
+        sourceKey: `business-expense-${expense.id}`,
+        sourceType: "business_expense",
+        sourceId: expense.id,
+        memo: `${expenseAccount.name}: ${input.description}${input.reference ? ` · ${input.reference}` : ""}`,
+        entryDate: input.expenseDate,
+        lines: [
+          { accountKey, debitZmw: input.amountZmw, description: input.notes || input.description },
+          { accountKey: cashKey, creditZmw: input.amountZmw, description: `Paid by ${input.method}` },
+        ],
+      });
+      return { expense, journal };
+    });
+    res.status(201).json(result);
+  });
+
   app.post("/api/accounting/opening-balances", owner, async (req, res) => {
     const parsed = openingBalanceSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -123,28 +177,41 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       const accountMap = await ensureAccountingAccounts(tx);
       const cashAccountKey = cashAccountKeyForMethod(input.method);
       const cashAccount = accountMap.get(cashAccountKey);
-      const offsetAccount = accountMap.get(input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable");
+      const isWithdrawal = input.kind === "owner_withdrawal";
+      const offsetAccountKey = input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable";
+      const offsetAccount = accountMap.get(isWithdrawal ? "owner_withdrawals" : offsetAccountKey);
       if (!cashAccount || !offsetAccount) throw new Error("Required accounting accounts are unavailable.");
-      if (!journalLinesAreBalanced([
-        { accountKey: cashAccountKey, debitZmw: input.amountZmw },
-        { accountKey: input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable", creditZmw: input.amountZmw },
-      ])) throw new Error("Cash-in journal is not balanced.");
+      const lines = isWithdrawal
+        ? [
+            { accountKey: "owner_withdrawals", debitZmw: input.amountZmw },
+            { accountKey: cashAccountKey, creditZmw: input.amountZmw },
+          ]
+        : [
+            { accountKey: cashAccountKey, debitZmw: input.amountZmw },
+            { accountKey: offsetAccountKey, creditZmw: input.amountZmw },
+          ];
+      if (!journalLinesAreBalanced(lines)) throw new Error("Owner transaction journal is not balanced.");
+      const memo = input.kind === "owner_contribution"
+        ? "Owner contribution"
+        : input.kind === "business_loan" ? "Business loan received" : "Owner withdrawal";
       const [entry] = await tx.insert(journalEntries).values({
         entryNumber: `JE-${input.receivedAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
         sourceKey, sourceType: input.kind, sourceId: null,
         entryDate: input.receivedAt,
-        memo: `${input.kind === "owner_contribution" ? "Owner contribution" : "Business loan received"}${input.reference ? ` · ${input.reference}` : ""}`,
+        memo: `${memo}${input.reference ? ` · ${input.reference}` : ""}`,
       }).returning();
-      await tx.insert(journalLines).values([
-        {
-          journalEntryId: entry.id, accountId: cashAccount.id, debitZmw: input.amountZmw, creditZmw: "0.00",
-          description: `Received into ${cashAccount.name}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`,
-        },
-        {
-          journalEntryId: entry.id, accountId: offsetAccount.id, debitZmw: "0.00", creditZmw: input.amountZmw,
-          description: input.kind === "owner_contribution" ? "Owner funds added" : "Loan principal received",
-        },
-      ]);
+      await tx.insert(journalLines).values(lines.map((line) => {
+        const account = accountMap.get(line.accountKey)!;
+        return {
+          journalEntryId: entry.id,
+          accountId: account.id,
+          debitZmw: line.debitZmw ?? "0.00",
+          creditZmw: line.creditZmw ?? "0.00",
+          description: line.accountKey === cashAccountKey
+            ? `${isWithdrawal ? "Paid from" : "Received into"} ${cashAccount.name}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`
+            : isWithdrawal ? "Owner funds withdrawn" : input.kind === "owner_contribution" ? "Owner funds added" : "Loan principal received",
+        };
+      }));
     });
     res.status(201).json({ message: "Cash-in recorded." });
   });
@@ -166,6 +233,9 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         entryDate: journalEntries.entryDate,
       }).from(journalEntries)
         .where(eq(journalEntries.sourceKey, OPENING_BALANCE_SOURCE_KEY)).limit(1);
+      const expenses = await tx.select().from(businessExpenses)
+        .where(and(gte(businessExpenses.expenseDate, from), lte(businessExpenses.expenseDate, to)))
+        .orderBy(desc(businessExpenses.expenseDate), desc(businessExpenses.id));
       const records = await tx.select({
         entry: journalEntries,
         line: journalLines,
@@ -236,6 +306,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       return {
         accounts,
         openingBalances: { posted: Boolean(openingBalanceEntry), entryDate: openingBalanceEntry?.entryDate ?? null },
+        expenses,
         entries: [...entryMap.values()],
         trialBalance,
         incomeStatement,

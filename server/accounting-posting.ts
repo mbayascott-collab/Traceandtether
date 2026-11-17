@@ -14,11 +14,18 @@ export const accounts = [
   { code: "2100", name: "Accounts payable", type: "liability" as const, systemKey: "accounts_payable" },
   { code: "2200", name: "Business loans payable", type: "liability" as const, systemKey: "business_loans_payable" },
   { code: "3000", name: "Owner equity", type: "equity" as const, systemKey: "owner_equity" },
+  { code: "3050", name: "Owner withdrawals", type: "equity" as const, systemKey: "owner_withdrawals" },
   { code: "3100", name: "Opening balance equity", type: "equity" as const, systemKey: "opening_balance_equity" },
   { code: "4100", name: "Sales revenue", type: "income" as const, systemKey: "sales_revenue" },
   { code: "5100", name: "Cost of goods sold", type: "expense" as const, systemKey: "cost_of_goods_sold" },
   { code: "6100", name: "Inventory adjustments", type: "expense" as const, systemKey: "inventory_adjustments" },
   { code: "6200", name: "Marketing expenses", type: "expense" as const, systemKey: "marketing_expense" },
+  { code: "6300", name: "Rent expense", type: "expense" as const, systemKey: "rent_expense" },
+  { code: "6400", name: "Office supplies expense", type: "expense" as const, systemKey: "office_supplies_expense" },
+  { code: "6500", name: "Utilities expense", type: "expense" as const, systemKey: "utilities_expense" },
+  { code: "6600", name: "Transport expense", type: "expense" as const, systemKey: "transport_expense" },
+  { code: "6700", name: "Repairs and maintenance", type: "expense" as const, systemKey: "repairs_expense" },
+  { code: "6900", name: "Other operating expenses", type: "expense" as const, systemKey: "other_operating_expense" },
 ];
 
 export type PostingLine = {
@@ -53,6 +60,18 @@ export function cashAccountKeyForMethod(method: "cash" | "bank_transfer" | "mobi
     case "mobile_money": return "mobile_money";
     case "other": return "other_funds";
   }
+}
+
+export function operatingExpenseAccountKey(category: string) {
+  const accountByCategory: Record<string, string> = {
+    rent: "rent_expense",
+    office_supplies: "office_supplies_expense",
+    utilities: "utilities_expense",
+    transport: "transport_expense",
+    repairs: "repairs_expense",
+    other: "other_operating_expense",
+  };
+  return accountByCategory[category] ?? accountByCategory.other;
 }
 
 export function buildOpeningBalanceLines(input: {

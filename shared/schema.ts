@@ -571,6 +571,25 @@ export const businessPayments = pgTable(
   ],
 );
 
+export const businessExpenses = pgTable(
+  "business_expenses",
+  {
+    id: serial("id").primaryKey(),
+    category: varchar("category", { length: 40 }).notNull(),
+    description: varchar("description", { length: 240 }).notNull(),
+    amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
+    expenseDate: date("expense_date").notNull(),
+    method: paymentMethod("method").notNull(),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("business_expenses_date_idx").on(table.expenseDate),
+    check("business_expenses_positive_amount", sql`${table.amountZmw} > 0`),
+  ],
+);
+
 export const marketingCampaigns = pgTable(
   "marketing_campaigns",
   {

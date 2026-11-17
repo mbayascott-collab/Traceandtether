@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildOpeningBalanceLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  operatingExpenseAccountKey,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
@@ -65,4 +66,11 @@ test("maps each payment method to its own balance account", () => {
   assert.equal(cashAccountKeyForMethod("bank_transfer"), "bank_account");
   assert.equal(cashAccountKeyForMethod("mobile_money"), "mobile_money");
   assert.equal(cashAccountKeyForMethod("other"), "other_funds");
+});
+
+test("maps ordinary expense categories to the correct report accounts", () => {
+  assert.equal(operatingExpenseAccountKey("rent"), "rent_expense");
+  assert.equal(operatingExpenseAccountKey("office_supplies"), "office_supplies_expense");
+  assert.equal(operatingExpenseAccountKey("utilities"), "utilities_expense");
+  assert.equal(operatingExpenseAccountKey("other"), "other_operating_expense");
 });

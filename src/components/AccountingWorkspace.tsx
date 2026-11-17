@@ -6,8 +6,13 @@ type JournalEntry = {
   id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string;
   lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
 };
+type ExpenseEntry = {
+  id: number; category: string; description: string; amountZmw: string; expenseDate: string;
+  method: string; reference: string | null; notes: string | null;
+};
 type ReportData = {
   entries: JournalEntry[];
+  expenses: ExpenseEntry[];
   openingBalances: { posted: boolean; entryDate: string | null };
   trialBalance: TrialRow[];
   incomeStatement: ReportRow[];
@@ -89,6 +94,24 @@ export default function AccountingWorkspace() {
     }
   }
 
+  async function recordExpense(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setNotice("");
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    try {
+      const response = await fetch("/api/accounting/expenses", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Expense could not be recorded.");
+      form.reset();
+      setNotice("Expense recorded and added to the journal.");
+      setRange((current) => ({ ...current }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Expense could not be recorded.");
+    }
+  }
+
   const exportJournal = () => downloadCsv("journal-entries.csv", [
     ["Date", "Entry number", "Source", "Memo", "Account code", "Account", "Description", "Debit ZMW", "Credit ZMW"],
     ...(data?.entries.flatMap((entry) => entry.lines.map((line) => [
@@ -114,21 +137,56 @@ export default function AccountingWorkspace() {
     {error && <div className="alert alert-error" role="alert">{error}</div>}
     {notice && <div className="alert alert-success" role="status">{notice}</div>}
     <form className="panel form-grid" style={{ padding: 16, marginBottom: 16 }} onSubmit={recordCashIn}>
-      <h2>Record cash added to the business</h2>
+      <h2>Record owner funds or withdrawal</h2>
       <label>What kind of money is this?<select name="kind" defaultValue="owner_contribution">
         <option value="owner_contribution">Owner contribution</option>
         <option value="business_loan">Business loan to repay</option>
+        <option value="owner_withdrawal">Owner withdrawal</option>
       </select></label>
       <label>Amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
-      <label>Date received<input name="receivedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
-      <label>Where was it received?<select name="method" defaultValue="cash">
+      <label>Date<input name="receivedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+      <label>Account used<select name="method" defaultValue="cash">
         <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
         <option value="mobile_money">Mobile money</option><option value="other">Other</option>
       </select></label>
       <label>Reference<input name="reference" maxLength={120} placeholder="Receipt, transfer, or loan reference" /></label>
       <label>Notes<textarea name="notes" maxLength={500} /></label>
-      <button className="button button-primary">Save cash-in</button>
+      <button className="button button-primary">Save transaction</button>
     </form>
+    <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <h2>Record a business expense</h2>
+      <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={recordExpense}>
+        <label>Date<input name="expenseDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+        <label>Expense type<select name="category" defaultValue="rent" required>
+          <option value="rent">Rent</option>
+          <option value="office_supplies">Office supplies</option>
+          <option value="utilities">Utilities</option>
+          <option value="transport">Transport</option>
+          <option value="repairs">Repairs and maintenance</option>
+          <option value="other">Other business expense</option>
+        </select></label>
+        <label>Description<input name="description" maxLength={240} placeholder="For example, shop rent or printer paper" required /></label>
+        <label>Amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
+        <label>Paid from<select name="method" defaultValue="cash" required>
+          <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
+          <option value="mobile_money">Mobile money</option><option value="other">Other funds</option>
+        </select></label>
+        <label>Receipt or reference<input name="reference" maxLength={120} placeholder="Optional receipt number" /></label>
+        <label>Notes<textarea name="notes" maxLength={1000} /></label>
+        <button className="button button-primary">Save expense</button>
+      </form>
+    </section>
+    <section className="panel" style={{ marginBottom: 16 }}>
+      <div className="panel-heading"><h2>Business expenses in period</h2><span>{data?.expenses.length ?? 0} records</span></div>
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
+        {(data?.expenses ?? []).map((expense) => <tr key={expense.id}>
+          <td>{expense.expenseDate}</td><td>{expense.category.replaceAll("_", " ")}</td>
+          <td>{expense.description}</td><td>{expense.method.replaceAll("_", " ")}</td>
+          <td>{expense.reference || "—"}</td><td>{money(expense.amountZmw)}</td>
+        </tr>)}
+        {!data?.expenses.length && <tr><td colSpan={6}>No business expenses recorded in this period.</td></tr>}
+      </tbody></table></div>
+    </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
       <h2>Enter starting balances</h2>
       {data?.openingBalances.posted ? (
