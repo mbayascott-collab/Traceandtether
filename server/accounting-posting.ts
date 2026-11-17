@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
 
 export const accounts = [
-  { code: "1000", name: "Cash and bank", type: "asset" as const, systemKey: "cash_bank" },
+  { code: "1000", name: "Cash and bank (previously combined)", type: "asset" as const, systemKey: "cash_bank" },
+  { code: "1010", name: "Cash on hand", type: "asset" as const, systemKey: "cash_on_hand" },
+  { code: "1020", name: "Bank account", type: "asset" as const, systemKey: "bank_account" },
+  { code: "1030", name: "Mobile money", type: "asset" as const, systemKey: "mobile_money" },
+  { code: "1040", name: "Other funds", type: "asset" as const, systemKey: "other_funds" },
   { code: "1100", name: "Inventory", type: "asset" as const, systemKey: "inventory" },
   { code: "1150", name: "Landed cost clearing", type: "asset" as const, systemKey: "landed_cost_clearing" },
   { code: "1200", name: "Accounts receivable", type: "asset" as const, systemKey: "accounts_receivable" },
@@ -42,8 +46,20 @@ export function journalLinesAreBalanced(lines: PostingLine[]) {
   return debit > 0n && debit === credit;
 }
 
+export function cashAccountKeyForMethod(method: "cash" | "bank_transfer" | "mobile_money" | "other") {
+  switch (method) {
+    case "cash": return "cash_on_hand";
+    case "bank_transfer": return "bank_account";
+    case "mobile_money": return "mobile_money";
+    case "other": return "other_funds";
+  }
+}
+
 export function buildOpeningBalanceLines(input: {
-  cashBankZmw: string;
+  cashOnHandZmw: string;
+  bankZmw: string;
+  mobileMoneyZmw: string;
+  otherFundsZmw: string;
   receivablesZmw: string;
   payablesZmw: string;
   loansPayableZmw: string;
@@ -51,7 +67,10 @@ export function buildOpeningBalanceLines(input: {
 }): PostingLine[] {
   const lines: PostingLine[] = [];
   const debits = [
-    ["cash_bank", input.cashBankZmw, "Opening cash and bank balance"],
+    ["cash_on_hand", input.cashOnHandZmw, "Opening cash on hand"],
+    ["bank_account", input.bankZmw, "Opening bank balance"],
+    ["mobile_money", input.mobileMoneyZmw, "Opening mobile money balance"],
+    ["other_funds", input.otherFundsZmw, "Other opening funds"],
     ["accounts_receivable", input.receivablesZmw, "Opening customer balances owed"],
   ] as const;
   const credits = [

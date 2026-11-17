@@ -143,7 +143,10 @@ export default function AccountingWorkspace() {
             when opening stock is recorded.
           </p>
           <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
-          <label>Cash and bank (ZMW)<input name="cashBankZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Cash on hand (ZMW)<input name="cashOnHandZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Bank account (ZMW)<input name="bankZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Mobile money (ZMW)<input name="mobileMoneyZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Other funds (ZMW)<input name="otherFundsZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
           <label>Customers owe the business (ZMW)<input name="receivablesZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
           <label>Business owes suppliers (ZMW)<input name="payablesZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
           <label>Business loans to repay (ZMW)<input name="loansPayableZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>

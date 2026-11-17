@@ -44,7 +44,9 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       db.select().from(purchaseOrderLines),
       db.select({ purchaseOrderLineId: shipmentLines.purchaseOrderLineId, quantityStocked: shipmentLines.quantityStocked }).from(shipmentLines),
       Promise.all([
-        accountBalance(db, "inventory"), accountBalance(db, "cash_bank"),
+        accountBalance(db, "inventory"),
+        Promise.all(["cash_bank", "cash_on_hand", "bank_account", "mobile_money", "other_funds"]
+          .map((key) => accountBalance(db, key))).then((balances) => balances.reduce((total, value) => total + value, 0n)),
         accountBalance(db, "accounts_receivable"), accountBalance(db, "accounts_payable"),
       ]),
     ]);

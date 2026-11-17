@@ -4,7 +4,9 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
 import { db } from "./db";
-import { buildOpeningBalanceLines, ensureAccountingAccounts, journalLinesAreBalanced } from "./accounting-posting";
+import {
+  buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts, journalLinesAreBalanced,
+} from "./accounting-posting";
 
 const dateQuery = z.string().refine((value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -33,7 +35,10 @@ const cashInSchema = z.object({
 });
 const openingBalanceSchema = z.object({
   effectiveAt: dateQuery,
-  cashBankZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  cashOnHandZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  bankZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  mobileMoneyZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  otherFundsZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   receivablesZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   payablesZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   loansPayableZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
@@ -51,7 +56,8 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     }
     const input = parsed.data;
     const amounts = [
-      input.cashBankZmw, input.receivablesZmw, input.payablesZmw,
+      input.cashOnHandZmw, input.bankZmw, input.mobileMoneyZmw, input.otherFundsZmw,
+      input.receivablesZmw, input.payablesZmw,
       input.loansPayableZmw, input.ownerEquityZmw,
     ];
     if (amounts.every((amount) => cents(amount) === 0n)) {
@@ -115,11 +121,12 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     const sourceKey = `funding-${randomUUID()}`;
     await db.transaction(async (tx) => {
       const accountMap = await ensureAccountingAccounts(tx);
-      const cashAccount = accountMap.get("cash_bank");
+      const cashAccountKey = cashAccountKeyForMethod(input.method);
+      const cashAccount = accountMap.get(cashAccountKey);
       const offsetAccount = accountMap.get(input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable");
       if (!cashAccount || !offsetAccount) throw new Error("Required accounting accounts are unavailable.");
       if (!journalLinesAreBalanced([
-        { accountKey: "cash_bank", debitZmw: input.amountZmw },
+        { accountKey: cashAccountKey, debitZmw: input.amountZmw },
         { accountKey: input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable", creditZmw: input.amountZmw },
       ])) throw new Error("Cash-in journal is not balanced.");
       const [entry] = await tx.insert(journalEntries).values({
@@ -131,7 +138,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       await tx.insert(journalLines).values([
         {
           journalEntryId: entry.id, accountId: cashAccount.id, debitZmw: input.amountZmw, creditZmw: "0.00",
-          description: `Received by ${input.method}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`,
+          description: `Received into ${cashAccount.name}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`,
         },
         {
           journalEntryId: entry.id, accountId: offsetAccount.id, debitZmw: "0.00", creditZmw: input.amountZmw,

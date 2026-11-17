@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildOpeningBalanceLines, cents, formatCents, journalLinesAreBalanced } from "./accounting-posting";
+import {
+  buildOpeningBalanceLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+} from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
   assert.equal(cents("123456.78"), 12_345_678n);
@@ -21,13 +23,21 @@ test("accepts only positive balanced journal lines", () => {
 
 test("opening balances balance with a temporary equity offset", () => {
   const lines = buildOpeningBalanceLines({
-    cashBankZmw: "100.00",
+    cashOnHandZmw: "30.00",
+    bankZmw: "50.00",
+    mobileMoneyZmw: "20.00",
+    otherFundsZmw: "0.00",
     receivablesZmw: "25.50",
     payablesZmw: "40.00",
     loansPayableZmw: "0.00",
     ownerEquityZmw: "50.00",
   });
   assert.equal(journalLinesAreBalanced(lines), true);
+  assert.deepEqual(lines.slice(0, 3).map((line) => [line.accountKey, line.debitZmw]), [
+    ["cash_on_hand", "30.00"],
+    ["bank_account", "50.00"],
+    ["mobile_money", "20.00"],
+  ]);
   assert.deepEqual(lines.at(-1), {
     accountKey: "opening_balance_equity",
     creditZmw: "35.50",
@@ -37,7 +47,10 @@ test("opening balances balance with a temporary equity offset", () => {
 
 test("opening balance equity can have a debit balance when credits exceed assets", () => {
   const lines = buildOpeningBalanceLines({
-    cashBankZmw: "10.00",
+    cashOnHandZmw: "10.00",
+    bankZmw: "0.00",
+    mobileMoneyZmw: "0.00",
+    otherFundsZmw: "0.00",
     receivablesZmw: "0.00",
     payablesZmw: "0.00",
     loansPayableZmw: "0.00",
@@ -45,4 +58,11 @@ test("opening balance equity can have a debit balance when credits exceed assets
   });
   assert.equal(journalLinesAreBalanced(lines), true);
   assert.equal(lines.at(-1)?.debitZmw, "5.00");
+});
+
+test("maps each payment method to its own balance account", () => {
+  assert.equal(cashAccountKeyForMethod("cash"), "cash_on_hand");
+  assert.equal(cashAccountKeyForMethod("bank_transfer"), "bank_account");
+  assert.equal(cashAccountKeyForMethod("mobile_money"), "mobile_money");
+  assert.equal(cashAccountKeyForMethod("other"), "other_funds");
 });

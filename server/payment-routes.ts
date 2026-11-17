@@ -6,7 +6,7 @@ import {
   salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
-import { cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
+import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
 
 const bad = (res: import("express").Response, message: string, status = 400) => res.status(status).json({ error: message });
@@ -158,18 +158,19 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         amountZmw: formatCents(amount), paymentDate: input.paymentDate, method: input.method,
         reference: input.reference, notes: input.notes,
       }).returning();
+      const cashAccountKey = cashAccountKeyForMethod(input.method);
       await postJournal(tx, {
         sourceKey: `payment-${payment.id}`, sourceType: "payment", sourceId: payment.id,
         memo: `${input.direction === "customer_receipt" ? "Customer receipt" : "Supplier payment"} ${payment.paymentNumber} for ${orderNumber}`,
         entryDate: input.paymentDate,
         lines: input.direction === "customer_receipt"
           ? [
-              { accountKey: "cash_bank", debitZmw: formatCents(amount), description: "Payment received" },
+              { accountKey: cashAccountKey, debitZmw: formatCents(amount), description: "Payment received" },
               { accountKey: "accounts_receivable", creditZmw: formatCents(amount), description: "Customer balance reduced" },
             ]
           : [
               { accountKey: "accounts_payable", debitZmw: formatCents(amount), description: "Supplier balance reduced" },
-              { accountKey: "cash_bank", creditZmw: formatCents(amount), description: "Payment made" },
+              { accountKey: cashAccountKey, creditZmw: formatCents(amount), description: "Payment made" },
             ],
       });
       return { payment };
