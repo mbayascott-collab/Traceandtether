@@ -4,7 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
 import { db } from "./db";
-import { ensureAccountingAccounts, journalLinesAreBalanced } from "./accounting-posting";
+import { buildOpeningBalanceLines, ensureAccountingAccounts, journalLinesAreBalanced } from "./accounting-posting";
 
 const dateQuery = z.string().refine((value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -31,8 +31,74 @@ const cashInSchema = z.object({
   reference: z.string().trim().max(120).optional().default(""),
   notes: z.string().trim().max(500).optional().default(""),
 });
+const openingBalanceSchema = z.object({
+  effectiveAt: dateQuery,
+  cashBankZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  receivablesZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  payablesZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  loansPayableZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  ownerEquityZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+  memo: z.string().trim().min(3).max(500),
+});
+const OPENING_BALANCE_SOURCE_KEY = "opening-balances-v1";
 
 export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
+  app.post("/api/accounting/opening-balances", owner, async (req, res) => {
+    const parsed = openingBalanceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Check the opening balance details." });
+      return;
+    }
+    const input = parsed.data;
+    const amounts = [
+      input.cashBankZmw, input.receivablesZmw, input.payablesZmw,
+      input.loansPayableZmw, input.ownerEquityZmw,
+    ];
+    if (amounts.every((amount) => cents(amount) === 0n)) {
+      res.status(400).json({ error: "Enter at least one opening balance greater than zero." });
+      return;
+    }
+    const lines = buildOpeningBalanceLines(input);
+    if (!journalLinesAreBalanced(lines)) {
+      res.status(400).json({ error: "Opening balances must contain at least one amount." });
+      return;
+    }
+    const result = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(journalEntries)
+        .where(eq(journalEntries.sourceKey, OPENING_BALANCE_SOURCE_KEY)).limit(1);
+      if (existing) return { alreadyExists: true };
+
+      const accountMap = await ensureAccountingAccounts(tx);
+      if (lines.some((line) => !accountMap.has(line.accountKey))) {
+        throw new Error("A required opening balance account is unavailable.");
+      }
+      const [entry] = await tx.insert(journalEntries).values({
+        entryNumber: `JE-${input.effectiveAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
+        sourceKey: OPENING_BALANCE_SOURCE_KEY,
+        sourceType: "opening_balances",
+        sourceId: null,
+        entryDate: input.effectiveAt,
+        memo: input.memo,
+      }).returning();
+      await tx.insert(journalLines).values(lines.map((line) => {
+        const account = accountMap.get(line.accountKey)!;
+        return {
+          journalEntryId: entry.id,
+          accountId: account.id,
+          debitZmw: line.debitZmw ?? "0.00",
+          creditZmw: line.creditZmw ?? "0.00",
+          description: line.description ?? null,
+        };
+      }));
+      return { alreadyExists: false };
+    });
+    if (result.alreadyExists) {
+      res.status(409).json({ error: "Opening balances have already been recorded and cannot be replaced here." });
+      return;
+    }
+    res.status(201).json({ message: "Opening balances recorded." });
+  });
+
   app.post("/api/accounting/funds", owner, async (req, res) => {
     const parsed = cashInSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -89,6 +155,10 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       await ensureAccountingAccounts(tx);
       const accounts = await tx.select().from(accountingAccounts).orderBy(accountingAccounts.code);
+      const [openingBalanceEntry] = await tx.select({
+        entryDate: journalEntries.entryDate,
+      }).from(journalEntries)
+        .where(eq(journalEntries.sourceKey, OPENING_BALANCE_SOURCE_KEY)).limit(1);
       const records = await tx.select({
         entry: journalEntries,
         line: journalLines,
@@ -158,6 +228,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       balanceSheet.push({ code: "", name: "Accumulated earnings (not closed)", type: "equity", amountZmw: money(lifetimeProfit) });
       return {
         accounts,
+        openingBalances: { posted: Boolean(openingBalanceEntry), entryDate: openingBalanceEntry?.entryDate ?? null },
         entries: [...entryMap.values()],
         trialBalance,
         incomeStatement,

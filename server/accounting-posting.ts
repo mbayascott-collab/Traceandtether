@@ -10,6 +10,7 @@ export const accounts = [
   { code: "2100", name: "Accounts payable", type: "liability" as const, systemKey: "accounts_payable" },
   { code: "2200", name: "Business loans payable", type: "liability" as const, systemKey: "business_loans_payable" },
   { code: "3000", name: "Owner equity", type: "equity" as const, systemKey: "owner_equity" },
+  { code: "3100", name: "Opening balance equity", type: "equity" as const, systemKey: "opening_balance_equity" },
   { code: "4100", name: "Sales revenue", type: "income" as const, systemKey: "sales_revenue" },
   { code: "5100", name: "Cost of goods sold", type: "expense" as const, systemKey: "cost_of_goods_sold" },
   { code: "6100", name: "Inventory adjustments", type: "expense" as const, systemKey: "inventory_adjustments" },
@@ -39,6 +40,58 @@ export function journalLinesAreBalanced(lines: PostingLine[]) {
   const debit = lines.reduce((sum, line) => sum + cents(line.debitZmw ?? "0.00"), 0n);
   const credit = lines.reduce((sum, line) => sum + cents(line.creditZmw ?? "0.00"), 0n);
   return debit > 0n && debit === credit;
+}
+
+export function buildOpeningBalanceLines(input: {
+  cashBankZmw: string;
+  receivablesZmw: string;
+  payablesZmw: string;
+  loansPayableZmw: string;
+  ownerEquityZmw: string;
+}): PostingLine[] {
+  const lines: PostingLine[] = [];
+  const debits = [
+    ["cash_bank", input.cashBankZmw, "Opening cash and bank balance"],
+    ["accounts_receivable", input.receivablesZmw, "Opening customer balances owed"],
+  ] as const;
+  const credits = [
+    ["accounts_payable", input.payablesZmw, "Opening supplier balances owed"],
+    ["business_loans_payable", input.loansPayableZmw, "Opening business loans"],
+    ["owner_equity", input.ownerEquityZmw, "Opening owner funds"],
+  ] as const;
+  let debitTotal = 0n;
+  let creditTotal = 0n;
+
+  for (const [accountKey, amount, description] of debits) {
+    const value = cents(amount);
+    if (value > 0n) {
+      debitTotal += value;
+      lines.push({ accountKey, debitZmw: formatCents(value), description });
+    }
+  }
+  for (const [accountKey, amount, description] of credits) {
+    const value = cents(amount);
+    if (value > 0n) {
+      creditTotal += value;
+      lines.push({ accountKey, creditZmw: formatCents(value), description });
+    }
+  }
+
+  const difference = debitTotal - creditTotal;
+  if (difference > 0n) {
+    lines.push({
+      accountKey: "opening_balance_equity",
+      creditZmw: formatCents(difference),
+      description: "Temporary balancing amount; review after opening stock is recorded",
+    });
+  } else if (difference < 0n) {
+    lines.push({
+      accountKey: "opening_balance_equity",
+      debitZmw: formatCents(-difference),
+      description: "Temporary balancing amount; review after opening stock is recorded",
+    });
+  }
+  return lines;
 }
 
 export async function ensureAccountingAccounts(tx: any) {

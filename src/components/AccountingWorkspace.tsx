@@ -8,6 +8,7 @@ type JournalEntry = {
 };
 type ReportData = {
   entries: JournalEntry[];
+  openingBalances: { posted: boolean; entryDate: string | null };
   trialBalance: TrialRow[];
   incomeStatement: ReportRow[];
   balanceSheet: ReportRow[];
@@ -71,6 +72,23 @@ export default function AccountingWorkspace() {
     }
   }
 
+  async function recordOpeningBalances(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setNotice("");
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    try {
+      const response = await fetch("/api/accounting/opening-balances", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Opening balances could not be recorded.");
+      setNotice("Opening balances recorded and added to the journal.");
+      setRange((current) => ({ ...current }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Opening balances could not be recorded.");
+    }
+  }
+
   const exportJournal = () => downloadCsv("journal-entries.csv", [
     ["Date", "Entry number", "Source", "Memo", "Account code", "Account", "Description", "Debit ZMW", "Credit ZMW"],
     ...(data?.entries.flatMap((entry) => entry.lines.map((line) => [
@@ -111,6 +129,30 @@ export default function AccountingWorkspace() {
       <label>Notes<textarea name="notes" maxLength={500} /></label>
       <button className="button button-primary">Save cash-in</button>
     </form>
+    <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <h2>Enter starting balances</h2>
+      {data?.openingBalances.posted ? (
+        <div className="notice-strip" role="status">
+          Starting balances were recorded on {data.openingBalances.entryDate}. This one-time entry is locked.
+        </div>
+      ) : (
+        <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={recordOpeningBalances}>
+          <p className="notice-strip" style={{ gridColumn: "1 / -1", margin: 0 }}>
+            Enter balances as of one date. Use 0 where there is no balance. Customer and supplier amounts are totals.
+            Stock is entered separately. The system calculates a temporary balancing amount that must be reviewed
+            when opening stock is recorded.
+          </p>
+          <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+          <label>Cash and bank (ZMW)<input name="cashBankZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Customers owe the business (ZMW)<input name="receivablesZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Business owes suppliers (ZMW)<input name="payablesZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Business loans to repay (ZMW)<input name="loansPayableZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label>Owner funds already invested (ZMW)<input name="ownerEquityZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
+          <label style={{ gridColumn: "1 / -1" }}>Note<input name="memo" maxLength={500} defaultValue="Opening balances" required /></label>
+          <button className="button button-primary">Save starting balances</button>
+        </form>
+      )}
+    </section>
     <section className="panel form-grid" style={{ padding: 16, marginBottom: 16 }}>
       <h2>Year-end report period</h2>
       <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
@@ -118,7 +160,7 @@ export default function AccountingWorkspace() {
       <button className="button button-primary" onClick={() => setRange({ from, to })}>Run reports</button>
     </section>
     <div className="notice-strip" style={{ marginBottom: 16 }}>
-      These reports include entries already recorded in the app. Opening balances, tax treatment, bank reconciliation, and accountant review still need to be completed before relying on this as a full year-end filing.
+      These reports include entries already recorded in the app. Opening stock, tax treatment, bank reconciliation, and accountant review still need to be completed before relying on this as a full year-end filing.
     </div>
     {loading ? <div className="panel panel-body">Loading reports…</div> : data && <>
       <section className="metric-grid" style={{ marginBottom: 16 }}>
