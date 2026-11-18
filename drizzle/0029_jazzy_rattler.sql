@@ -1,0 +1,2 @@
+ALTER TABLE "sales_deliveries" ADD COLUMN "idempotency_key" varchar(80) DEFAULT gen_random_uuid()::text NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "sales_deliveries_idempotency_key_unique" ON "sales_deliveries" USING btree ("idempotency_key");

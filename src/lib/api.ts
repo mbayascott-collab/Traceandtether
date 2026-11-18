@@ -461,7 +461,7 @@ export async function deleteSalesOrder(id: number): Promise<void> {
 export async function updateSalesOrderStatus(id: number, action: "confirm" | "fulfill" | "cancel"): Promise<void> {
   await request(`/api/sales-orders/${id}/${action}`, { method: "POST" });
 }
-export async function createSalesDelivery(id: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }): Promise<void> {
+export async function createSalesDelivery(id: number, input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }): Promise<void> {
   await request(`/api/sales-orders/${id}/deliveries`, { method: "POST", body: JSON.stringify(input) });
 }
 

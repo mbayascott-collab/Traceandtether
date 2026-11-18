@@ -11,6 +11,7 @@ import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
 import { recordBusinessAudit, type AuditActor } from "./audit";
+import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -31,9 +32,30 @@ async function stockBalance(tx: any, productId: number, locationId?: number) {
   return { onHand: Number(m?.value ?? 0), reserved: Number(r?.value ?? 0), locationId: location?.id ?? null };
 }
 
-async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }, actor: AuditActor) {
+async function deliveryRequestResult(tx: any, existing: typeof salesDeliveries.$inferSelect, orderId: number,
+  input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }) {
+  const savedLines = await tx.select({
+    salesOrderLineId: salesDeliveryLines.salesOrderLineId, quantity: salesDeliveryLines.quantity,
+  }).from(salesDeliveryLines).where(eq(salesDeliveryLines.deliveryId, existing.id)).orderBy(asc(salesDeliveryLines.salesOrderLineId));
+  if (!matchesDeliveryRequest({
+    salesOrderId: existing.salesOrderId, deliveryDate: existing.deliveryDate, lines: savedLines,
+  }, {
+    salesOrderId: orderId, deliveryDate: input.deliveryDate, lines: input.lines,
+  })) {
+    return { error: "This delivery request key was already used for different details.", status: 409 };
+  }
+  const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, orderId)).limit(1);
+  if (!order) return { error: "Sales order not found.", status: 404 };
+  return { delivery: existing, order };
+}
+
+async function recordDelivery(tx: any, orderId: number,
+  input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }, actor: AuditActor) {
   const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, orderId)).for("update").limit(1);
   if (!order) return { error: "Sales order not found.", status: 404 };
+  const [existingDelivery] = await tx.select().from(salesDeliveries)
+    .where(eq(salesDeliveries.idempotencyKey, input.idempotencyKey)).limit(1);
+  if (existingDelivery) return deliveryRequestResult(tx, existingDelivery, orderId, input);
   if (order.status !== "confirmed" && order.status !== "partially_fulfilled") {
     return { error: "Only confirmed or partly delivered orders can receive another delivery.", status: 409 };
   }
@@ -66,8 +88,15 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
   }
   const [delivery] = await tx.insert(salesDeliveries).values({
     deliveryNumber: `DN-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
+    idempotencyKey: input.idempotencyKey,
     salesOrderId: orderId, deliveryDate: input.deliveryDate,
-  }).returning();
+  }).onConflictDoNothing({ target: salesDeliveries.idempotencyKey }).returning();
+  if (!delivery) {
+    const [concurrentDelivery] = await tx.select().from(salesDeliveries)
+      .where(eq(salesDeliveries.idempotencyKey, input.idempotencyKey)).limit(1);
+    if (!concurrentDelivery) throw new Error("The delivery request could not be recorded.");
+    return deliveryRequestResult(tx, concurrentDelivery, orderId, input);
+  }
   await tx.insert(salesDeliveryLines).values(input.lines.map((line) => ({
     deliveryId: delivery.id, salesOrderLineId: line.salesOrderLineId, quantity: line.quantity,
   })));
@@ -589,7 +618,11 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         salesOrderLineId: line.id, quantity: line.quantity - (delivered.get(line.id) ?? 0),
       })).filter((line) => line.quantity > 0);
       if (!remainingLines.length) return { error: "This order has no remaining items to deliver.", status: 409 };
-      return recordDelivery(tx, id, { deliveryDate: new Date().toISOString().slice(0, 10), lines: remainingLines }, res.locals.actor);
+      return recordDelivery(tx, id, {
+        idempotencyKey: randomUUID(),
+        deliveryDate: new Date().toISOString().slice(0, 10),
+        lines: remainingLines,
+      }, res.locals.actor);
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);

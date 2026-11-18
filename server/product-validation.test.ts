@@ -196,16 +196,28 @@ test("validates customer contacts and ZMW sales order lines", () => {
 
 test("validates delivery dates, positive quantities, and unique order lines", () => {
   assert.deepEqual(salesDeliveryInputSchema.parse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
     deliveryDate: "2026-11-04",
     lines: [{ salesOrderLineId: "4", quantity: "2" }],
-  }), { deliveryDate: "2026-11-04", lines: [{ salesOrderLineId: 4, quantity: 2 }] });
+  }), {
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2 }],
+  });
   assert.equal(salesDeliveryInputSchema.safeParse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
     deliveryDate: "2026-02-30",
     lines: [{ salesOrderLineId: 4, quantity: 2 }],
   }).success, false);
   assert.equal(salesDeliveryInputSchema.safeParse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
     deliveryDate: "2026-11-04",
     lines: [{ salesOrderLineId: 4, quantity: 2 }, { salesOrderLineId: 4, quantity: 1 }],
+  }).success, false);
+  assert.equal(salesDeliveryInputSchema.safeParse({
+    idempotencyKey: "not-a-uuid",
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2 }],
   }).success, false);
 });
 

@@ -29,6 +29,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
   const [deliveryFormOrder, setDeliveryFormOrder] = useState<SalesOrder | null>(null);
+  const [deliveryRequestKey, setDeliveryRequestKey] = useState("");
+  const [deliverySubmitting, setDeliverySubmitting] = useState(false);
   const [deliveryPrint, setDeliveryPrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
   useEffect(() => {
     let alive = true;
@@ -59,6 +61,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   }
   async function submitDelivery(event: FormEvent<HTMLFormElement>, order: SalesOrder) {
     event.preventDefault();
+    if (deliverySubmitting) return;
     const form = new FormData(event.currentTarget);
     const lines = order.lines.map((line) => ({
       salesOrderLineId: line.id,
@@ -66,13 +69,20 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     })).filter((line) => line.quantity > 0);
     if (!lines.length) { setError("Enter a quantity for at least one item."); return; }
     setError(""); setNotice("");
+    setDeliverySubmitting(true);
     try {
-      await createSalesDelivery(order.id, { deliveryDate: String(form.get("deliveryDate")), lines });
+      await createSalesDelivery(order.id, {
+        idempotencyKey: String(form.get("idempotencyKey")),
+        deliveryDate: String(form.get("deliveryDate")),
+        lines,
+      });
       setDeliveryFormOrder(null);
       setNotice("Delivery recorded. Stock and the customer balance have been updated.");
       setReload((value) => value + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not record this delivery.");
+    } finally {
+      setDeliverySubmitting(false);
     }
   }
   function removeOrder(order: SalesOrder) {
@@ -101,7 +111,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const filteredCustomers = customers.filter((customer) => matchesCustomer(customer, customerSearch));
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
-    <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>{title}</h1><p>{mode === "customers" ? "Keep customer contact and delivery details in the owner workspace." : "Draft orders, reserve available inventory on confirmation, and record stock leaving when fulfilled."}</p></div></header>
+    <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>{title}</h1><p>{mode === "customers" ? "Keep customer contact and delivery details in the owner workspace." : "Draft orders, reserve available inventory on confirmation, and record stock leaving with each delivery."}</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
     {mode === "customers" && <>
       <form key={editingCustomer?.id ?? "new-customer"} className="panel form-grid" onSubmit={(e) => submit(e, async (d) => saveCustomer({
@@ -170,7 +180,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
          <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
-          {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => setDeliveryFormOrder(o)}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
+          {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => { setDeliveryRequestKey(window.crypto.randomUUID()); setDeliveryFormOrder(o); }}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
            {o.deliveries.map((delivery) => <button key={delivery.id} className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery })}>{delivery.deliveryNumber}</button>)}
            {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
            {o.status === "fulfilled" && !o.deliveries.length && <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery: null })}>Delivery note</button>}
@@ -180,12 +190,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     {mode === "orders" && deliveryFormOrder && <div className="modal-backdrop" role="presentation">
       <form className="modal form-grid delivery-entry-form" onSubmit={(event) => submitDelivery(event, deliveryFormOrder)}>
         <h2>Record delivery · {deliveryFormOrder.orderNumber}</h2>
+        <input type="hidden" name="idempotencyKey" value={deliveryRequestKey} />
         <label>Delivery date<input type="date" name="deliveryDate" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
         {deliveryFormOrder.lines.filter((line) => line.remainingQuantity > 0).map((line) => <label key={line.id}>
           {line.productName} · {line.sku} · {line.remainingQuantity} remaining
           <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
         </label>)}
-        <div className="modal-footer-actions"><button type="button" className="button button-secondary" onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary">Save delivery</button></div>
+        <div className="modal-footer-actions"><button type="button" className="button button-secondary" disabled={deliverySubmitting} onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary" disabled={deliverySubmitting}>{deliverySubmitting ? "Saving…" : "Save delivery"}</button></div>
       </form>
     </div>}
     {mode === "orders" && invoiceOrder && (() => {

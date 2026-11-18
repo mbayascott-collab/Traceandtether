@@ -388,12 +388,14 @@ export const salesDeliveries = pgTable(
   {
     id: serial("id").primaryKey(),
     deliveryNumber: varchar("delivery_number", { length: 40 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 80 }).notNull().default(sql`gen_random_uuid()::text`),
     salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "restrict" }),
     deliveryDate: date("delivery_date").notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("sales_deliveries_number_unique").on(table.deliveryNumber),
+    uniqueIndex("sales_deliveries_idempotency_key_unique").on(table.idempotencyKey),
     index("sales_deliveries_order_date_idx").on(table.salesOrderId, table.deliveryDate),
   ],
 );
