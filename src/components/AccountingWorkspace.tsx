@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
 import { accountingReportExportRows } from "../../shared/accounting-reports";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
@@ -10,15 +10,31 @@ type JournalEntry = {
 type ExpenseEntry = {
   id: number; category: string; description: string; amountZmw: string; expenseDate: string;
   method: string; reference: string | null; notes: string | null;
+  effective: {
+    category: string; description: string; amountZmw: string; expenseDate: string;
+    method: string; reference: string | null; notes: string | null;
+  };
+  correctionCount: number;
 };
 type OwnerFundTransaction = {
   id: number; kind: string; amountZmw: string; transactionDate: string;
-  method: string; reference: string | null; accountName: string;
+  method: string; reference: string | null; notes: string | null; accountName: string;
+  effective: {
+    kind: string; amountZmw: string; transactionDate: string; method: string;
+    reference: string | null; notes: string | null; accountName: string;
+  };
+  correctionCount: number;
 };
 type ReportData = {
   entries: JournalEntry[];
   expenses: ExpenseEntry[];
   ownerTransactions: OwnerFundTransaction[];
+  canCorrectRecords: boolean;
+  correctionHistory: Array<{
+    id: number; recordType: string; recordId: number; previousCorrectionId: number | null;
+    effectiveDate: string; amountZmw: string; reason: string; reversalEntryId: number | null;
+    reversalEntryNumber: string | null; replacementEntryId: number | null; replacementEntryNumber: string | null;
+  }>;
   openingBalances: {
     posted: boolean;
     entryDate: string | null;
@@ -61,6 +77,7 @@ export default function AccountingWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [editingCorrection, setEditingCorrection] = useState<{ type: "expense" | "fund"; id: number } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -148,6 +165,24 @@ export default function AccountingWorkspace() {
     }
   }
 
+  async function correctAccountingRecord(event: FormEvent<HTMLFormElement>, path: string) {
+    event.preventDefault(); setError(""); setNotice("");
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    try {
+      const response = await fetch(path, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "The correction could not be posted.");
+      setEditingCorrection(null);
+      setNotice("Correction posted. The original record and journal remain in the history.");
+      setRange((current) => ({ ...current }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The correction could not be posted.");
+    }
+  }
+
   const exportJournal = () => downloadCsv("journal-entries.csv", [
     ["Date", "Entry number", "Source", "Memo", "Account code", "Account", "Description", "Debit ZMW", "Credit ZMW"],
     ...(data?.entries.flatMap((entry) => entry.lines.map((line) => [
@@ -161,6 +196,7 @@ export default function AccountingWorkspace() {
   const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
   const expenses = data?.expenses ?? [];
   const ownerTransactions = data?.ownerTransactions ?? [];
+  const correctionHistory = data?.correctionHistory ?? [];
   const openingBalanceHistory = data?.openingBalances.history ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
   const canEnterOpeningBalances = Boolean(data && !data.openingBalances.posted && (
@@ -191,16 +227,45 @@ export default function AccountingWorkspace() {
     </form>
     <section className="panel" style={{ marginBottom: 16 }}>
       <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{ownerTransactions.length} records</span></div>
-      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Method</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
-        {ownerTransactions.map((transaction) => <tr key={transaction.id}>
-          <td>{transaction.transactionDate}</td>
-          <td>{transaction.kind.replaceAll("_", " ")}</td>
-          <td>{transaction.accountName}</td>
-          <td>{transaction.method.replaceAll("_", " ")}</td>
-          <td>{transaction.reference || "—"}</td>
-          <td>{money(transaction.amountZmw)}</td>
-        </tr>)}
-        {!ownerTransactions.length && <tr><td colSpan={6}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Method</th><th>Reference</th><th>Amount</th><th /></tr></thead><tbody>
+        {ownerTransactions.map((transaction) => <Fragment key={transaction.id}>
+          <tr>
+            <td>{transaction.effective.transactionDate}{transaction.correctionCount > 0 && <small><br />Originally {transaction.transactionDate}</small>}</td>
+            <td>{transaction.effective.kind.replaceAll("_", " ")}</td>
+            <td>{transaction.effective.accountName}</td>
+            <td>{transaction.effective.method.replaceAll("_", " ")}</td>
+            <td>{transaction.effective.reference || "—"}</td>
+            <td>{money(transaction.effective.amountZmw)}{transaction.correctionCount > 0 && <small><br />Originally {money(transaction.amountZmw)}</small>}</td>
+            <td>{data?.canCorrectRecords && <button className="button button-secondary" type="button" onClick={() =>
+              setEditingCorrection(editingCorrection?.type === "fund" && editingCorrection.id === transaction.id
+                ? null : { type: "fund", id: transaction.id })}>
+              {editingCorrection?.type === "fund" && editingCorrection.id === transaction.id ? "Cancel" : "Correct"}
+            </button>}</td>
+          </tr>
+          {editingCorrection?.type === "fund" && editingCorrection.id === transaction.id && (
+            <tr><td colSpan={7}><form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={(event) =>
+              correctAccountingRecord(event, `/api/accounting/funds/${transaction.id}/correct`)}>
+              <h3>Correct owner transaction</h3>
+              <p>The saved transaction and journal stay unchanged. A dated reversal and corrected entry will be added.</p>
+              <label>Corrected date<input name="receivedAt" type="date" defaultValue={transaction.effective.transactionDate} required /></label>
+              <label>Corrected amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" defaultValue={transaction.effective.amountZmw} required /></label>
+              <label>Corrected account<select name="kind" defaultValue={transaction.effective.kind} required>
+                <option value="owner_contribution">Owner equity · contribution</option>
+                <option value="business_loan">Business loans payable</option>
+                <option value="owner_withdrawal">Owner withdrawals</option>
+              </select></label>
+              <label>Corrected method<select name="method" defaultValue={transaction.effective.method} required>
+                <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
+                <option value="mobile_money">Mobile money</option><option value="other">Other</option>
+              </select></label>
+              <label>Reference<input name="reference" maxLength={120} defaultValue={transaction.effective.reference ?? ""} /></label>
+              <label>Notes<textarea name="notes" maxLength={500} defaultValue={transaction.effective.notes ?? ""} /></label>
+              <label>Reason for correction<textarea name="reason" minLength={3} maxLength={450} required /></label>
+              <button className="button button-primary">Post correction</button>
+            </form></td></tr>
+          )}
+        </Fragment>)}
+        {!ownerTransactions.length && <tr><td colSpan={7}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
@@ -228,13 +293,59 @@ export default function AccountingWorkspace() {
     </section>
     <section className="panel" style={{ marginBottom: 16 }}>
       <div className="panel-heading"><h2>Business expenses in period</h2><span>{expenses.length} records</span></div>
-      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
-        {expenses.map((expense) => <tr key={expense.id}>
-          <td>{expense.expenseDate}</td><td>{expense.category.replaceAll("_", " ")}</td>
-          <td>{expense.description}</td><td>{expense.method.replaceAll("_", " ")}</td>
-          <td>{expense.reference || "—"}</td><td>{money(expense.amountZmw)}</td>
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th><th /></tr></thead><tbody>
+        {expenses.map((expense) => <Fragment key={expense.id}>
+          <tr>
+            <td>{expense.effective.expenseDate}{expense.correctionCount > 0 && <small><br />Originally {expense.expenseDate}</small>}</td>
+            <td>{expense.effective.category.replaceAll("_", " ")}</td>
+            <td>{expense.effective.description}</td><td>{expense.effective.method.replaceAll("_", " ")}</td>
+            <td>{expense.effective.reference || "—"}</td>
+            <td>{money(expense.effective.amountZmw)}{expense.correctionCount > 0 && <small><br />Originally {money(expense.amountZmw)}</small>}</td>
+            <td>{data?.canCorrectRecords && <button className="button button-secondary" type="button" onClick={() =>
+              setEditingCorrection(editingCorrection?.type === "expense" && editingCorrection.id === expense.id
+                ? null : { type: "expense", id: expense.id })}>
+              {editingCorrection?.type === "expense" && editingCorrection.id === expense.id ? "Cancel" : "Correct"}
+            </button>}</td>
+          </tr>
+          {editingCorrection?.type === "expense" && editingCorrection.id === expense.id && (
+            <tr><td colSpan={7}><form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={(event) =>
+              correctAccountingRecord(event, `/api/accounting/expenses/${expense.id}/correct`)}>
+              <h3>Correct business expense</h3>
+              <p>The saved expense and journal stay unchanged. A dated reversal and corrected entry will be added.</p>
+              <label>Corrected date<input name="expenseDate" type="date" defaultValue={expense.effective.expenseDate} required /></label>
+              <label>Corrected expense account<select name="category" defaultValue={expense.effective.category} required>
+                <option value="rent">Rent</option><option value="office_supplies">Office supplies</option>
+                <option value="utilities">Utilities</option><option value="transport">Transport</option>
+                <option value="repairs">Repairs and maintenance</option><option value="other">Other business expense</option>
+              </select></label>
+              <label>Description<input name="description" maxLength={240} defaultValue={expense.effective.description} required /></label>
+              <label>Corrected amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" defaultValue={expense.effective.amountZmw} required /></label>
+              <label>Paid from<select name="method" defaultValue={expense.effective.method} required>
+                <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
+                <option value="mobile_money">Mobile money</option><option value="other">Other funds</option>
+              </select></label>
+              <label>Receipt or reference<input name="reference" maxLength={120} defaultValue={expense.effective.reference ?? ""} /></label>
+              <label>Notes<textarea name="notes" maxLength={1000} defaultValue={expense.effective.notes ?? ""} /></label>
+              <label>Reason for correction<textarea name="reason" minLength={3} maxLength={450} required /></label>
+              <button className="button button-primary">Post correction</button>
+            </form></td></tr>
+          )}
+        </Fragment>)}
+        {!expenses.length && <tr><td colSpan={7}>No business expenses recorded in this period.</td></tr>}
+      </tbody></table></div>
+    </section>
+    <section className="panel" style={{ marginBottom: 16 }}>
+      <div className="panel-heading"><h2>Expense and owner-fund correction history</h2><span>{correctionHistory.length} corrections in period</span></div>
+      <div className="table-wrap"><table><thead><tr><th>Date / correction</th><th>Source record</th><th>Corrected amount</th><th>Reason</th><th>Reversal entry</th><th>Replacement entry</th></tr></thead><tbody>
+        {correctionHistory.map((correction) => <tr key={correction.id}>
+          <td>{correction.effectiveDate}<br /><small>Correction #{correction.id}</small></td>
+          <td>{correction.recordType.replaceAll("_", " ")} #{correction.recordId}</td>
+          <td>{money(correction.amountZmw)}</td>
+          <td>{correction.reason}</td>
+          <td>{correction.reversalEntryNumber ?? `Journal ${correction.reversalEntryId ?? "pending"}`}</td>
+          <td>{correction.replacementEntryNumber ?? `Journal ${correction.replacementEntryId ?? "pending"}`}</td>
         </tr>)}
-        {!expenses.length && <tr><td colSpan={6}>No business expenses recorded in this period.</td></tr>}
+        {!correctionHistory.length && <tr><td colSpan={6}>No expense or owner-fund corrections in this period.</td></tr>}
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>

@@ -2,7 +2,9 @@ import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { accountingAccounts, businessExpenses, journalEntries, journalLines, ownerFundTransactions } from "../shared/schema";
+import {
+  accountingAccounts, accountingCorrections, businessExpenses, journalEntries, journalLines, ownerFundTransactions,
+} from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { databaseErrorStatus } from "./database-errors";
@@ -46,6 +48,12 @@ const expenseSchema = z.object({
   reference: z.string().trim().max(120).optional().default(""),
   notes: z.string().trim().max(1000).optional().default(""),
 });
+const expenseCorrectionSchema = expenseSchema.extend({
+  reason: z.string().trim().min(3).max(450),
+});
+const ownerFundCorrectionSchema = cashInSchema.extend({
+  reason: z.string().trim().min(3).max(450),
+});
 const openingBalanceSchema = z.object({
   reversalEntryId: z.coerce.number().int().positive().optional(),
   effectiveAt: dateQuery,
@@ -66,10 +74,140 @@ const openingBalanceReversalSchema = z.object({
 const OPENING_BALANCE_SOURCE_KEY = "opening-balances-v1";
 const OPENING_BALANCE_REVERSAL_TYPE = "opening_balance_reversal";
 
+async function activeCorrection(tx: any, recordType: string, recordId: number) {
+  const [correction] = await tx.select().from(accountingCorrections)
+    .where(and(
+      eq(accountingCorrections.recordType, recordType),
+      eq(accountingCorrections.recordId, recordId),
+    ))
+    .orderBy(desc(accountingCorrections.id))
+    .limit(1);
+  return correction ?? null;
+}
+
+function accountNameForOwnerKind(kind: string, accounts: Array<{ systemKey: string | null; name: string }>) {
+  if (!["owner_contribution", "business_loan", "owner_withdrawal"].includes(kind)) return null;
+  const systemKey = ownerFundAccountKey(kind as "owner_contribution" | "business_loan" | "owner_withdrawal");
+  return accounts.find((account) => account.systemKey === systemKey)?.name ?? null;
+}
+
+async function postAccountingCorrection(tx: any, actor: any, input: {
+  recordType: "business_expense" | "owner_fund_transaction";
+  recordId: number;
+  sourceKey: string;
+  previousCorrection: typeof accountingCorrections.$inferSelect | null;
+  category: string | null;
+  kind: string | null;
+  description: string | null;
+  amountZmw: string;
+  effectiveDate: string;
+  method: "cash" | "bank_transfer" | "mobile_money" | "other";
+  reference: string | null;
+  notes: string | null;
+  reason: string;
+}) {
+  const currentJournalId = input.previousCorrection?.replacementEntryId;
+  const [currentJournal] = await tx.select().from(journalEntries)
+    .where(currentJournalId
+      ? eq(journalEntries.id, currentJournalId)
+      : eq(journalEntries.sourceKey, input.sourceKey))
+    .for("update")
+    .limit(1);
+  if (!currentJournal) throw new Error("The original journal entry for this record could not be found.");
+
+  const currentLines = await tx.select({
+    accountKey: accountingAccounts.systemKey,
+    productId: journalLines.productId,
+    debitZmw: journalLines.debitZmw,
+    creditZmw: journalLines.creditZmw,
+    description: journalLines.description,
+  }).from(journalLines)
+    .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+    .where(eq(journalLines.journalEntryId, currentJournal.id));
+  if (!currentLines.length || currentLines.some((line: { accountKey: string | null }) => !line.accountKey)) {
+    throw new Error("The current journal entry contains an unavailable account.");
+  }
+  const accountMap = await ensureAccountingAccounts(tx);
+  const [correction] = await tx.insert(accountingCorrections).values({
+    recordType: input.recordType,
+    recordId: input.recordId,
+    previousCorrectionId: input.previousCorrection?.id ?? null,
+    category: input.category,
+    kind: input.kind,
+    description: input.description,
+    amountZmw: input.amountZmw,
+    effectiveDate: input.effectiveDate,
+    method: input.method,
+    reference: input.reference,
+    notes: input.notes,
+    reason: input.reason,
+  }).returning();
+  const reversal = await postJournal(tx, {
+    sourceKey: `accounting-correction-${correction.id}-reversal`,
+    sourceType: "accounting_correction_reversal",
+    sourceId: correction.id,
+    entryDate: input.effectiveDate,
+    memo: `Correction reversal for ${input.recordType.replaceAll("_", " ")} ${input.recordId}: ${input.reason}`,
+    lines: reversePostingLines(currentLines.map((line: any) => ({
+      accountKey: line.accountKey!,
+      productId: line.productId,
+      debitZmw: line.debitZmw,
+      creditZmw: line.creditZmw,
+      description: line.description,
+    }))),
+  });
+
+  let replacementLines;
+  let replacementMemo: string;
+  if (input.recordType === "business_expense") {
+    const expenseAccountKey = operatingExpenseAccountKey(input.category ?? "other");
+    const cashKey = cashAccountKeyForMethod(input.method);
+    const expenseAccount = accountMap.get(expenseAccountKey);
+    const cashAccount = accountMap.get(cashKey);
+    if (!expenseAccount || !cashAccount) throw new Error("A required expense account is unavailable.");
+    replacementMemo = `${expenseAccount.name}: ${input.description ?? "Corrected expense"}${input.reference ? ` · ${input.reference}` : ""}`;
+    replacementLines = [
+      { accountKey: expenseAccountKey, debitZmw: input.amountZmw, description: input.notes || input.description },
+      { accountKey: cashKey, creditZmw: input.amountZmw, description: `Paid by ${input.method}` },
+    ];
+  } else {
+    const kind = input.kind as "owner_contribution" | "business_loan" | "owner_withdrawal";
+    const cashAccount = accountMap.get(cashAccountKeyForMethod(input.method));
+    if (!cashAccount || !kind) throw new Error("A required owner-fund account is unavailable.");
+    replacementLines = buildOwnerFundLines(kind, input.method, input.amountZmw, cashAccount.name, input.notes ?? undefined);
+    replacementMemo = `${kind === "owner_contribution" ? "Owner contribution" : kind === "business_loan" ? "Business loan received" : "Owner withdrawal"}${input.reference ? ` · ${input.reference}` : ""}`;
+  }
+  const replacement = await postJournal(tx, {
+    sourceKey: `accounting-correction-${correction.id}-replacement`,
+    sourceType: "accounting_correction",
+    sourceId: correction.id,
+    entryDate: input.effectiveDate,
+    memo: replacementMemo,
+    lines: replacementLines,
+  });
+  await tx.update(accountingCorrections).set({
+    reversalEntryId: reversal.id,
+    replacementEntryId: replacement.id,
+  }).where(eq(accountingCorrections.id, correction.id));
+  await recordBusinessAudit(tx, {
+    entityType: "accounting_correction",
+    entityId: correction.id,
+    recordLabel: `${input.recordType.replaceAll("_", " ")} ${input.recordId}`,
+    actor,
+    action: "created",
+    changedFields: ["amountZmw", "effectiveDate", "category", "kind", "method", "reference", "notes", "reason"],
+  });
+  return {
+    correction: { ...correction, reversalEntryId: reversal.id, replacementEntryId: replacement.id },
+    reversal,
+    replacement,
+  };
+}
+
 export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
   const ownerOnly: RequestHandler = (_req, res, next) => {
     if (res.locals.actor?.role !== "owner") {
-      res.status(403).json({ error: "Only the business owner can correct opening balances." });
+      res.status(403).json({ error: "Only the business owner can correct accounting records." });
       return;
     }
     next();
@@ -121,6 +259,48 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       });
       return { expense, journal };
     });
+    res.status(201).json(result);
+  });
+
+  app.post("/api/accounting/expenses/:expenseId/correct", owner, ownerOnly, async (req, res) => {
+    const expenseId = Number(req.params.expenseId);
+    const parsed = expenseCorrectionSchema.safeParse(req.body);
+    if (!Number.isSafeInteger(expenseId) || expenseId < 1 || !parsed.success) {
+      res.status(400).json({ error: parsed.success
+        ? "Choose a valid expense."
+        : parsed.error.issues[0]?.message ?? "Check the correction details." });
+      return;
+    }
+    const input = parsed.data;
+    if (cents(input.amountZmw) <= 0n) {
+      res.status(400).json({ error: "Enter an expense amount greater than zero." });
+      return;
+    }
+    const result = await db.transaction(async (tx) => {
+      const [expense] = await tx.select().from(businessExpenses)
+        .where(eq(businessExpenses.id, expenseId)).for("update").limit(1);
+      if (!expense) return null;
+      const previousCorrection = await activeCorrection(tx, "business_expense", expense.id);
+      return postAccountingCorrection(tx, res.locals.actor, {
+        recordType: "business_expense",
+        recordId: expense.id,
+        sourceKey: `business-expense-${expense.id}`,
+        previousCorrection,
+        category: input.category,
+        kind: null,
+        description: input.description,
+        amountZmw: input.amountZmw,
+        effectiveDate: input.expenseDate,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+        reason: input.reason,
+      });
+    });
+    if (!result) {
+      res.status(404).json({ error: "That expense could not be found." });
+      return;
+    }
     res.status(201).json(result);
   });
 
@@ -353,6 +533,48 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     res.status(201).json(result);
   });
 
+  app.post("/api/accounting/funds/:transactionId/correct", owner, ownerOnly, async (req, res) => {
+    const transactionId = Number(req.params.transactionId);
+    const parsed = ownerFundCorrectionSchema.safeParse(req.body);
+    if (!Number.isSafeInteger(transactionId) || transactionId < 1 || !parsed.success) {
+      res.status(400).json({ error: parsed.success
+        ? "Choose a valid owner-fund transaction."
+        : parsed.error.issues[0]?.message ?? "Check the correction details." });
+      return;
+    }
+    const input = parsed.data;
+    if (cents(input.amountZmw) <= 0n) {
+      res.status(400).json({ error: "Enter an amount greater than zero." });
+      return;
+    }
+    const result = await db.transaction(async (tx) => {
+      const [transaction] = await tx.select().from(ownerFundTransactions)
+        .where(eq(ownerFundTransactions.id, transactionId)).for("update").limit(1);
+      if (!transaction) return null;
+      const previousCorrection = await activeCorrection(tx, "owner_fund_transaction", transaction.id);
+      return postAccountingCorrection(tx, res.locals.actor, {
+        recordType: "owner_fund_transaction",
+        recordId: transaction.id,
+        sourceKey: `owner-fund-${transaction.id}`,
+        previousCorrection,
+        category: null,
+        kind: input.kind,
+        description: null,
+        amountZmw: input.amountZmw,
+        effectiveDate: input.receivedAt,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+        reason: input.reason,
+      });
+    });
+    if (!result) {
+      res.status(404).json({ error: "That owner-fund transaction could not be found." });
+      return;
+    }
+    res.status(201).json(result);
+  });
+
   app.get("/api/accounting", owner, async (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     const year = today.slice(0, 4);
@@ -407,21 +629,71 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
           reversed: Boolean(linkedReversal),
         };
       });
-      const expenses = await tx.select().from(businessExpenses)
-        .where(and(gte(businessExpenses.expenseDate, from), lte(businessExpenses.expenseDate, to)))
+      const correctionRows = await tx.select().from(accountingCorrections)
+        .orderBy(accountingCorrections.id);
+      const latestCorrections = new Map<string, typeof accountingCorrections.$inferSelect>();
+      const correctionCounts = new Map<string, number>();
+      for (const correction of correctionRows) {
+        const key = `${correction.recordType}:${correction.recordId}`;
+        latestCorrections.set(key, correction);
+        correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+      }
+      const expenseRecords = await tx.select().from(businessExpenses)
         .orderBy(desc(businessExpenses.expenseDate), desc(businessExpenses.id));
-      const ownerTransactions = await tx.select({
+      const expenses = expenseRecords.flatMap((expense) => {
+        const key = `business_expense:${expense.id}`;
+        const correction = latestCorrections.get(key);
+        const effectiveDate = correction?.effectiveDate ?? expense.expenseDate;
+        if ((expense.expenseDate < from || expense.expenseDate > to) &&
+            (effectiveDate < from || effectiveDate > to)) return [];
+        return [{
+          ...expense,
+          effective: {
+            category: correction?.category ?? expense.category,
+            description: correction?.description ?? expense.description,
+            amountZmw: correction?.amountZmw ?? expense.amountZmw,
+            expenseDate: effectiveDate,
+            method: correction?.method ?? expense.method,
+            reference: correction?.reference ?? expense.reference,
+            notes: correction?.notes ?? expense.notes,
+          },
+          correctionCount: correctionCounts.get(key) ?? 0,
+        }];
+      });
+      const ownerTransactionRecords = await tx.select({
         id: ownerFundTransactions.id,
         kind: ownerFundTransactions.kind,
         amountZmw: ownerFundTransactions.amountZmw,
         transactionDate: ownerFundTransactions.transactionDate,
         method: ownerFundTransactions.method,
         reference: ownerFundTransactions.reference,
+        notes: ownerFundTransactions.notes,
         accountName: accountingAccounts.name,
       }).from(ownerFundTransactions)
         .innerJoin(accountingAccounts, eq(ownerFundTransactions.accountId, accountingAccounts.id))
-        .where(and(gte(ownerFundTransactions.transactionDate, from), lte(ownerFundTransactions.transactionDate, to)))
         .orderBy(desc(ownerFundTransactions.transactionDate), desc(ownerFundTransactions.id));
+      const ownerTransactions = ownerTransactionRecords.flatMap((transaction) => {
+        const key = `owner_fund_transaction:${transaction.id}`;
+        const correction = latestCorrections.get(key);
+        const effectiveDate = correction?.effectiveDate ?? transaction.transactionDate;
+        if ((transaction.transactionDate < from || transaction.transactionDate > to) &&
+            (effectiveDate < from || effectiveDate > to)) return [];
+        const effectiveKind = correction?.kind ?? transaction.kind;
+        const effectiveAccountName = accountNameForOwnerKind(effectiveKind, accounts);
+        return [{
+          ...transaction,
+          effective: {
+            kind: effectiveKind,
+            amountZmw: correction?.amountZmw ?? transaction.amountZmw,
+            transactionDate: effectiveDate,
+            method: correction?.method ?? transaction.method,
+            reference: correction?.reference ?? transaction.reference,
+            notes: correction?.notes ?? transaction.notes,
+            accountName: effectiveAccountName ?? transaction.accountName,
+          },
+          correctionCount: correctionCounts.get(key) ?? 0,
+        }];
+      });
       const records = await tx.select({
         entry: journalEntries,
         line: journalLines,
@@ -463,6 +735,22 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         from,
         to,
       );
+      const entryNumberById = new Map(records.map((row) => [row.entry.id, row.entry.entryNumber]));
+      const correctionHistory = correctionRows
+        .filter((correction) => correction.effectiveDate >= from && correction.effectiveDate <= to)
+        .map((correction) => ({
+          id: correction.id,
+          recordType: correction.recordType,
+          recordId: correction.recordId,
+          previousCorrectionId: correction.previousCorrectionId,
+          effectiveDate: correction.effectiveDate,
+          amountZmw: correction.amountZmw,
+          reason: correction.reason,
+          reversalEntryId: correction.reversalEntryId,
+          reversalEntryNumber: correction.reversalEntryId ? entryNumberById.get(correction.reversalEntryId) ?? null : null,
+          replacementEntryId: correction.replacementEntryId,
+          replacementEntryNumber: correction.replacementEntryId ? entryNumberById.get(correction.replacementEntryId) ?? null : null,
+        }));
       return {
         accounts,
         openingBalances: {
@@ -475,6 +763,8 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         },
         expenses,
         ownerTransactions,
+        correctionHistory,
+        canCorrectRecords: res.locals.actor?.role === "owner",
         entries: [...entryMap.values()],
         ...reports,
         from, to,

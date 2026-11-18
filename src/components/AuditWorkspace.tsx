@@ -28,6 +28,7 @@ const categories = [
   ["shipment", "Shipments"],
   ["import_expense", "Import expenses"],
   ["business_expense", "Business expenses"],
+  ["accounting_correction", "Accounting corrections"],
   ["journal_entry", "Accounting entries"],
   ["payment", "Payments"],
   ["payment_statement_line", "Bank statement lines"],

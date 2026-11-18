@@ -35,6 +35,7 @@ export const auditEntityTypes = [
   "shipment",
   "import_expense",
   "business_expense",
+  "accounting_correction",
   "journal_entry",
   "payment",
   "payment_statement_line",
@@ -863,6 +864,38 @@ export const ownerFundTransactions = pgTable(
       "owner_fund_transactions_kind",
       sql`${table.kind} in ('owner_contribution', 'business_loan', 'owner_withdrawal')`,
     ),
+  ],
+);
+
+export const accountingCorrections = pgTable(
+  "accounting_corrections",
+  {
+    id: serial("id").primaryKey(),
+    recordType: varchar("record_type", { length: 32 }).notNull(),
+    recordId: integer("record_id").notNull(),
+    previousCorrectionId: integer("previous_correction_id")
+      .references((): AnyPgColumn => accountingCorrections.id, { onDelete: "restrict" }),
+    reversalEntryId: integer("reversal_entry_id")
+      .references(() => journalEntries.id, { onDelete: "restrict" }),
+    replacementEntryId: integer("replacement_entry_id")
+      .references(() => journalEntries.id, { onDelete: "restrict" }),
+    category: varchar("category", { length: 40 }),
+    kind: varchar("kind", { length: 40 }),
+    description: varchar("description", { length: 240 }),
+    amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
+    effectiveDate: date("effective_date").notNull(),
+    method: paymentMethod("method").notNull(),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    reason: varchar("reason", { length: 450 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("accounting_corrections_source_idx").on(table.recordType, table.recordId, table.id),
+    uniqueIndex("accounting_corrections_reversal_entry_unique").on(table.reversalEntryId),
+    uniqueIndex("accounting_corrections_replacement_entry_unique").on(table.replacementEntryId),
+    check("accounting_corrections_record_type", sql`${table.recordType} in ('business_expense', 'owner_fund_transaction')`),
+    check("accounting_corrections_positive_amount", sql`${table.amountZmw} > 0`),
   ],
 );
 
