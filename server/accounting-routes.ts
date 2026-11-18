@@ -8,7 +8,7 @@ import { recordBusinessAudit } from "./audit";
 import { databaseErrorStatus } from "./database-errors";
 import {
   buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts, reversePostingLines,
-  buildOwnerFundLines, journalLinesAreBalanced, operatingExpenseAccountKey, ownerFundAccountKey, postJournal,
+  buildOwnerFundLines, journalLinesAreBalanced, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, postJournal,
 } from "./accounting-posting";
 import { calculateAccountingReports } from "../shared/accounting-reports";
 
@@ -210,7 +210,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         return { alreadyExists: false };
       });
     } catch (error) {
-      const dbError = databaseErrorStatus(error, "These opening balances were already submitted.");
+      const dbError = databaseErrorStatus(error, openingBalanceDuplicateMessage(Boolean(input.reversalEntryId)));
       if (dbError?.status === 409) {
         res.status(dbError.status).json({ error: dbError.message });
         return;
@@ -218,9 +218,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       throw error;
     }
     if (result.alreadyExists) {
-      res.status(409).json({ error: input.reversalEntryId
-        ? "This reversal has already been replaced or is not a valid opening-balance correction."
-        : "Opening balances have already been recorded. Reverse the active entry before replacing it." });
+      res.status(409).json({ error: openingBalanceDuplicateMessage(Boolean(input.reversalEntryId)) });
       return;
     }
     res.status(201).json({ message: input.reversalEntryId

@@ -386,6 +386,12 @@ export function buildOwnerFundLines(
     ];
 }
 
+export function openingBalanceDuplicateMessage(isReplacement: boolean): string {
+  return isReplacement
+    ? "This reversal has already been replaced or is not a valid opening-balance correction."
+    : "Opening balances have already been recorded. Reverse the active entry before replacing it.";
+}
+
 export function buildOpeningBalanceLines(input: {
   cashOnHandZmw: string;
   bankZmw: string;

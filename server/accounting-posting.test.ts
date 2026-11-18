@@ -1,9 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getTableConfig } from "drizzle-orm/pg-core";
+import { databaseErrorStatus } from "./database-errors";
+import { journalEntries } from "../shared/schema";
 import {
   buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
-  buildOwnerFundLines, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
+  buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
+
+test("maps concurrent opening-balance duplicates to the already-recorded response", () => {
+  const message = openingBalanceDuplicateMessage(false);
+  assert.deepEqual(databaseErrorStatus({ cause: { code: "23505" } }, message), {
+    status: 409,
+    message,
+  });
+  assert.match(message, /already been recorded/);
+});
+
+test("journal source keys are unique to prevent concurrent duplicate opening entries", () => {
+  const sourceKeyIndex = getTableConfig(journalEntries).indexes.find(
+    ({ config }) => config.name === "journal_entries_source_key_unique",
+  );
+  assert.equal(sourceKeyIndex?.config.unique, true);
+  assert.equal(sourceKeyIndex?.config.columns.length, 1);
+});
 
 test("parses and formats ZMW using exact minor units", () => {
   assert.equal(cents("123456.78"), 12_345_678n);
