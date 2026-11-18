@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNotNull, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
+import { z } from "zod";
 import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema,
 } from "./product-validation";
@@ -16,6 +17,7 @@ import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
 import { chooseSalesStockLocation } from "./sales-stock-allocation";
+import { sendCustomerQuoteEmail } from "./customer-quote-email";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -467,6 +469,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [current] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!current) return { error: "Customer quote not found.", status: 404 };
+      if (current.emailSendStatus === "sending") return { error: "Wait for the quote email to finish before editing it.", status: 409 };
       if (current.status !== "draft" && current.status !== "sent") return { error: "Only draft or sent quotes can be edited.", status: 409 };
       const [customer] = await tx.select({ status: customers.status }).from(customers).where(eq(customers.id, parsed.data.customerId)).limit(1);
       if (!customer || customer.status !== "active") return { error: "Choose an active customer.", status: 400 };
@@ -486,12 +489,93 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
   });
+  app.post("/api/customer-quotes/:id/send", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid quote.");
+    const claim = await db.transaction(async (tx) => {
+      const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
+      if (!quote) return { error: "Customer quote not found.", status: 404 };
+      if (quote.emailSendStatus === "sending") {
+        const attemptedAt = quote.emailAttemptedAt?.getTime() ?? 0;
+        const stale = !attemptedAt || Date.now() - attemptedAt > 5 * 60 * 1000;
+        if (stale && req.body?.confirmAmbiguousRetry !== true) {
+          const error = "The previous send did not finish. Check Gmail Sent before retrying.";
+          const [failed] = await tx.update(customerQuotes).set({
+            emailSendStatus: "failed", emailSentAt: null, emailSendError: error, updatedAt: new Date(),
+          }).where(eq(customerQuotes.id, id)).returning();
+          await recordBusinessAudit(tx, {
+            entityType: "customer_quote", entityId: failed.id, recordLabel: failed.quoteNumber,
+            actor: res.locals.actor, action: "updated",
+            changedFields: ["emailSendStatus", "emailAttemptedAt", "emailSentAt", "emailSendError"],
+          });
+          return { error: `${error} If the email is not there, try sending it again.`, status: 409 };
+        }
+        if (!stale) return { error: "This quote email is already being sent. Wait for it to finish before trying again.", status: 409 };
+      }
+
+      const [customer] = await tx.select({ name: customers.name, email: customers.email })
+        .from(customers).where(eq(customers.id, quote.customerId)).limit(1);
+      if (!customer?.email) return { error: "Add a saved email address to this customer before sending the quote.", status: 400 };
+      if (!z.string().email().safeParse(customer.email).success) {
+        return { error: "The customer's saved email address is invalid. Update it before sending the quote.", status: 400 };
+      }
+
+      const lines = await tx.select({
+        productName: products.name, sku: products.sku, quantity: customerQuoteLines.quantity,
+        unitPriceZmw: customerQuoteLines.unitPriceZmw,
+      }).from(customerQuoteLines).innerJoin(products, eq(customerQuoteLines.productId, products.id))
+        .where(eq(customerQuoteLines.customerQuoteId, quote.id)).orderBy(asc(products.name));
+      if (lines.length === 0) return { error: "This quote has no items to send.", status: 409 };
+      const lineContent = lines.map((line) => ({
+        ...line,
+        lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+      }));
+      const totalZmw = money(lineContent.reduce(
+        (total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n,
+      ));
+      const attemptedAt = new Date();
+      const [claimed] = await tx.update(customerQuotes).set({
+        emailSendStatus: "sending", emailAttemptedAt: attemptedAt, emailSentAt: null,
+        emailSendError: null, updatedAt: attemptedAt,
+      }).where(eq(customerQuotes.id, quote.id)).returning();
+      return {
+        quote: claimed,
+        content: {
+          quoteNumber: quote.quoteNumber, customerName: customer.name, customerEmail: customer.email,
+          validUntil: quote.validUntil, deliveryAddress: quote.deliveryAddress, notes: quote.notes,
+          totalZmw, lines: lineContent,
+        },
+      };
+    });
+    if ("error" in claim) return res.status(claim.status ?? 400).json({ error: claim.error });
+
+    const outcome = await sendCustomerQuoteEmail(claim.content);
+    const sentAt = outcome.ok ? new Date() : null;
+    const saved = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(customerQuotes).set({
+        emailSendStatus: outcome.ok ? "sent" : "failed",
+        emailSentAt: sentAt,
+        emailSendError: outcome.ok ? null : outcome.error,
+        updatedAt: new Date(),
+      }).where(and(eq(customerQuotes.id, id), eq(customerQuotes.emailSendStatus, "sending"))).returning();
+      if (!updated) throw new Error("The quote email result could not be saved.");
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: updated.id, recordLabel: updated.quoteNumber,
+        actor: res.locals.actor, action: "updated",
+        changedFields: ["emailSendStatus", "emailAttemptedAt", "emailSentAt", "emailSendError"],
+      });
+      return updated;
+    });
+    if (!outcome.ok) return res.status(502).json({ error: outcome.error, quote: saved });
+    res.json({ quote: saved });
+  });
   app.delete("/api/customer-quotes/:id", owner, async (req, res) => {
     const id = idOf(req.params.id);
     if (!id) return bad(res, "Invalid quote.");
     const result = await db.transaction(async (tx) => {
       const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!quote) return { error: "Customer quote not found.", status: 404 };
+      if (quote.emailSendStatus === "sending") return { error: "Wait for the quote email to finish before deleting it.", status: 409 };
       if (quote.status === "converted" || quote.salesOrderId) {
         return { error: "Delete the linked draft sales order before deleting this quote.", status: 409 };
       }

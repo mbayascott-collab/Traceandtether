@@ -1,0 +1,2 @@
+ALTER TABLE "customer_quotes" DROP CONSTRAINT "customer_quotes_email_send_status";--> statement-breakpoint
+ALTER TABLE "customer_quotes" ADD CONSTRAINT "customer_quotes_email_send_status" CHECK ("customer_quotes"."email_send_status" in ('not_sent', 'sending', 'sent', 'failed'));

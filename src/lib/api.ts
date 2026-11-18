@@ -62,7 +62,7 @@ export interface SalesDelivery { id: number; deliveryNumber: string; deliveryDat
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "partially_fulfilled" | "fulfilled" | "cancelled"; orderDate: string; confirmedAt?: string | null; fulfilledAt: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; deliveredZmw: string; deliveries: SalesDelivery[]; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
 export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
-export type CustomerQuoteEmailStatus = "not_sent" | "sent" | "failed";
+export type CustomerQuoteEmailStatus = "not_sent" | "sending" | "sent" | "failed";
 export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; customerEmail: string | null; status: CustomerQuoteStatus; emailSendStatus: CustomerQuoteEmailStatus; emailAttemptedAt: string | null; emailSentAt: string | null; emailSendError: string | null; createdAt: string; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
 export interface CustomerQuoteInput { customerId: number; validUntil: string | null; deliveryAddress: string | null; notes: string | null; status: "draft" | "sent" | "accepted" | "rejected"; lines: { productId: number; quantity: number; unitPriceZmw: string }[]; }
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
@@ -462,6 +462,12 @@ export async function saveCustomerQuote(input: CustomerQuoteInput, id?: number):
 }
 export async function deleteCustomerQuote(id: number): Promise<void> {
   await request(`/api/customer-quotes/${id}`, { method: "DELETE" });
+}
+export async function emailCustomerQuote(id: number, confirmAmbiguousRetry = false): Promise<void> {
+  await request(`/api/customer-quotes/${id}/send`, {
+    method: "POST",
+    body: JSON.stringify({ confirmAmbiguousRetry }),
+  });
 }
 export async function convertCustomerQuote(id: number, confirmExpired = false): Promise<string> {
   const result = await request<{ order: { orderNumber: string } }>(`/api/customer-quotes/${id}/convert`, {

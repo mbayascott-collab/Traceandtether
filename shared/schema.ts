@@ -466,7 +466,7 @@ export const customerQuotes = pgTable(
     uniqueIndex("customer_quotes_sales_order_unique").on(table.salesOrderId),
     index("customer_quotes_customer_idx").on(table.customerId),
     index("customer_quotes_status_idx").on(table.status),
-    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sent', 'failed')`),
+    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sending', 'sent', 'failed')`),
     check("customer_quotes_conversion_state", sql`(${table.status} = 'converted') = (${table.salesOrderId} is not null)`),
   ],
 );
