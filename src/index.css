@@ -2959,6 +2959,8 @@ textarea:focus-visible {
 .customer-quote-document-acceptance div { display: flex; gap: 35px; }
 .customer-quote-document-acceptance span { flex: 1; padding-top: 8px; border-top: 1px solid #aab9b3; color: #657a75; }
 .customer-quote-document-footer { margin-top: 35px; padding-top: 10px; border-top: 1px solid #e1e8e4; color: #657a75; font-size: 9px; }
+.customer-quote-document-summary,
+.customer-quote-document-signoff { break-inside: avoid; page-break-inside: avoid; }
 .delivery-note-signatures { display: grid; gap: 28px; margin-top: 46px; }
 .delivery-note-signatures > div { display: grid; grid-template-columns: 1fr 1.4fr 0.7fr; gap: 20px; }
 .delivery-note-signatures span { min-height: 28px; padding-top: 8px; border-top: 1px solid #aab9b3; color: #657a75; font-size: 9px; }
@@ -2977,10 +2979,12 @@ textarea:focus-visible {
 
 @page { size: A4; margin: 15mm; }
 @media print {
+  html,
+  body { background: #fff !important; }
   body * { visibility: hidden !important; }
   .quote-preview-overlay {
-    position: absolute !important;
-    inset: 0 !important;
+    position: static !important;
+    inset: auto !important;
     display: block !important;
     overflow: visible !important;
     padding: 0 !important;
@@ -2997,15 +3001,51 @@ textarea:focus-visible {
   #customer-quote-print,
   #sales-invoice-print,
   #delivery-note-print {
-    position: absolute !important;
-    top: 0 !important;
-    left: 0 !important;
+    position: static !important;
     width: 100% !important;
     min-height: 0 !important;
     margin: 0 !important;
     padding: 0 !important;
     box-shadow: none !important;
   }
+  #customer-quote-print {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+  .customer-quote-document-header,
+  .customer-quote-document-brand,
+  .customer-quote-document-title,
+  .customer-quote-document-customer,
+  .customer-quote-document-total,
+  .customer-quote-document-summary,
+  .customer-quote-document-signoff {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .customer-quote-document-table {
+    table-layout: fixed;
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+  .customer-quote-document-table thead { display: table-header-group; }
+  .customer-quote-document-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .customer-quote-document-table th {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .customer-quote-document-table th:first-child,
+  .customer-quote-document-table td:first-child { width: 37%; overflow-wrap: anywhere; }
+  .customer-quote-document-table th:nth-child(2),
+  .customer-quote-document-table td:nth-child(2) { width: 19%; overflow-wrap: anywhere; }
+  .customer-quote-document-table th:nth-child(3),
+  .customer-quote-document-table td:nth-child(3) { width: 8%; }
+  .customer-quote-document-table th:nth-child(4),
+  .customer-quote-document-table td:nth-child(4) { width: 18%; }
+  .customer-quote-document-table th:nth-child(5),
+  .customer-quote-document-table td:nth-child(5) { width: 18%; }
 }
 
 @media (max-width: 640px) {

@@ -159,10 +159,14 @@ export default function CustomerQuotesWorkspace() {
               <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td><td className="quote-number-cell">{money(line.unitPriceZmw)}</td><td className="quote-number-cell">{money(line.lineTotalZmw)}</td>
             </tr>)}</tbody>
           </table>
-          <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{money(printQuote.totalZmw)}</strong></div>
           {printQuote.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{printQuote.notes}</p></section>}
-          <section className="customer-quote-document-acceptance"><strong>Customer approval</strong><div><span>Name and signature</span><span>Date</span></div></section>
-          <footer className="customer-quote-document-footer">All prices are in ZMW. Quote reference: {printQuote.quoteNumber}</footer>
+          <div className="customer-quote-document-summary">
+            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{money(printQuote.totalZmw)}</strong></div>
+            <div className="customer-quote-document-signoff">
+              <section className="customer-quote-document-acceptance"><strong>Customer approval</strong><div><span>Name and signature</span><span>Date</span></div></section>
+              <footer className="customer-quote-document-footer">All prices are in ZMW. Quote reference: {printQuote.quoteNumber}</footer>
+            </div>
+          </div>
         </article>
       </div>
     </div>}
