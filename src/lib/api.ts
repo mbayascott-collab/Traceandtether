@@ -463,8 +463,10 @@ export async function saveCustomerQuote(input: CustomerQuoteInput, id?: number):
 export async function deleteCustomerQuote(id: number): Promise<void> {
   await request(`/api/customer-quotes/${id}`, { method: "DELETE" });
 }
-export async function convertCustomerQuote(id: number): Promise<string> {
-  const result = await request<{ order: { orderNumber: string } }>(`/api/customer-quotes/${id}/convert`, { method: "POST" });
+export async function convertCustomerQuote(id: number, confirmExpired = false): Promise<string> {
+  const result = await request<{ order: { orderNumber: string } }>(`/api/customer-quotes/${id}/convert`, {
+    method: "POST", body: JSON.stringify({ confirmExpired }),
+  });
   return result.order.orderNumber;
 }
 export async function fetchMarketingCampaigns(): Promise<MarketingCampaignOption[]> {

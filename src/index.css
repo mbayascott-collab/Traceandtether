@@ -2918,6 +2918,8 @@ textarea:focus-visible {
   background: #eaf3ef;
 }
 .customer-quote-expired {
+  display: inline-block;
+  margin-left: 5px;
   color: #a14332;
   font-size: 9px;
   font-style: normal;

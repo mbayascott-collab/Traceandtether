@@ -4,6 +4,7 @@ import type { Express, RequestHandler } from "express";
 import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema,
 } from "./product-validation";
+import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
   customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
@@ -512,7 +513,9 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!quote) return { error: "Customer quote not found.", status: 404 };
       if (quote.status !== "accepted" || quote.salesOrderId) return { error: "Mark this quote as accepted before converting it.", status: 409 };
-      if (quote.validUntil && quote.validUntil < new Date().toISOString().slice(0, 10)) return { error: "This quote has expired and cannot be converted.", status: 409 };
+      if (requiresCustomerQuoteExpiryConfirmation(quote.validUntil, req.body?.confirmExpired)) {
+        return { error: `This quote expired on ${quote.validUntil}. Review the expiry and confirm before converting it.`, status: 409 };
+      }
       const quoteLines = await tx.select().from(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id)).orderBy(asc(customerQuoteLines.productId));
       const activeProducts = await tx.select({ id: products.id, status: products.status }).from(products)
         .where(inArray(products.id, quoteLines.map((line) => line.productId))).orderBy(asc(products.id)).for("update");

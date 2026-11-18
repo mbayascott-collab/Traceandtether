@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { convertCustomerQuote, deleteCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
+import { isCustomerQuoteExpired } from "../../shared/customer-quote-expiry";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
@@ -53,8 +54,12 @@ export default function CustomerQuotesWorkspace() {
   }
   async function convert(quote: CustomerQuote) {
     setError(""); setNotice("");
+    const expired = isQuoteExpired(quote);
+    if (expired && !window.confirm(
+      `${quote.quoteNumber} expired on ${quote.validUntil}. Confirm that you reviewed the expiry and want to create a draft order using the quoted prices.`,
+    )) return;
     try {
-      const orderNumber = await convertCustomerQuote(quote.id);
+      const orderNumber = await convertCustomerQuote(quote.id, expired);
       setNotice(`${quote.quoteNumber} was converted to draft order ${orderNumber}.`);
       setReload((n) => n + 1);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not convert this quote."); }
@@ -75,10 +80,7 @@ export default function CustomerQuotesWorkspace() {
     return status.charAt(0).toUpperCase() + status.slice(1);
   }
   function isQuoteExpired(quote: CustomerQuote) {
-    if (!quote.validUntil) return false;
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    return quote.validUntil < today;
+    return isCustomerQuoteExpired(quote.validUntil);
   }
 
   return <section className="supplier-workspace">
@@ -106,7 +108,7 @@ export default function CustomerQuotesWorkspace() {
       <p className="report-footnote">The quote is saved in ZMW. “Sent outside the app” does not send an email. Email sending is inactive until an email provider is connected. Converting an accepted quote creates a draft order; stock is reserved only when you confirm that order.</p>
     </form>
     <div className="panel data-table-wrap"><table><thead><tr><th>Quote</th><th>Customer</th><th>Saved email</th><th>Items</th><th>Total</th><th>Valid until</th><th>Status</th><th>Email result</th><th>Actions</th></tr></thead><tbody>
-      {quotes.map((quote) => <tr key={quote.id}><td>{quote.quoteNumber}</td><td>{quote.customerName}</td><td>{quote.customerEmail || "No saved email"}</td><td>{quote.lines.map((line) => `${line.productName} × ${line.quantity}`).join(", ")}</td><td>{money(quote.totalZmw)}</td><td>{quote.validUntil || "—"}</td><td>{quote.status}</td><td>
+      {quotes.map((quote) => <tr key={quote.id}><td>{quote.quoteNumber}</td><td>{quote.customerName}</td><td>{quote.customerEmail || "No saved email"}</td><td>{quote.lines.map((line) => `${line.productName} × ${line.quantity}`).join(", ")}</td><td>{money(quote.totalZmw)}</td><td>{quote.validUntil || "—"} {isQuoteExpired(quote) && <em className="customer-quote-expired">Expired</em>}</td><td>{quote.status}</td><td>
         {quote.emailSendStatus === "sent"
           ? `Sent${quote.emailSentAt ? ` · ${new Date(quote.emailSentAt).toLocaleString("en-ZM")}` : ""}`
           : quote.emailSendStatus === "failed"
@@ -116,7 +118,7 @@ export default function CustomerQuotesWorkspace() {
         {(quote.status === "draft" || quote.status === "sent") && <button className="button button-secondary button-small" onClick={() => editQuote(quote)}>Edit</button>}
         <button className="button button-secondary button-small" type="button" disabled title={!quote.customerEmail ? "Add a saved customer email before sending." : "Connect an email provider to enable sending."}>Email quote</button>
         <span className="report-footnote">{!quote.customerEmail ? "Add a saved customer email first." : "Email provider not connected."}</span>
-        {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>Convert to order</button>}
+        {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>{isQuoteExpired(quote) ? "Review expiry & convert" : "Convert to order"}</button>}
         {quote.status !== "converted" && <button className="button button-danger button-small" onClick={() => removeQuote(quote)}>Delete</button>}
         {quote.status === "converted" && <span>{quote.salesOrderNumber || "Order created"}</span>}
         <button className="button button-secondary button-small" onClick={() => setPrintQuote(quote)}>Print / Save PDF</button>
