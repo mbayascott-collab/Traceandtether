@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { accountingReportExportRows } from "../../shared/accounting-reports";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
 type TrialRow = ReportRow & { accountId: number; debitZmw: string; creditZmw: string; balanceZmw: string };
@@ -124,18 +125,10 @@ export default function AccountingWorkspace() {
       line.description, line.debitZmw, line.creditZmw,
     ])) ?? []),
   ]);
-  const exportTrialBalance = () => downloadCsv("trial-balance.csv", [
-    ["Code", "Account", "Type", "Debit ZMW", "Credit ZMW", "Balance ZMW"],
-    ...(data?.trialBalance.map((row) => [row.code, row.name, row.type, row.debitZmw, row.creditZmw, row.balanceZmw]) ?? []),
-  ]);
-  const exportIncome = () => downloadCsv("income-statement.csv", [
-    ["Code", "Account", "Type", "Amount ZMW"],
-    ...(data?.incomeStatement.map((row) => [row.code, row.name, row.type, row.amountZmw]) ?? []),
-  ]);
-  const exportBalanceSheet = () => downloadCsv("balance-sheet.csv", [
-    ["Code", "Account", "Type", "Amount ZMW"],
-    ...(data?.balanceSheet.map((row) => [row.code, row.name, row.type, row.amountZmw]) ?? []),
-  ]);
+  const exportRows = data ? accountingReportExportRows(data) : null;
+  const exportTrialBalance = () => exportRows && downloadCsv("trial-balance.csv", exportRows.trialBalance);
+  const exportIncome = () => exportRows && downloadCsv("income-statement.csv", exportRows.incomeStatement);
+  const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
 
   return <>
     <section className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Accounting</h1><p>Review and export the records posted from business activity.</p></div></section>
