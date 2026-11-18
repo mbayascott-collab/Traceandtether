@@ -70,12 +70,19 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns).where(eq(marketingCampaigns.id, id)).limit(1);
     return Boolean(campaign);
   }
+  async function hasCustomerGroup(id: number | null | undefined) {
+    if (id == null) return true;
+    const [group] = await db.select({ id: marketingCustomerGroups.id }).from(marketingCustomerGroups)
+      .where(eq(marketingCustomerGroups.id, id)).limit(1);
+    return Boolean(group);
+  }
   app.get("/api/marketing/campaigns", owner, async (_req, res) => {
     res.json({ campaigns: await db.select().from(marketingCampaigns).orderBy(desc(marketingCampaigns.createdAt)) });
   });
   app.post("/api/marketing/campaigns", owner, async (req, res) => {
     const parsed = campaignSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
+    if (!await hasCustomerGroup(parsed.data.customerGroupId)) return res.status(400).json({ error: "Choose an existing customer group." });
     const [campaign] = await db.transaction(async (tx) => {
       const [created] = await tx.insert(marketingCampaigns).values({
         ...parsed.data, trackingCode: randomUUID(),
@@ -92,6 +99,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const id = Number(req.params.id), parsed = campaignSchema.safeParse(req.body);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
     if (!parsed.success) return bad(res, parsed.error);
+    if (!await hasCustomerGroup(parsed.data.customerGroupId)) return res.status(400).json({ error: "Choose an existing customer group." });
     const [campaign] = await db.transaction(async (tx) => {
       const [updated] = await tx.update(marketingCampaigns).set({ ...parsed.data, updatedAt: new Date() }).where(eq(marketingCampaigns.id, id)).returning();
       if (updated) await recordBusinessAudit(tx, {

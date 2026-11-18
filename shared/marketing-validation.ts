@@ -10,6 +10,7 @@ const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
 }).nullable().optional();
 
 export const campaignSchema = z.object({
+  customerGroupId: z.number().int().positive().nullable().optional(),
   name: z.string().trim().min(1).max(180),
   objective: optionalText(5_000),
   channel: optionalText(80),

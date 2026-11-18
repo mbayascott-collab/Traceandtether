@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Pencil, Plus, RefreshCw, X } from "lucide-react";
 
-type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string };
+type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
 type CustomerGroupRules = { minimumFulfilledOrders?: number; maximumFulfilledOrders?: number; noOrderInLastDays?: number; minimumLifetimeSalesZmw?: string };
@@ -14,7 +14,7 @@ type MarketingReport = {
   ordersMissingProductCost: { orderNumber: string; campaignName: string }[];
   segments: { key: string; name: string; customerCount: number; fulfilledOrders: number; salesZmw: string; customers: { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; salesZmw: string }[] }[];
 };
-const campaignEmpty = { name: "", objective: "", channel: "", status: "draft", startsOn: "", endsOn: "", budgetZmw: "", notes: "" };
+const campaignEmpty = { name: "", objective: "", channel: "", status: "draft", startsOn: "", endsOn: "", budgetZmw: "", notes: "", customerGroupId: "" };
 const contentEmpty = { campaignId: "", title: "", platform: "", contentType: "Post", status: "planned", scheduledAt: "", caption: "", publishedUrl: "", notes: "" };
 const expenseEmpty = { campaignId: "", category: "Advertising", description: "", amount: "", currency: "ZMW", exchangeRateToZmw: "1", expenseDate: new Date().toISOString().slice(0, 10), paid: false, reference: "", notes: "" };
 const customerGroupEmpty = { name: "", minimumFulfilledOrders: "", maximumFulfilledOrders: "", noOrderInLastDays: "", minimumLifetimeSalesZmw: "" };
@@ -103,7 +103,7 @@ export default function MarketingWorkspace() {
     event.preventDefault(); setError(""); setMessage("");
     try {
       await request(editingCampaign ? `/api/marketing/campaigns/${editingCampaign}` : "/api/marketing/campaigns",
-        editingCampaign ? "PATCH" : "POST", { ...campaignForm, startsOn: campaignForm.startsOn || null, endsOn: campaignForm.endsOn || null, budgetZmw: campaignForm.budgetZmw || null });
+        editingCampaign ? "PATCH" : "POST", { ...campaignForm, customerGroupId: campaignForm.customerGroupId ? Number(campaignForm.customerGroupId) : null, startsOn: campaignForm.startsOn || null, endsOn: campaignForm.endsOn || null, budgetZmw: campaignForm.budgetZmw || null });
       setCampaignForm(campaignEmpty); setEditingCampaign(null); setMessage("Campaign saved."); await load();
     } catch (reason) { setError(displayError(reason)); }
   }
@@ -193,7 +193,7 @@ export default function MarketingWorkspace() {
   }
   function editCampaign(item: Campaign) {
     setEditingCampaign(item.id);
-    setCampaignForm({ name: item.name, objective: item.objective ?? "", channel: item.channel ?? "", status: item.status, startsOn: item.startsOn ?? "", endsOn: item.endsOn ?? "", budgetZmw: item.budgetZmw ?? "", notes: item.notes ?? "" });
+    setCampaignForm({ name: item.name, objective: item.objective ?? "", channel: item.channel ?? "", status: item.status, startsOn: item.startsOn ?? "", endsOn: item.endsOn ?? "", budgetZmw: item.budgetZmw ?? "", notes: item.notes ?? "", customerGroupId: item.customerGroupId !== null && customerGroups.some((group) => group.id === item.customerGroupId) ? String(item.customerGroupId) : "" });
   }
   function editItem(item: ContentItem) {
     setEditingContent(item.id);
@@ -217,11 +217,15 @@ export default function MarketingWorkspace() {
               <div className="form-grid"><label>Channel<input placeholder="Social, retail, email…" value={campaignForm.channel} onChange={(e) => setCampaignForm({ ...campaignForm, channel: e.target.value })} /></label><label>Status<select value={campaignForm.status} onChange={(e) => setCampaignForm({ ...campaignForm, status: e.target.value })}>{["draft","active","paused","completed","cancelled"].map((x) => <option key={x}>{x}</option>)}</select></label></div>
               <label>Objective<textarea rows={2} value={campaignForm.objective} onChange={(e) => setCampaignForm({ ...campaignForm, objective: e.target.value })} /></label>
               <div className="form-grid"><label>Starts<input type="date" value={campaignForm.startsOn} onChange={(e) => setCampaignForm({ ...campaignForm, startsOn: e.target.value })} /></label><label>Ends<input type="date" value={campaignForm.endsOn} onChange={(e) => setCampaignForm({ ...campaignForm, endsOn: e.target.value })} /></label></div>
+               <label>Saved customer group<select value={campaignForm.customerGroupId} onChange={(e) => setCampaignForm({ ...campaignForm, customerGroupId: e.target.value })}><option value="">No saved group</option>{customerGroups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}</option>)}</select><span className="field-hint">Membership stays linked to the group’s current saved rules.</span></label>
               <label>Budget (ZMW, optional)<input type="number" min="0" step="0.01" value={campaignForm.budgetZmw} onChange={(e) => setCampaignForm({ ...campaignForm, budgetZmw: e.target.value })} /></label>
               <button className="button button-primary button-small"><Plus /> {editingCampaign ? "Save campaign" : "Add campaign"}</button>
               {editingCampaign && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCampaign(null); setCampaignForm(campaignEmpty); }}><X /> Cancel edit</button>}
             </form>
-             <div className="marketing-list">{campaigns.map((item) => <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button>{canManageCustomerGroups && <button className="icon-button" aria-label={`Replace shop link for ${item.name}`} title="Replace shop link" onClick={() => void replaceShopLink(item)}><RefreshCw /></button>}<button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>)}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
+              <div className="marketing-list">{campaigns.map((item) => {
+                const group = item.customerGroupId === null ? undefined : customerGroups.find((savedGroup) => savedGroup.id === item.customerGroupId);
+                return <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}{group ? ` · ${group.name} · ${group.memberCount} customer${group.memberCount === 1 ? "" : "s"}` : ""}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button>{canManageCustomerGroups && <button className="icon-button" aria-label={`Replace shop link for ${item.name}`} title="Replace shop link" onClick={() => void replaceShopLink(item)}><RefreshCw /></button>}<button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>;
+              })}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
           </section>
 
           <section className="panel marketing-section">

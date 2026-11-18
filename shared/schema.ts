@@ -723,6 +723,7 @@ export const marketingCampaigns = pgTable(
   "marketing_campaigns",
   {
     id: serial("id").primaryKey(),
+    customerGroupId: integer("customer_group_id").references(() => marketingCustomerGroups.id, { onDelete: "set null" }),
     name: varchar("name", { length: 180 }).notNull(),
     objective: text("objective"),
     channel: varchar("channel", { length: 80 }),
@@ -738,6 +739,7 @@ export const marketingCampaigns = pgTable(
   (table) => [
     uniqueIndex("marketing_campaigns_tracking_code_unique").on(table.trackingCode),
     index("marketing_campaigns_status_idx").on(table.status),
+    index("marketing_campaigns_customer_group_idx").on(table.customerGroupId),
     check("marketing_campaigns_budget_nonnegative", sql`${table.budgetZmw} is null or ${table.budgetZmw} >= 0`),
     check("marketing_campaigns_date_order", sql`${table.startsOn} is null or ${table.endsOn} is null or ${table.endsOn} >= ${table.startsOn}`),
   ],

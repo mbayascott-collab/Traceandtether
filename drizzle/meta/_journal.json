@@ -260,6 +260,13 @@
       "when": 1794998882976,
       "tag": "0036_heavy_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794999682380,
+      "tag": "0037_marketing_campaign_customer_group",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,3 @@
+ALTER TABLE "marketing_campaigns" ADD COLUMN "customer_group_id" integer;--> statement-breakpoint
+ALTER TABLE "marketing_campaigns" ADD CONSTRAINT "marketing_campaigns_customer_group_id_marketing_customer_groups_id_fk" FOREIGN KEY ("customer_group_id") REFERENCES "public"."marketing_customer_groups"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "marketing_campaigns_customer_group_idx" ON "marketing_campaigns" USING btree ("customer_group_id");

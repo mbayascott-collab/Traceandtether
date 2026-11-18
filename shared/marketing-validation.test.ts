@@ -6,6 +6,10 @@ import { matchesCustomerGroup } from "./marketing-customer-groups";
 test("validates campaign names, statuses, budgets, and date order", () => {
   const campaign = { name: "Winter promotion", objective: "", channel: "Social", status: "draft", startsOn: "2026-11-01", endsOn: "2026-11-30", budgetZmw: "2500.00", notes: "" };
   assert.equal(campaignSchema.safeParse(campaign).success, true);
+  assert.equal(campaignSchema.safeParse({ ...campaign, customerGroupId: 12 }).success, true);
+  assert.equal(campaignSchema.safeParse({ ...campaign, customerGroupId: null }).success, true);
+  assert.equal(campaignSchema.safeParse({ ...campaign, customerGroupId: 0 }).success, false);
+  assert.equal(campaignSchema.safeParse({ ...campaign, customerGroupId: "12" }).success, false);
   assert.equal(campaignSchema.safeParse({ ...campaign, endsOn: "2026-10-01" }).success, false);
   assert.equal(campaignSchema.safeParse({ ...campaign, startsOn: "2026-02-30" }).success, false);
   assert.equal(campaignSchema.safeParse({ ...campaign, budgetZmw: "-10" }).success, false);
