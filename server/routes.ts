@@ -19,32 +19,30 @@ import { registerPaymentRoutes } from "./payment-routes";
 import {
   categoryInputSchema, productInputSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
+import {
+  createBusinessAccessMiddleware, isPrimaryOwnerEmail, isProtectedAccessTarget, resolveBusinessAccount,
+  normalizeVerifiedEmail, requireAccessManager, type AccountGrant, type BusinessRole, type UserResolution,
+} from "./access-control";
 
-type Actor = { clerkUserId: string; email: string; role: "owner" | "manager" };
-type UserResolution =
-  | { authorized: true; actor: Actor }
-  | {
-      authorized: false;
-      email: string | null;
-      reason: "owner_not_configured" | "email_not_approved" | "email_not_verified";
-    };
+type Actor = { clerkUserId: string; email: string; role: BusinessRole };
 
-async function resolveUser(userId: string): Promise<UserResolution> {
+export async function resolveUser(userId: string): Promise<UserResolution> {
   const user = await clerkClient.users.getUser(userId);
   const primaryEmail = user.emailAddresses.find(
     (address) => address.id === user.primaryEmailAddressId,
   );
 
-  if (!primaryEmail || primaryEmail.verification?.status !== "verified") {
-    return { authorized: false, email: primaryEmail?.emailAddress ?? null, reason: "email_not_verified" };
+  const verified = normalizeVerifiedEmail(primaryEmail);
+  if ("reason" in verified) {
+    return { authorized: false as const, email: verified.email, reason: verified.reason };
   }
 
-  const email = primaryEmail.emailAddress.trim().toLowerCase();
+  const email = verified.email;
   const configuredOwner = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
   if (!configuredOwner) {
     return { authorized: false, email, reason: "owner_not_configured" };
   }
-  if (email === configuredOwner) {
+  if (isPrimaryOwnerEmail(email, configuredOwner)) {
     await db.insert(appUserAccess).values({ email, role: "owner", active: true })
       .onConflictDoNothing();
   }
@@ -55,42 +53,20 @@ async function resolveUser(userId: string): Promise<UserResolution> {
     .where(eq(appUserAccess.email, email))
     .limit(1);
 
-  if (!grant || !grant.active || grant.email !== email || !["owner", "manager"].includes(grant.role)) {
-    return { authorized: false, email, reason: "email_not_approved" };
-  }
-  await db.insert(appUsers).values({ clerkUserId: userId, email, role: grant.role })
-    .onConflictDoUpdate({ target: appUsers.clerkUserId, set: { email, role: grant.role, updatedAt: new Date() } });
-  return { authorized: true, actor: { clerkUserId: userId, email, role: grant.role as "owner" | "manager" } };
+  const resolution = resolveBusinessAccount(userId, primaryEmail, grant as AccountGrant | undefined);
+  if (!resolution.authorized) return resolution;
+  await db.insert(appUsers).values({ clerkUserId: userId, email, role: resolution.actor.role })
+    .onConflictDoUpdate({
+      target: appUsers.clerkUserId,
+      set: { email, role: resolution.actor.role, updatedAt: new Date() },
+    });
+  return resolution;
 }
 
-export const requireBusinessAccess: RequestHandler = async (req, res, next) => {
-  const { userId } = getAuth(req);
-  if (!userId) {
-    res.status(401).json({ error: "Sign in to access the administration area." });
-    return;
-  }
-
-  try {
-    const result = await resolveUser(userId);
-    if (!result.authorized) {
-      const status = result.reason === "owner_not_configured" ? 503 : 403;
-      const message =
-        result.reason === "owner_not_configured"
-          ? "Owner access is not configured yet."
-          : "This verified account is not approved for business access.";
-      res.status(status).json({ error: message });
-      return;
-    }
-    res.locals.actor = result.actor;
-    next();
-  } catch (error) {
-    console.error(
-      "Unable to verify administrator access.",
-      error instanceof Error ? error.name : "UnknownError",
-    );
-    res.status(503).json({ error: "Business access could not be verified. Try again shortly." });
-  }
-};
+export const requireBusinessAccess: RequestHandler = createBusinessAccessMiddleware(
+  resolveUser,
+  (req) => getAuth(req).userId,
+);
 
 const productFiltersSchema = z.object({
   q: z.string().trim().max(160).optional(),
@@ -169,7 +145,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ entries });
   });
 
-  app.post("/api/user-access", requireBusinessAccess, async (req, res) => {
+  app.post("/api/user-access", requireBusinessAccess, requireAccessManager(), async (req, res) => {
     const parsed = z.object({
       email: z.string().trim().email().max(320),
       displayName: z.string().trim().max(120).nullable().optional(),
@@ -179,7 +155,7 @@ export function registerApiRoutes(app: import("express").Express) {
       return;
     }
     const email = parsed.data.email.toLowerCase();
-    if (email === process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase()) {
+    if (isPrimaryOwnerEmail(email, process.env.INITIAL_ADMIN_EMAIL)) {
       res.status(409).json({ error: "The primary owner account cannot be added as a manager." });
       return;
     }
@@ -199,7 +175,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.status(201).json({ email, displayName: parsed.data.displayName || null, role: "manager", active: true });
   });
 
-  app.patch("/api/user-access/:email", requireBusinessAccess, async (req, res) => {
+  app.patch("/api/user-access/:email", requireBusinessAccess, requireAccessManager(), async (req, res) => {
     const parsed = z.object({ active: z.boolean() }).safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Choose whether this account should have access." });
@@ -207,7 +183,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
     const email = String(req.params.email).trim().toLowerCase();
     const actor = res.locals.actor as Actor;
-    if (email === actor.email || email === process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase()) {
+    if (isProtectedAccessTarget(email, actor.email, process.env.INITIAL_ADMIN_EMAIL)) {
       res.status(409).json({ error: "You cannot change access for the primary owner or your own account." });
       return;
     }
