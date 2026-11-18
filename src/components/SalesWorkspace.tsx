@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
+  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
@@ -18,6 +18,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [orders, setOrders] = useState<SalesOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
+  const [shopAttemptSummary, setShopAttemptSummary] = useState<{ accepted: number; blocked: number } | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
@@ -36,11 +37,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   useEffect(() => {
     let alive = true;
-    Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
-      .then(([c, o, p, m]) => { if (alive) { setCustomers(c); setOrders(o); setProducts(p.products); setCampaigns(m); } })
+    Promise.all([
+      fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns(),
+      mode === "orders" ? fetchPublicShopOrderAttemptSummary() : Promise.resolve(null),
+    ])
+      .then(([c, o, p, m, summary]) => { if (alive) { setCustomers(c); setOrders(o); setProducts(p.products); setCampaigns(m); setShopAttemptSummary(summary); } })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load sales records."); });
     return () => { alive = false; };
-  }, [reload]);
+  }, [reload, mode]);
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); const form = event.currentTarget; setError(""); setNotice("");
     try { await action(new FormData(form)); form.reset(); setLines([emptyLine()]); setEditingCustomer(null); setNotice("Saved."); setReload((n) => n + 1); }
@@ -199,6 +203,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       })()}
     </>}
     {mode === "orders" && <>
+      <section className="panel" aria-labelledby="public-shop-attempts-heading">
+        <div className="panel-heading"><div><h2 id="public-shop-attempts-heading">Public shop order requests</h2><p>Lifetime totals. Blocked counts include requests stopped by the shop’s anti-abuse checks.</p></div></div>
+        <div className="metric-grid">
+          <article className="metric-card"><div className="metric-top"><span>Accepted requests</span></div><strong className="metric-value">{shopAttemptSummary?.accepted ?? "—"}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Blocked requests</span></div><strong className="metric-value">{shopAttemptSummary?.blocked ?? "—"}</strong></article>
+        </div>
+        <p className="report-footnote">Only totals are saved. Rejected visitors’ contact details are not collected for this summary.</p>
+      </section>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createSalesOrder({
         customerId: Number(d.get("customerId")), deliveryAddress: String(d.get("deliveryAddress") || "") || null, notes: String(d.get("notes") || "") || null,
         lines: lines.map((line) => ({ productId: Number(line.productId), quantity: Number(line.quantity), unitPriceZmw: line.unitPriceZmw })),

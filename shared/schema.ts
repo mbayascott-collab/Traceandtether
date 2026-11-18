@@ -825,3 +825,17 @@ export const publicShopOrderLimits = pgTable(
     check("public_shop_order_limits_hit_count_positive", sql`${table.hitCount} > 0`),
   ],
 );
+
+export const publicShopOrderAttemptCounts = pgTable(
+  "public_shop_order_attempt_counts",
+  {
+    id: integer("id").primaryKey().default(1),
+    acceptedCount: integer("accepted_count").notNull().default(0),
+    blockedCount: integer("blocked_count").notNull().default(0),
+  },
+  (table) => [
+    check("public_shop_order_attempt_counts_singleton", sql`${table.id} = 1`),
+    check("public_shop_order_attempt_counts_accepted_nonnegative", sql`${table.acceptedCount} >= 0`),
+    check("public_shop_order_attempt_counts_blocked_nonnegative", sql`${table.blockedCount} >= 0`),
+  ],
+);

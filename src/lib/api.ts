@@ -434,6 +434,9 @@ export async function saveCustomer(input: Omit<Customer, "id">, id?: number): Pr
 export async function fetchSalesOrders(): Promise<SalesOrder[]> {
   return (await request<{ orders: SalesOrder[] }>("/api/sales-orders")).orders;
 }
+export async function fetchPublicShopOrderAttemptSummary(): Promise<{ accepted: number; blocked: number }> {
+  return (await request<{ summary: { accepted: number; blocked: number } }>("/api/shop/order-attempt-summary")).summary;
+}
 export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
   return (await request<{ quotes: CustomerQuote[] }>("/api/customer-quotes")).quotes;
 }

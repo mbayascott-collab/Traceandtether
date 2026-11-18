@@ -5,11 +5,12 @@ import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
+import { publicShopAttemptSummary, recordPublicShopAttempt } from "./public-shop-analytics";
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
@@ -201,6 +202,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       body.website,
     );
     if (!check.ok) {
+      await recordPublicShopAttempt(db, "blocked");
       if (check.reason === "rate_limited") {
         res.setHeader("Retry-After", String(check.retryAfterSeconds));
         return res.status(429).json({ error: "Too many order requests. Please try again later." });
@@ -265,10 +267,19 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
           salesOrderId: order.id, campaignId: sourceCampaign.id, source: "campaign_link",
         });
       }
+      await recordPublicShopAttempt(tx, "accepted");
       return { orderNumber };
     });
     if ("error" in result) return res.status(409).json({ error: result.error });
     res.status(201).json({ orderNumber: result.orderNumber });
+  });
+
+  app.get("/api/shop/order-attempt-summary", owner, async (_req, res) => {
+    const [counts] = await db.select({
+      acceptedCount: publicShopOrderAttemptCounts.acceptedCount,
+      blockedCount: publicShopOrderAttemptCounts.blockedCount,
+    }).from(publicShopOrderAttemptCounts).limit(1);
+    res.json({ summary: publicShopAttemptSummary(counts) });
   });
 
   app.get("/api/customers", owner, async (_req, res) => {

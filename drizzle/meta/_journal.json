@@ -239,6 +239,13 @@
       "when": 1794996571901,
       "tag": "0033_public_shop_order_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794996799238,
+      "tag": "0034_cold_fixer",
+      "breakpoints": true
     }
   ]
 }
