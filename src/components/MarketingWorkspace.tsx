@@ -4,6 +4,9 @@ import { Copy, Pencil, Plus, RefreshCw, X } from "lucide-react";
 type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
+type CustomerGroupRules = { minimumFulfilledOrders?: number; maximumFulfilledOrders?: number; noOrderInLastDays?: number; minimumLifetimeSalesZmw?: string };
+type CustomerGroup = { id: number; name: string; rules: CustomerGroupRules; memberCount: number };
+type CustomerGroupMember = { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; lifetimeSalesZmw: string; lastOrderDate: string | null };
 type MarketingReport = {
   period: { from: string | null; to: string | null };
   totals: { spendZmw: string; attributedRevenueZmw: string; attributedOrders: number; campaignLinkOrders: number; ordersWithoutCampaignLinks: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
@@ -13,13 +16,14 @@ type MarketingReport = {
 const campaignEmpty = { name: "", objective: "", channel: "", status: "draft", startsOn: "", endsOn: "", budgetZmw: "", notes: "" };
 const contentEmpty = { campaignId: "", title: "", platform: "", contentType: "Post", status: "planned", scheduledAt: "", caption: "", publishedUrl: "", notes: "" };
 const expenseEmpty = { campaignId: "", category: "Advertising", description: "", amount: "", currency: "ZMW", exchangeRateToZmw: "1", expenseDate: new Date().toISOString().slice(0, 10), paid: false, reference: "", notes: "" };
+const customerGroupEmpty = { name: "", minimumFulfilledOrders: "", maximumFulfilledOrders: "", noOrderInLastDays: "", minimumLifetimeSalesZmw: "" };
 
 async function request(path: string, method = "GET", body?: unknown) {
   const response = await fetch(path, {
     method, headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await response.json();
+  const data = response.status === 204 ? null : await response.json();
   if (!response.ok) throw new Error(data.error || "Request failed.");
   return data;
 }
@@ -50,6 +54,14 @@ export default function MarketingWorkspace() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [content, setContent] = useState<ContentItem[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [customerGroups, setCustomerGroups] = useState<CustomerGroup[]>([]);
+  const [canManageCustomerGroups, setCanManageCustomerGroups] = useState(false);
+  const [canViewCustomerGroupMembers, setCanViewCustomerGroupMembers] = useState(false);
+  const [customerGroupForm, setCustomerGroupForm] = useState(customerGroupEmpty);
+  const [editingCustomerGroup, setEditingCustomerGroup] = useState<number | null>(null);
+  const [selectedCustomerGroup, setSelectedCustomerGroup] = useState<number | null>(null);
+  const [customerGroupMembers, setCustomerGroupMembers] = useState<CustomerGroupMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
   const [campaignForm, setCampaignForm] = useState(campaignEmpty);
   const [contentForm, setContentForm] = useState(contentEmpty);
   const [expenseForm, setExpenseForm] = useState(expenseEmpty);
@@ -67,10 +79,12 @@ export default function MarketingWorkspace() {
   async function load() {
     setLoading(true);
     try {
-      const [c, p, e] = await Promise.all([
+      const [c, p, e, g] = await Promise.all([
         request("/api/marketing/campaigns"), request("/api/marketing/content"), request("/api/marketing/expenses"),
+        request("/api/marketing/customer-groups"),
       ]);
-      setCampaigns(c.campaigns); setContent(p.content); setExpenses(e.expenses); setError("");
+      setCampaigns(c.campaigns); setContent(p.content); setExpenses(e.expenses);
+      setCustomerGroups(g.groups); setCanManageCustomerGroups(g.canManage); setCanViewCustomerGroupMembers(g.canViewMembers); setError("");
     } catch (reason) { setError(displayError(reason)); }
     finally { setLoading(false); }
   }
@@ -107,6 +121,47 @@ export default function MarketingWorkspace() {
     try {
       const result = await request("/api/marketing/expenses", "POST", { ...expenseForm, campaignId: expenseForm.campaignId ? Number(expenseForm.campaignId) : null });
       setExpenseForm(expenseEmpty); setMessage(`Expense recorded. ${money(result.amountZmw)} posted to accounting.`); await load();
+    } catch (reason) { setError(displayError(reason)); }
+  }
+  async function submitCustomerGroup(event: FormEvent) {
+    event.preventDefault(); setError(""); setMessage("");
+    const rules: CustomerGroupRules = {};
+    if (customerGroupForm.minimumFulfilledOrders !== "") rules.minimumFulfilledOrders = Number(customerGroupForm.minimumFulfilledOrders);
+    if (customerGroupForm.maximumFulfilledOrders !== "") rules.maximumFulfilledOrders = Number(customerGroupForm.maximumFulfilledOrders);
+    if (customerGroupForm.noOrderInLastDays !== "") rules.noOrderInLastDays = Number(customerGroupForm.noOrderInLastDays);
+    if (customerGroupForm.minimumLifetimeSalesZmw !== "") rules.minimumLifetimeSalesZmw = customerGroupForm.minimumLifetimeSalesZmw;
+    try {
+      await request(editingCustomerGroup ? `/api/marketing/customer-groups/${editingCustomerGroup}` : "/api/marketing/customer-groups",
+        editingCustomerGroup ? "PATCH" : "POST", { name: customerGroupForm.name, rules });
+      setCustomerGroupForm(customerGroupEmpty); setEditingCustomerGroup(null); setSelectedCustomerGroup(null); setCustomerGroupMembers([]);
+      setMessage("Customer group saved."); await load();
+    } catch (reason) { setError(displayError(reason)); }
+  }
+  async function showCustomerGroupMembers(groupId: number) {
+    setSelectedCustomerGroup(groupId); setMembersLoading(true); setError("");
+    try {
+      const result = await request(`/api/marketing/customer-groups/${groupId}/members`);
+      setCustomerGroupMembers(result.members);
+    } catch (reason) { setError(displayError(reason)); setCustomerGroupMembers([]); }
+    finally { setMembersLoading(false); }
+  }
+  function editCustomerGroup(group: CustomerGroup) {
+    setEditingCustomerGroup(group.id); setSelectedCustomerGroup(null); setCustomerGroupMembers([]);
+    setCustomerGroupForm({
+      name: group.name,
+      minimumFulfilledOrders: group.rules.minimumFulfilledOrders === undefined ? "" : String(group.rules.minimumFulfilledOrders),
+      maximumFulfilledOrders: group.rules.maximumFulfilledOrders === undefined ? "" : String(group.rules.maximumFulfilledOrders),
+      noOrderInLastDays: group.rules.noOrderInLastDays === undefined ? "" : String(group.rules.noOrderInLastDays),
+      minimumLifetimeSalesZmw: group.rules.minimumLifetimeSalesZmw ?? "",
+    });
+  }
+  async function deleteCustomerGroup(group: CustomerGroup) {
+    if (!window.confirm(`Remove the customer group “${group.name}”?`)) return;
+    setError(""); setMessage("");
+    try {
+      await request(`/api/marketing/customer-groups/${group.id}`, "DELETE");
+      if (selectedCustomerGroup === group.id) { setSelectedCustomerGroup(null); setCustomerGroupMembers([]); }
+      setMessage("Customer group removed."); await load();
     } catch (reason) { setError(displayError(reason)); }
   }
   async function copyShopLink(campaign: Campaign) {
@@ -186,8 +241,38 @@ export default function MarketingWorkspace() {
           </section>
         </div>
       )}
+      <section className="panel marketing-section">
+        <div className="panel-heading"><div><h2>Customer groups</h2><span>Save owner-only groups using fulfilled orders, sales, and order recency.</span></div></div>
+        {canManageCustomerGroups && <form className="marketing-form" onSubmit={submitCustomerGroup}>
+          <label>Group name<input required maxLength={120} value={customerGroupForm.name} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, name: e.target.value })} /></label>
+          <label>Minimum fulfilled orders<input type="number" min="1" step="1" value={customerGroupForm.minimumFulfilledOrders} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, minimumFulfilledOrders: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+          <label>Maximum fulfilled orders<input type="number" min="0" step="1" value={customerGroupForm.maximumFulfilledOrders} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, maximumFulfilledOrders: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+          <label>No order in the last (days)<input type="number" min="1" max="3650" step="1" value={customerGroupForm.noOrderInLastDays} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, noOrderInLastDays: e.target.value })} /><span className="field-hint">Includes customers who have never had a fulfilled order.</span></label>
+          <label>Minimum lifetime sales (ZMW)<input type="number" min="0" step="0.01" value={customerGroupForm.minimumLifetimeSalesZmw} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, minimumLifetimeSalesZmw: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+          <button className="button button-primary button-small"><Plus /> {editingCustomerGroup ? "Save customer group" : "Add customer group"}</button>
+          {editingCustomerGroup && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCustomerGroup(null); setCustomerGroupForm(customerGroupEmpty); }}><X /> Cancel edit</button>}
+        </form>}
+        <div className="marketing-list">
+          {customerGroups.map((group) => <article className="marketing-row" key={group.id}>
+            <div><strong>{group.name}</strong><span>{group.memberCount} customer{group.memberCount === 1 ? "" : "s"} match the saved rules</span></div>
+            {canViewCustomerGroupMembers && <button className="button button-secondary button-small" onClick={() => void showCustomerGroupMembers(group.id)}>View members</button>}
+            {canManageCustomerGroups && <button className="icon-button" aria-label={`Edit ${group.name}`} onClick={() => editCustomerGroup(group)}><Pencil /></button>}
+            {canManageCustomerGroups && <button className="icon-button" aria-label={`Remove ${group.name}`} onClick={() => void deleteCustomerGroup(group)}><X /></button>}
+          </article>)}
+          {customerGroups.length === 0 && <p className="muted-empty">No saved customer groups yet.</p>}
+        </div>
+        {selectedCustomerGroup !== null && <div className="marketing-segment-list">
+          <h3>{customerGroups.find((group) => group.id === selectedCustomerGroup)?.name ?? "Customer group"} members</h3>
+          {membersLoading ? <p>Loading customer group members…</p> : (
+            <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th><th>Last order</th></tr></thead><tbody>
+              {customerGroupMembers.map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.lifetimeSalesZmw)}</td><td>{customer.lastOrderDate ?? "Never"}</td></tr>)}
+              {!membersLoading && customerGroupMembers.length === 0 && <tr><td colSpan={5}>No customers match these rules.</td></tr>}
+            </tbody></table></div>
+          )}
+        </div>}
+      </section>
       <section className="panel marketing-report">
-        <div className="panel-heading"><div><h2>Marketing reports</h2><span>Campaign sales include fulfilled orders linked to a campaign. Customer groups use lifetime fulfilled orders.</span></div></div>
+        <div className="panel-heading"><div><h2>Marketing reports</h2><span>Campaign sales include fulfilled orders linked to a campaign. Built-in customer segments use lifetime fulfilled orders; saved groups can also use sales and recency.</span></div></div>
         <div className="marketing-report-controls">
           <label>From<input type="date" value={reportFrom} onChange={(e) => setReportFrom(e.target.value)} /></label>
           <label>To<input type="date" value={reportTo} onChange={(e) => setReportTo(e.target.value)} /></label>

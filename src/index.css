@@ -2561,6 +2561,12 @@ textarea:focus-visible {
   font-weight: 700;
 }
 
+.marketing-form .field-hint {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+}
+
 .marketing-form input,
 .marketing-form select,
 .marketing-form textarea {

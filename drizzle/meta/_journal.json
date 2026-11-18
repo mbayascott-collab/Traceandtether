@@ -169,6 +169,13 @@
       "when": 1794990388950,
       "tag": "0023_short_black_crow",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794990889742,
+      "tag": "0024_marketing_customer_groups",
+      "breakpoints": true
     }
   ]
 }

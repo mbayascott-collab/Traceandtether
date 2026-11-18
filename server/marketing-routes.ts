@@ -3,8 +3,9 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
-import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
-import { campaignSchema, contentSchema, marketingExpenseSchema } from "../shared/marketing-validation";
+import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
+import { matchesCustomerGroup } from "../shared/marketing-customer-groups";
+import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import { cents, formatCents, postJournal } from "./accounting-posting";
 
 const bad = (res: import("express").Response, error: z.ZodError) => res.status(400).json({ error: error.issues[0]?.message ?? "Check the submitted details." });
@@ -14,7 +15,55 @@ const ratio = (numerator: bigint, denominator: bigint) => {
   return `${value / 100n}.${String(value % 100n).padStart(2, "0")}`;
 };
 
+async function loadCustomerHistory() {
+  const [allCustomers, orders, lines, deliveryRows] = await Promise.all([
+    db.select().from(customers),
+    db.select().from(salesOrders).where(eq(salesOrders.status, "fulfilled")),
+    db.select().from(salesOrderLines),
+    db.select({
+      orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+      quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+    }).from(salesDeliveryLines)
+      .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+      .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
+  ]);
+  const revenueByOrder = new Map<number, bigint>();
+  const latestDeliveryByOrder = new Map<number, string>();
+  const ordersWithDeliveries = new Set<number>();
+  const orderById = new Map(orders.map((order) => [order.id, order]));
+  for (const row of deliveryRows) {
+    ordersWithDeliveries.add(row.orderId);
+    revenueByOrder.set(row.orderId, (revenueByOrder.get(row.orderId) ?? 0n) + cents(row.unitPriceZmw) * BigInt(row.quantity));
+    const latest = latestDeliveryByOrder.get(row.orderId);
+    if (!latest || row.deliveryDate > latest) latestDeliveryByOrder.set(row.orderId, row.deliveryDate);
+  }
+  for (const line of lines) {
+    const order = orderById.get(line.salesOrderId);
+    if (order?.status !== "fulfilled" || ordersWithDeliveries.has(order.id)) continue;
+    revenueByOrder.set(order.id, (revenueByOrder.get(order.id) ?? 0n) + cents(line.unitPriceZmw) * BigInt(line.quantity));
+  }
+  const history = new Map<number, { fulfilledOrders: number; lifetimeSalesCents: bigint; lastOrderDate: string | null }>();
+  for (const order of orders) {
+    if (!revenueByOrder.has(order.id)) continue;
+    const current = history.get(order.customerId) ?? { fulfilledOrders: 0, lifetimeSalesCents: 0n, lastOrderDate: null };
+    current.fulfilledOrders += 1;
+    current.lifetimeSalesCents += revenueByOrder.get(order.id) ?? 0n;
+    const date = latestDeliveryByOrder.get(order.id) ?? order.fulfilledAt?.toISOString().slice(0, 10) ?? order.orderDate;
+    if (!current.lastOrderDate || date > current.lastOrderDate) current.lastOrderDate = date;
+    history.set(order.customerId, current);
+  }
+  return { customers: allCustomers, history };
+}
+
 export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
+  const ownerOnly: RequestHandler = (_req, res, next) => {
+    if (res.locals.actor?.role !== "owner") {
+      res.status(403).json({ error: "Only the business owner can manage customer groups." });
+      return;
+    }
+    next();
+  };
+
   async function hasCampaign(id: number | null | undefined) {
     if (!id) return true;
     const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns).where(eq(marketingCampaigns.id, id)).limit(1);
@@ -92,6 +141,72 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return [created, amountZmw];
     });
     res.status(201).json({ expense, amountZmw: amountResult });
+  });
+
+  app.get("/api/marketing/customer-groups", owner, async (_req, res) => {
+    const [groups, { customers: allCustomers, history }] = await Promise.all([
+      db.select().from(marketingCustomerGroups).orderBy(asc(marketingCustomerGroups.name)),
+      loadCustomerHistory(),
+    ]);
+    res.json({
+      groups: groups.map((group) => ({
+        ...group,
+        memberCount: allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
+          fulfilledOrders: history.get(customer.id)?.fulfilledOrders ?? 0,
+          lifetimeSalesZmw: formatCents(history.get(customer.id)?.lifetimeSalesCents ?? 0n),
+          lastOrderDate: history.get(customer.id)?.lastOrderDate ?? null,
+        })).length,
+      })),
+      canManage: res.locals.actor?.role === "owner",
+      canViewMembers: res.locals.actor?.role === "owner",
+    });
+  });
+  app.get("/api/marketing/customer-groups/:id/members", owner, ownerOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
+    const [group] = await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
+    if (!group) return res.status(404).json({ error: "Customer group not found." });
+    const { customers: allCustomers, history } = await loadCustomerHistory();
+    const members = allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
+      fulfilledOrders: history.get(customer.id)?.fulfilledOrders ?? 0,
+      lifetimeSalesZmw: formatCents(history.get(customer.id)?.lifetimeSalesCents ?? 0n),
+      lastOrderDate: history.get(customer.id)?.lastOrderDate ?? null,
+    })).map((customer) => {
+      const stats = history.get(customer.id);
+      return {
+        id: customer.id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        fulfilledOrders: stats?.fulfilledOrders ?? 0,
+        lifetimeSalesZmw: formatCents(stats?.lifetimeSalesCents ?? 0n),
+        lastOrderDate: stats?.lastOrderDate ?? null,
+      };
+    });
+    res.json({ group, members });
+  });
+  app.post("/api/marketing/customer-groups", owner, ownerOnly, async (req, res) => {
+    const parsed = customerGroupSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error);
+    const [group] = await db.insert(marketingCustomerGroups).values(parsed.data).returning();
+    res.status(201).json({ group });
+  });
+  app.patch("/api/marketing/customer-groups/:id", owner, ownerOnly, async (req, res) => {
+    const id = Number(req.params.id), parsed = customerGroupSchema.safeParse(req.body);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
+    if (!parsed.success) return bad(res, parsed.error);
+    const [group] = await db.update(marketingCustomerGroups).set({
+      ...parsed.data, updatedAt: new Date(),
+    }).where(eq(marketingCustomerGroups.id, id)).returning();
+    if (!group) return res.status(404).json({ error: "Customer group not found." });
+    res.json({ group });
+  });
+  app.delete("/api/marketing/customer-groups/:id", owner, ownerOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
+    const [group] = await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).returning({ id: marketingCustomerGroups.id });
+    if (!group) return res.status(404).json({ error: "Customer group not found." });
+    res.status(204).end();
   });
 
   app.get("/api/marketing/reports", owner, async (req, res) => {

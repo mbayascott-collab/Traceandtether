@@ -49,3 +49,22 @@ export const marketingExpenseSchema = z.object({
   reference: optionalText(120),
   notes: optionalText(5_000),
 }).strict();
+
+export const customerGroupSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  rules: z.object({
+    minimumFulfilledOrders: z.number().int().min(1).max(100_000).optional(),
+    maximumFulfilledOrders: z.number().int().min(0).max(100_000).optional(),
+    noOrderInLastDays: z.number().int().min(1).max(3_650).optional(),
+    minimumLifetimeSalesZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/).optional(),
+  }).strict().refine((rules) => Object.keys(rules).length > 0, {
+    message: "Choose at least one customer group rule.",
+  }).refine((rules) => rules.minimumFulfilledOrders === undefined
+    || rules.maximumFulfilledOrders === undefined
+    || rules.minimumFulfilledOrders <= rules.maximumFulfilledOrders, {
+    message: "Minimum orders cannot exceed maximum orders.",
+    path: ["maximumFulfilledOrders"],
+  }),
+}).strict();
+
+export type CustomerGroupRules = z.infer<typeof customerGroupSchema>["rules"];

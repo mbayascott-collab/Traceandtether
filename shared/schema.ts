@@ -629,6 +629,23 @@ export const marketingCampaigns = pgTable(
   ],
 );
 
+export const marketingCustomerGroups = pgTable(
+  "marketing_customer_groups",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 120 }).notNull(),
+    rules: jsonb("rules").$type<{
+      minimumFulfilledOrders?: number;
+      maximumFulfilledOrders?: number;
+      noOrderInLastDays?: number;
+      minimumLifetimeSalesZmw?: string;
+    }>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("marketing_customer_groups_name_idx").on(table.name)],
+);
+
 export const marketingContentItems = pgTable(
   "marketing_content_items",
   {
