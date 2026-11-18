@@ -1,0 +1,295 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import express, { type RequestHandler } from "express";
+import { eq } from "drizzle-orm";
+import test from "node:test";
+import {
+  accountingAccounts, businessPayments, customers, journalEntries, journalLines,
+  products, purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, suppliers,
+} from "../shared/schema";
+import { cents, journalLinesAreBalanced } from "./accounting-posting";
+
+test("payment routes post both directions to the selected funds account", {
+  skip: !process.env.DATABASE_URL || process.env.RUN_PAYMENT_POSTING_INTEGRATION !== "1",
+}, async (t) => {
+  const [
+    { db, pool },
+    { registerPaymentRoutes },
+    { postJournal },
+  ] = await Promise.all([
+    import("./db"),
+    import("./payment-routes"),
+    import("./accounting-posting"),
+  ]);
+
+  const auditTable = await pool.query(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    t.skip("requires the business audit database migration");
+    await pool.end();
+    return;
+  }
+
+  const suffix = randomUUID();
+  const actorId = `payment-posting-test-${suffix}`;
+  const actorEmail = `${actorId}@example.test`;
+  const shortId = suffix.slice(0, 12);
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: actorId, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerPaymentRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let customerId: number | undefined;
+  let supplierId: number | undefined;
+  let productId: number | undefined;
+  let salesOrderId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  let payableJournalKey: string | undefined;
+  const paymentIds: number[] = [];
+
+  const request = async (body: unknown) => {
+    const response = await fetch(`${baseUrl}/api/payments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as any;
+    assert.equal(response.status, 201, JSON.stringify(payload));
+    return payload.payment as typeof businessPayments.$inferSelect;
+  };
+
+  const paymentJournal = async (paymentId: number) => {
+    const [entry] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.sourceKey, `payment-${paymentId}`));
+    assert.ok(entry, `missing journal for payment ${paymentId}`);
+    const lines = await db.select({
+      accountKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, entry.id));
+    assert.ok(lines.every((line) => line.accountKey !== null));
+    const postingLines = lines.map((line) => ({
+      ...line,
+      accountKey: line.accountKey ?? "",
+    }));
+    assert.equal(journalLinesAreBalanced(postingLines), true, `journal for payment ${paymentId} must balance`);
+    return { entry, lines: postingLines };
+  };
+
+  const paymentRequest = (
+    direction: "customer_receipt" | "supplier_payment",
+    orderId: number,
+    method: "cash" | "bank_transfer" | "mobile_money" | "other",
+  ) => ({
+    direction,
+    idempotencyKey: randomUUID(),
+    orderId,
+    amountZmw: "1.00",
+    paymentDate: "2026-11-18",
+    method,
+    reference: `POST-${direction}-${method}-${suffix}`,
+    notes: null,
+  });
+
+  const assertPostedToFundsAccount = async (
+    payment: typeof businessPayments.$inferSelect,
+    expectedFundsAccount: string,
+    direction: "customer_receipt" | "supplier_payment",
+  ) => {
+    const { lines } = await paymentJournal(payment.id);
+    const fundsLine = lines.find((line) => line.accountKey === expectedFundsAccount);
+    assert.ok(fundsLine, `${payment.method} must use ${expectedFundsAccount}`);
+    assert.equal(
+      direction === "customer_receipt" ? fundsLine.debitZmw : fundsLine.creditZmw,
+      "1.00",
+    );
+    assert.deepEqual(lines.map((line) => [
+      line.accountKey,
+      line.debitZmw,
+      line.creditZmw,
+    ]).sort(), (direction === "customer_receipt"
+      ? [
+          [expectedFundsAccount, "1.00", "0.00"],
+          ["accounts_receivable", "0.00", "1.00"],
+        ]
+      : [
+          ["accounts_payable", "1.00", "0.00"],
+          [expectedFundsAccount, "0.00", "1.00"],
+        ]).sort());
+    assert.equal(lines.reduce((total, line) => total + cents(line.debitZmw), 0n), 100n);
+  };
+
+  try {
+    const [customer] = await db.insert(customers).values({
+      name: `Payment posting customer ${suffix}`,
+    }).returning();
+    customerId = customer.id;
+    const [supplier] = await db.insert(suppliers).values({
+      name: `Payment posting supplier ${suffix}`,
+    }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `PAY-${suffix}`,
+      name: `Payment posting product ${suffix}`,
+      status: "active",
+    }).returning();
+    productId = product.id;
+
+    const [salesOrder] = await db.insert(salesOrders).values({
+      orderNumber: `PAY-C-${shortId}`,
+      customerId,
+      status: "fulfilled",
+      orderDate: "2026-11-18",
+    }).returning();
+    salesOrderId = salesOrder.id;
+    await db.insert(salesOrderLines).values({
+      salesOrderId,
+      productId,
+      quantity: 1,
+      unitPriceZmw: "100.00",
+    });
+
+    const [purchaseOrder] = await db.insert(purchaseOrders).values({
+      orderNumber: `PAY-S-${shortId}`,
+      supplierId,
+      currency: "ZMW",
+      exchangeRateToZmw: "1",
+      orderedAt: "2026-11-18",
+    }).returning();
+    purchaseOrderId = purchaseOrder.id;
+    await db.insert(purchaseOrderLines).values({
+      purchaseOrderId,
+      productId,
+      quantityOrdered: 1,
+      unitPrice: "100.00",
+    });
+    payableJournalKey = `payment-posting-payable-${suffix}`;
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: payableJournalKey!,
+      sourceType: "stock_receipt",
+      sourceId: purchaseOrderId!,
+      memo: `Stock receipt for ${purchaseOrder.orderNumber}`,
+      entryDate: "2026-11-18",
+      lines: [
+        { accountKey: "inventory", productId, debitZmw: "100.00" },
+        { accountKey: "accounts_payable", creditZmw: "100.00" },
+      ],
+    }));
+
+    // Keep a pre-existing payment and its journal as a sentinel while other
+    // methods are posted through the same route.
+    const priorCustomerPayment = await request(
+      paymentRequest("customer_receipt", salesOrderId, "cash"),
+    );
+    paymentIds.push(priorCustomerPayment.id);
+    const priorCustomerPaymentSnapshot = {
+      payment: (await db.select().from(businessPayments)
+        .where(eq(businessPayments.id, priorCustomerPayment.id)))[0],
+      journal: await paymentJournal(priorCustomerPayment.id),
+    };
+    await assertPostedToFundsAccount(priorCustomerPayment, "cash_on_hand", "customer_receipt");
+
+    const priorSupplierPayment = await request(
+      paymentRequest("supplier_payment", purchaseOrderId, "bank_transfer"),
+    );
+    paymentIds.push(priorSupplierPayment.id);
+    const priorSupplierPaymentSnapshot = {
+      payment: (await db.select().from(businessPayments)
+        .where(eq(businessPayments.id, priorSupplierPayment.id)))[0],
+      journal: await paymentJournal(priorSupplierPayment.id),
+    };
+    await assertPostedToFundsAccount(priorSupplierPayment, "bank_account", "supplier_payment");
+
+    const methods = [
+      ["cash", "cash_on_hand"],
+      ["bank_transfer", "bank_account"],
+      ["mobile_money", "mobile_money"],
+      ["other", "other_funds"],
+    ] as const;
+    for (const [method, fundsAccount] of methods) {
+      const customerPayment = method === "cash"
+        ? priorCustomerPayment
+        : await request(paymentRequest("customer_receipt", salesOrderId, method));
+      if (customerPayment.id !== priorCustomerPayment.id) paymentIds.push(customerPayment.id);
+      await assertPostedToFundsAccount(customerPayment, fundsAccount, "customer_receipt");
+
+      const supplierPayment = method === "bank_transfer"
+        ? priorSupplierPayment
+        : await request(paymentRequest("supplier_payment", purchaseOrderId, method));
+      if (supplierPayment.id !== priorSupplierPayment.id) paymentIds.push(supplierPayment.id);
+      await assertPostedToFundsAccount(supplierPayment, fundsAccount, "supplier_payment");
+    }
+
+    assert.deepEqual(
+      (await db.select().from(businessPayments).where(eq(businessPayments.id, priorCustomerPayment.id)))[0],
+      priorCustomerPaymentSnapshot.payment,
+      "later payments must not alter an existing customer payment record",
+    );
+    assert.deepEqual(
+      await paymentJournal(priorCustomerPayment.id),
+      priorCustomerPaymentSnapshot.journal,
+      "later payments must not alter an existing customer journal",
+    );
+    assert.deepEqual(
+      (await db.select().from(businessPayments).where(eq(businessPayments.id, priorSupplierPayment.id)))[0],
+      priorSupplierPaymentSnapshot.payment,
+      "later payments must not alter an existing supplier payment record",
+    );
+    assert.deepEqual(
+      await paymentJournal(priorSupplierPayment.id),
+      priorSupplierPaymentSnapshot.journal,
+      "later payments must not alter an existing supplier journal",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      const journalSourceKeys = [
+        ...paymentIds.map((id) => `payment-${id}`),
+        ...(payableJournalKey ? [payableJournalKey] : []),
+      ];
+      if (journalSourceKeys.length) {
+        await client.query(
+          "DELETE FROM journal_lines WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE source_key = ANY($1::text[]))",
+          [journalSourceKeys],
+        );
+        await client.query("DELETE FROM journal_entries WHERE source_key = ANY($1::text[])", [journalSourceKeys]);
+      }
+      if (paymentIds.length) {
+        await client.query("DELETE FROM business_payments WHERE id = ANY($1::int[])", [paymentIds]);
+      }
+      if (salesOrderId) {
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
+      }
+      if (purchaseOrderId) {
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  }
+});
