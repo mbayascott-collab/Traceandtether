@@ -159,6 +159,8 @@ export default function AccountingWorkspace() {
   const exportTrialBalance = () => exportRows && downloadCsv("trial-balance.csv", exportRows.trialBalance);
   const exportIncome = () => exportRows && downloadCsv("income-statement.csv", exportRows.incomeStatement);
   const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
+  const expenses = data?.expenses ?? [];
+  const ownerTransactions = data?.ownerTransactions ?? [];
   const openingBalanceHistory = data?.openingBalances.history ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
   const canEnterOpeningBalances = Boolean(data && !data.openingBalances.posted && (
@@ -188,9 +190,9 @@ export default function AccountingWorkspace() {
       <button className="button button-primary">Save transaction</button>
     </form>
     <section className="panel" style={{ marginBottom: 16 }}>
-      <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{data?.ownerTransactions.length ?? 0} records</span></div>
+      <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{ownerTransactions.length} records</span></div>
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Method</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
-        {(data?.ownerTransactions ?? []).map((transaction) => <tr key={transaction.id}>
+        {ownerTransactions.map((transaction) => <tr key={transaction.id}>
           <td>{transaction.transactionDate}</td>
           <td>{transaction.kind.replaceAll("_", " ")}</td>
           <td>{transaction.accountName}</td>
@@ -198,7 +200,7 @@ export default function AccountingWorkspace() {
           <td>{transaction.reference || "—"}</td>
           <td>{money(transaction.amountZmw)}</td>
         </tr>)}
-        {!data?.ownerTransactions.length && <tr><td colSpan={6}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
+        {!ownerTransactions.length && <tr><td colSpan={6}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
@@ -225,14 +227,14 @@ export default function AccountingWorkspace() {
       </form>
     </section>
     <section className="panel" style={{ marginBottom: 16 }}>
-      <div className="panel-heading"><h2>Business expenses in period</h2><span>{data?.expenses.length ?? 0} records</span></div>
+      <div className="panel-heading"><h2>Business expenses in period</h2><span>{expenses.length} records</span></div>
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
-        {(data?.expenses ?? []).map((expense) => <tr key={expense.id}>
+        {expenses.map((expense) => <tr key={expense.id}>
           <td>{expense.expenseDate}</td><td>{expense.category.replaceAll("_", " ")}</td>
           <td>{expense.description}</td><td>{expense.method.replaceAll("_", " ")}</td>
           <td>{expense.reference || "—"}</td><td>{money(expense.amountZmw)}</td>
         </tr>)}
-        {!data?.expenses.length && <tr><td colSpan={6}>No business expenses recorded in this period.</td></tr>}
+        {!expenses.length && <tr><td colSpan={6}>No business expenses recorded in this period.</td></tr>}
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
