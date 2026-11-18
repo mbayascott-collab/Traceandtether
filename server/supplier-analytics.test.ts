@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { supplierDeliveryMetrics } from "./supplier-analytics";
+import { supplierReportCsv } from "../shared/supplier-report-csv";
 
 test("compares recorded shipment dates and uses the purchase order date when shipment expectation is absent", () => {
   const metrics = supplierDeliveryMetrics(
@@ -78,4 +79,45 @@ test("ignores cancelled orders and shipments and keeps suppliers without date pa
     missingActualDateOrders: 1,
     incompleteDeliveryOrders: 0,
   });
+});
+
+test("supplier CSV keeps the selected range, supplier delivery values, and unallocated costs separate", () => {
+  const csv = supplierReportCsv({
+    period: { from: "2025-01-01", to: "2025-01-31" },
+    totals: {
+      orderedGoodsZmw: "240.00", importCostsZmw: "35.00", unallocatedImportCostsZmw: "5.00", paymentsZmw: "120.00",
+      orders: 2, onTimeOrders: 1, lateOrders: 1, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
+      missingActualDateOrders: 0, incompleteDeliveryOrders: 0, measuredDeliveryOrders: 2,
+    },
+    suppliers: [{
+      name: 'North "Trading"', orders: 2, orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
+      measuredDeliveryOrders: 2, onTimeOrders: 1, lateOrders: 1, missingExpectedDateOrders: 0,
+      missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: "1.5",
+    }],
+  });
+
+  assert.match(csv, /"From","2025-01-01"/);
+  assert.match(csv, /"To","2025-01-31"/);
+  assert.match(csv, /"North ""Trading""","2","240\.00","30\.00","120\.00","2","1","1"/);
+  assert.match(csv, /"'\+1\.5 days · late"/);
+  assert.match(csv, /"Unallocated import costs \(not assigned to a supplier\)","5\.00","ZMW"/);
+  assert.match(csv, /"Total","2","240\.00","35\.00","120\.00"/);
+});
+
+test("supplier CSV protects formula-like supplier names", () => {
+  const csv = supplierReportCsv({
+    period: { from: null, to: null },
+    totals: {
+      orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
+      orders: 0, onTimeOrders: 0, lateOrders: 0, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
+      missingActualDateOrders: 0, incompleteDeliveryOrders: 0, measuredDeliveryOrders: 0,
+    },
+    suppliers: [{
+      name: "=HYPERLINK(\"https://example.invalid\")", orders: 0, orderedGoodsZmw: "0.00", importCostsZmw: "0.00",
+      paymentsZmw: "0.00", measuredDeliveryOrders: 0, onTimeOrders: 0, lateOrders: 0, missingExpectedDateOrders: 0,
+      missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: null,
+    }],
+  });
+
+  assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
 });

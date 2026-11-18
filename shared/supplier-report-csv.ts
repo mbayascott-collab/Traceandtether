@@ -1,0 +1,107 @@
+export type SupplierReportRow = {
+  name: string;
+  orders: number;
+  orderedGoodsZmw: string;
+  importCostsZmw: string;
+  paymentsZmw: string;
+  measuredDeliveryOrders: number;
+  onTimeOrders: number;
+  lateOrders: number;
+  missingExpectedDateOrders: number;
+  missingActualDateOrders: number;
+  incompleteDeliveryOrders: number;
+  overdueOpenOrders: number;
+  averageDeliveryVarianceDays: string | null;
+};
+
+export type SupplierReportCsvData = {
+  period: { from: string | null; to: string | null };
+  totals: {
+    orderedGoodsZmw: string;
+    importCostsZmw: string;
+    unallocatedImportCostsZmw: string;
+    paymentsZmw: string;
+    orders: number;
+    onTimeOrders: number;
+    lateOrders: number;
+    overdueOpenOrders: number;
+    missingExpectedDateOrders: number;
+    missingActualDateOrders: number;
+    incompleteDeliveryOrders: number;
+    measuredDeliveryOrders: number;
+  };
+  suppliers: SupplierReportRow[];
+};
+
+export function formatSupplierDeliveryVariance(value: string | null) {
+  if (value == null) return "—";
+  const days = Number(value);
+  if (!Number.isFinite(days)) return "—";
+  if (days === 0) return "0 days · on time";
+  const amount = Math.abs(days).toLocaleString("en", { maximumFractionDigits: 1 });
+  return days > 0 ? `+${amount} days · late` : `−${amount} days · early`;
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? "");
+  const safe = /^[\s]*[=+@]/.test(text) || /^\s*-\D/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+export function supplierReportCsv(report: SupplierReportCsvData) {
+  const columns = [
+    "Supplier",
+    "Orders",
+    "Goods ordered (ZMW)",
+    "Import costs (ZMW)",
+    "Payments (ZMW)",
+    "Matched dates",
+    "On time",
+    "Late",
+    "Missing expected",
+    "Missing actual",
+    "Incomplete / open",
+    "Overdue open",
+    "Average variance",
+  ];
+  const rows: unknown[][] = [
+    ["Supplier spend and delivery report"],
+    ["From", report.period.from ?? "All dates"],
+    ["To", report.period.to ?? "All dates"],
+    [],
+    columns,
+    ...report.suppliers.map((supplier) => [
+      supplier.name,
+      supplier.orders,
+      supplier.orderedGoodsZmw,
+      supplier.importCostsZmw,
+      supplier.paymentsZmw,
+      supplier.measuredDeliveryOrders,
+      supplier.onTimeOrders,
+      supplier.lateOrders,
+      supplier.missingExpectedDateOrders,
+      supplier.missingActualDateOrders,
+      supplier.incompleteDeliveryOrders,
+      supplier.overdueOpenOrders,
+      formatSupplierDeliveryVariance(supplier.averageDeliveryVarianceDays),
+    ]),
+    [
+      "Total",
+      report.totals.orders,
+      report.totals.orderedGoodsZmw,
+      report.totals.importCostsZmw,
+      report.totals.paymentsZmw,
+      report.totals.measuredDeliveryOrders,
+      report.totals.onTimeOrders,
+      report.totals.lateOrders,
+      report.totals.missingExpectedDateOrders,
+      report.totals.missingActualDateOrders,
+      report.totals.incompleteDeliveryOrders,
+      report.totals.overdueOpenOrders,
+      "",
+    ],
+    [],
+    ["Unallocated import costs (not assigned to a supplier)", report.totals.unallocatedImportCostsZmw, "ZMW"],
+  ];
+  return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}

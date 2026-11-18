@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { formatSupplierDeliveryVariance, supplierReportCsv } from "../../shared/supplier-report-csv";
 
 type ProductMetric = {
   productId: number; name: string; sku: string; unit: string; unitsSold: number;
@@ -17,6 +18,7 @@ type DashboardData = {
   cashForecast: { estimatedClosingZmw: string; assumption: string };
 };
 type SupplierAnalytics = {
+  period: { from: string | null; to: string | null };
   totals: {
     orderedGoodsZmw: string; importCostsZmw: string; unallocatedImportCostsZmw: string; paymentsZmw: string;
     orders: number; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number;
@@ -31,14 +33,6 @@ type SupplierAnalytics = {
   }[];
 };
 const money = (value: string | null | undefined) => value == null ? "—" : `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const deliveryVariance = (value: string | null) => {
-  if (value == null) return "—";
-  const days = Number(value);
-  if (!Number.isFinite(days)) return "—";
-  if (days === 0) return "0 days · on time";
-  const amount = Math.abs(days).toLocaleString("en", { maximumFractionDigits: 1 });
-  return days > 0 ? `+${amount} days · late` : `−${amount} days · early`;
-};
 const dateRange = () => {
   const end = new Date();
   const start = new Date(end.getFullYear(), end.getMonth() - 11, 1);
@@ -53,6 +47,14 @@ async function getJson<T>(url: string): Promise<T> {
   if (!response.ok) throw new Error(body.error || "Could not load analytics.");
   return body;
 }
+function downloadSupplierReport(report: SupplierAnalytics) {
+  const filename = `supplier-spend-${report.period.from ?? "all-dates"}-to-${report.period.to ?? "all-dates"}.csv`;
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([supplierReportCsv(report)], { type: "text/csv;charset=utf-8" }));
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
 
 export default function BusinessAnalyticsWorkspace() {
   const initial = dateRange();
@@ -63,6 +65,7 @@ export default function BusinessAnalyticsWorkspace() {
   const [supplierReport, setSupplierReport] = useState<SupplierAnalytics | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const supplierReportMatchesRange = supplierReport?.period.from === from && supplierReport.period.to === to;
 
   async function run(event?: FormEvent) {
     event?.preventDefault();
@@ -163,7 +166,14 @@ export default function BusinessAnalyticsWorkspace() {
         </section>
       </div>
       <section className="panel analytics-panel analytics-supplier-panel">
-        <div className="panel-heading"><div><h2>Supplier spend and delivery</h2><span>Orders by order date; costs and payments by their recorded dates</span></div></div>
+        <div className="panel-heading">
+          <div><h2>Supplier spend and delivery</h2><span>Orders by order date; costs and payments by their recorded dates</span></div>
+          <button className="button button-secondary button-small" type="button" disabled={loading || !supplierReportMatchesRange}
+            title={supplierReportMatchesRange ? "Download the supplier report as CSV" : "Update analytics to load this date range"}
+            onClick={() => downloadSupplierReport(supplierReport)}>
+            {supplierReportMatchesRange ? "Download CSV" : "Update analytics to download"}
+          </button>
+        </div>
         <div className="analytics-supplier-totals">
           <div><span>Goods ordered</span><strong>{money(supplierReport.totals.orderedGoodsZmw)}</strong></div>
           <div><span>Import costs recorded</span><strong>{money(supplierReport.totals.importCostsZmw)}</strong></div>
@@ -203,7 +213,7 @@ export default function BusinessAnalyticsWorkspace() {
             <td className="delivery-matched-cell">{supplier.measuredDeliveryOrders}</td><td>{supplier.onTimeOrders}</td><td className="delivery-late-cell">{supplier.lateOrders}</td>
             <td className="delivery-missing-cell">{supplier.missingExpectedDateOrders}</td><td className="delivery-missing-cell">{supplier.missingActualDateOrders}</td>
             <td className="delivery-open-cell">{supplier.incompleteDeliveryOrders}</td><td className="delivery-overdue-cell">{supplier.overdueOpenOrders}</td>
-            <td className="analytics-variance-cell">{deliveryVariance(supplier.averageDeliveryVarianceDays)}</td>
+            <td className="analytics-variance-cell">{formatSupplierDeliveryVariance(supplier.averageDeliveryVarianceDays)}</td>
           </tr>)}
           {!supplierReport.suppliers.length && <tr><td colSpan={13} className="analytics-supplier-empty">No supplier orders in this period.</td></tr>}
         </tbody></table></div>
