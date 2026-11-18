@@ -1,12 +1,13 @@
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { accountingAccounts, businessExpenses, journalEntries, journalLines, ownerFundTransactions } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
+import { databaseErrorStatus } from "./database-errors";
 import {
-  buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts,
+  buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts, reversePostingLines,
   buildOwnerFundLines, journalLinesAreBalanced, operatingExpenseAccountKey, ownerFundAccountKey, postJournal,
 } from "./accounting-posting";
 import { calculateAccountingReports } from "../shared/accounting-reports";
@@ -46,6 +47,7 @@ const expenseSchema = z.object({
   notes: z.string().trim().max(1000).optional().default(""),
 });
 const openingBalanceSchema = z.object({
+  reversalEntryId: z.coerce.number().int().positive().optional(),
   effectiveAt: dateQuery,
   cashOnHandZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   bankZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
@@ -57,9 +59,22 @@ const openingBalanceSchema = z.object({
   ownerEquityZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
   memo: z.string().trim().min(3).max(500),
 });
+const openingBalanceReversalSchema = z.object({
+  effectiveAt: dateQuery,
+  reason: z.string().trim().min(3).max(450),
+});
 const OPENING_BALANCE_SOURCE_KEY = "opening-balances-v1";
+const OPENING_BALANCE_REVERSAL_TYPE = "opening_balance_reversal";
 
 export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
+  const ownerOnly: RequestHandler = (_req, res, next) => {
+    if (res.locals.actor?.role !== "owner") {
+      res.status(403).json({ error: "Only the business owner can correct opening balances." });
+      return;
+    }
+    next();
+  };
+
   app.post("/api/accounting/expenses", owner, async (req, res) => {
     const parsed = expenseSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -116,6 +131,10 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       return;
     }
     const input = parsed.data;
+    if (input.reversalEntryId && res.locals.actor?.role !== "owner") {
+      res.status(403).json({ error: "Only the business owner can replace reversed opening balances." });
+      return;
+    }
     const amounts = [
       input.cashOnHandZmw, input.bankZmw, input.mobileMoneyZmw, input.otherFundsZmw,
       input.receivablesZmw, input.payablesZmw,
@@ -130,44 +149,157 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       res.status(400).json({ error: "Opening balances must contain at least one amount." });
       return;
     }
-    const result = await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(journalEntries)
-        .where(eq(journalEntries.sourceKey, OPENING_BALANCE_SOURCE_KEY)).limit(1);
-      if (existing) return { alreadyExists: true };
+    let result: { alreadyExists: boolean };
+    try {
+      result = await db.transaction(async (tx) => {
+        let sourceKey = OPENING_BALANCE_SOURCE_KEY;
+        let sourceId: number | null = null;
+        if (input.reversalEntryId) {
+          const [reversal] = await tx.select().from(journalEntries)
+            .where(and(
+              eq(journalEntries.id, input.reversalEntryId),
+              eq(journalEntries.sourceType, OPENING_BALANCE_REVERSAL_TYPE),
+            )).for("update").limit(1);
+          if (!reversal) return { alreadyExists: true };
+          const [existingReplacement] = await tx.select().from(journalEntries)
+            .where(and(
+              eq(journalEntries.sourceType, "opening_balances"),
+              eq(journalEntries.sourceId, reversal.id),
+            )).limit(1);
+          if (existingReplacement) return { alreadyExists: true };
+          const [original] = await tx.select().from(journalEntries)
+            .where(and(
+              eq(journalEntries.id, reversal.sourceId!),
+              eq(journalEntries.sourceType, "opening_balances"),
+            )).limit(1);
+          if (!original) return { alreadyExists: true };
+          sourceKey = `opening-balance-replacement-${reversal.id}`;
+          sourceId = reversal.id;
+        } else {
+          const [existing] = await tx.select().from(journalEntries)
+            .where(eq(journalEntries.sourceType, "opening_balances")).limit(1);
+          if (existing) return { alreadyExists: true };
+        }
 
-      const accountMap = await ensureAccountingAccounts(tx);
-      if (lines.some((line) => !accountMap.has(line.accountKey))) {
-        throw new Error("A required opening balance account is unavailable.");
-      }
-      const [entry] = await tx.insert(journalEntries).values({
-        entryNumber: `JE-${input.effectiveAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
-        sourceKey: OPENING_BALANCE_SOURCE_KEY,
-        sourceType: "opening_balances",
-        sourceId: null,
-        entryDate: input.effectiveAt,
-        memo: input.memo,
-      }).returning();
-      await recordBusinessAudit(tx, {
-        entityType: "journal_entry", entityId: entry.id, recordLabel: entry.entryNumber,
-        actor: res.locals.actor, action: "created", changedFields: ["entryDate", "memo", "openingBalances"],
+        const accountMap = await ensureAccountingAccounts(tx);
+        if (lines.some((line) => !accountMap.has(line.accountKey))) {
+          throw new Error("A required opening balance account is unavailable.");
+        }
+        const [entry] = await tx.insert(journalEntries).values({
+          entryNumber: `JE-${input.effectiveAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
+          sourceKey,
+          sourceType: "opening_balances",
+          sourceId,
+          entryDate: input.effectiveAt,
+          memo: input.memo,
+        }).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "journal_entry", entityId: entry.id, recordLabel: entry.entryNumber,
+          actor: res.locals.actor, action: "created", changedFields: ["entryDate", "memo", "openingBalances"],
+        });
+        await tx.insert(journalLines).values(lines.map((line) => {
+          const account = accountMap.get(line.accountKey)!;
+          return {
+            journalEntryId: entry.id,
+            accountId: account.id,
+            debitZmw: line.debitZmw ?? "0.00",
+            creditZmw: line.creditZmw ?? "0.00",
+            description: line.description ?? null,
+          };
+        }));
+        return { alreadyExists: false };
       });
-      await tx.insert(journalLines).values(lines.map((line) => {
-        const account = accountMap.get(line.accountKey)!;
-        return {
-          journalEntryId: entry.id,
-          accountId: account.id,
-          debitZmw: line.debitZmw ?? "0.00",
-          creditZmw: line.creditZmw ?? "0.00",
-          description: line.description ?? null,
-        };
-      }));
-      return { alreadyExists: false };
-    });
+    } catch (error) {
+      const dbError = databaseErrorStatus(error, "These opening balances were already submitted.");
+      if (dbError?.status === 409) {
+        res.status(dbError.status).json({ error: dbError.message });
+        return;
+      }
+      throw error;
+    }
     if (result.alreadyExists) {
-      res.status(409).json({ error: "Opening balances have already been recorded and cannot be replaced here." });
+      res.status(409).json({ error: input.reversalEntryId
+        ? "This reversal has already been replaced or is not a valid opening-balance correction."
+        : "Opening balances have already been recorded. Reverse the active entry before replacing it." });
       return;
     }
-    res.status(201).json({ message: "Opening balances recorded." });
+    res.status(201).json({ message: input.reversalEntryId
+      ? "Corrected opening balances recorded."
+      : "Opening balances recorded." });
+  });
+
+  app.post("/api/accounting/opening-balances/:entryId/reverse", owner, ownerOnly, async (req, res) => {
+    const entryId = Number(req.params.entryId);
+    const parsed = openingBalanceReversalSchema.safeParse(req.body);
+    if (!Number.isSafeInteger(entryId) || entryId < 1 || !parsed.success) {
+      res.status(400).json({ error: parsed.success
+        ? "Choose a valid opening-balance entry."
+        : parsed.error.issues[0]?.message ?? "Check the reversal details." });
+      return;
+    }
+    const input = parsed.data;
+    try {
+      const result = await db.transaction(async (tx) => {
+        const [original] = await tx.select().from(journalEntries)
+          .where(and(
+            eq(journalEntries.id, entryId),
+            eq(journalEntries.sourceType, "opening_balances"),
+          )).for("update").limit(1);
+        if (!original) return { conflict: "Only an opening-balance entry can be reversed." };
+        const [existingReversal] = await tx.select().from(journalEntries)
+          .where(and(
+            eq(journalEntries.sourceType, OPENING_BALANCE_REVERSAL_TYPE),
+            eq(journalEntries.sourceId, original.id),
+          )).limit(1);
+        if (existingReversal) return { conflict: "This opening-balance entry has already been reversed." };
+
+        const originalLines = await tx.select({
+          accountKey: accountingAccounts.systemKey,
+          productId: journalLines.productId,
+          debitZmw: journalLines.debitZmw,
+          creditZmw: journalLines.creditZmw,
+          description: journalLines.description,
+        }).from(journalLines)
+          .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+          .where(eq(journalLines.journalEntryId, original.id));
+        if (!originalLines.length || originalLines.some((line) => !line.accountKey)) {
+          throw new Error("The opening-balance entry contains an unavailable account.");
+        }
+        const reversalLines = reversePostingLines(originalLines.map((line) => ({
+          accountKey: line.accountKey!,
+          productId: line.productId,
+          debitZmw: line.debitZmw,
+          creditZmw: line.creditZmw,
+          description: line.description,
+        })));
+        const reversal = await postJournal(tx, {
+          sourceKey: `opening-balance-reversal-${original.id}`,
+          sourceType: OPENING_BALANCE_REVERSAL_TYPE,
+          sourceId: original.id,
+          entryDate: input.effectiveAt,
+          memo: `Reversal of ${original.entryNumber}: ${input.reason}`,
+          lines: reversalLines,
+        });
+        await recordBusinessAudit(tx, {
+          entityType: "journal_entry", entityId: reversal.id, recordLabel: reversal.entryNumber,
+          actor: res.locals.actor, action: "created",
+          changedFields: ["entryDate", "memo", "reversesEntryId", "reason"],
+        });
+        return { conflict: null };
+      });
+      if (result.conflict) {
+        res.status(409).json({ error: result.conflict });
+        return;
+      }
+    } catch (error) {
+      const dbError = databaseErrorStatus(error, "This opening-balance entry has already been reversed.");
+      if (dbError?.status === 409) {
+        res.status(dbError.status).json({ error: dbError.message });
+        return;
+      }
+      throw error;
+    }
+    res.status(201).json({ message: "Opening balances reversed. You can now record the corrected balances." });
   });
 
   app.post("/api/accounting/funds", owner, async (req, res) => {
@@ -237,9 +369,46 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       await ensureAccountingAccounts(tx);
       const accounts = await tx.select().from(accountingAccounts).orderBy(accountingAccounts.code);
       const [openingBalanceEntry] = await tx.select({
+        id: journalEntries.id,
         entryDate: journalEntries.entryDate,
+        entryNumber: journalEntries.entryNumber,
+        memo: journalEntries.memo,
+        sourceType: journalEntries.sourceType,
+        sourceId: journalEntries.sourceId,
       }).from(journalEntries)
         .where(eq(journalEntries.sourceKey, OPENING_BALANCE_SOURCE_KEY)).limit(1);
+      const openingHistoryRows = await tx.select({
+        id: journalEntries.id,
+        entryDate: journalEntries.entryDate,
+        entryNumber: journalEntries.entryNumber,
+        memo: journalEntries.memo,
+        sourceType: journalEntries.sourceType,
+        sourceId: journalEntries.sourceId,
+      }).from(journalEntries)
+        .where(inArray(journalEntries.sourceType, ["opening_balances", OPENING_BALANCE_REVERSAL_TYPE]))
+        .orderBy(journalEntries.entryDate, journalEntries.id);
+      const openingEntries = openingHistoryRows.filter((entry) => entry.sourceType === "opening_balances");
+      const reversalEntries = openingHistoryRows.filter((entry) => entry.sourceType === OPENING_BALANCE_REVERSAL_TYPE);
+      const reversedEntryIds = new Set(reversalEntries.map((entry) => entry.sourceId));
+      const activeOpeningEntry = openingEntries.find((entry) => !reversedEntryIds.has(entry.id));
+      const replacementReversal = [...reversalEntries].reverse().find((reversal) =>
+        !openingEntries.some((entry) => entry.sourceId === reversal.id));
+      const openingBalanceHistory = openingHistoryRows.map((entry) => {
+        const isReversal = entry.sourceType === OPENING_BALANCE_REVERSAL_TYPE;
+        const linkedReversal = isReversal
+          ? null
+          : reversalEntries.find((reversal) => reversal.sourceId === entry.id);
+        return {
+          id: entry.id,
+          entryDate: entry.entryDate,
+          entryNumber: entry.entryNumber,
+          memo: entry.memo,
+          kind: isReversal ? "reversal" as const : entry.sourceId ? "replacement" as const : "opening_balance" as const,
+          relatedEntryId: entry.sourceId,
+          reversalEntryId: linkedReversal?.id ?? null,
+          reversed: Boolean(linkedReversal),
+        };
+      });
       const expenses = await tx.select().from(businessExpenses)
         .where(and(gte(businessExpenses.expenseDate, from), lte(businessExpenses.expenseDate, to)))
         .orderBy(desc(businessExpenses.expenseDate), desc(businessExpenses.id));
@@ -269,14 +438,14 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         .orderBy(desc(journalEntries.entryDate), desc(journalEntries.id));
 
       const entryMap = new Map<number, {
-        id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string;
+         id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string; sourceId: number | null;
         lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
       }>();
       for (const row of records) {
         if (row.entry.entryDate >= from && !entryMap.has(row.entry.id)) {
           entryMap.set(row.entry.id, {
             id: row.entry.id, entryNumber: row.entry.entryNumber, memo: row.entry.memo,
-            entryDate: row.entry.entryDate, sourceType: row.entry.sourceType, lines: [],
+            entryDate: row.entry.entryDate, sourceType: row.entry.sourceType, sourceId: row.entry.sourceId, lines: [],
           });
         }
         const entry = entryMap.get(row.entry.id);
@@ -298,7 +467,14 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       );
       return {
         accounts,
-        openingBalances: { posted: Boolean(openingBalanceEntry), entryDate: openingBalanceEntry?.entryDate ?? null },
+        openingBalances: {
+          posted: Boolean(activeOpeningEntry),
+          entryDate: activeOpeningEntry?.entryDate ?? openingBalanceEntry?.entryDate ?? null,
+          activeEntryId: activeOpeningEntry?.id ?? null,
+          replacementReversalId: activeOpeningEntry ? null : replacementReversal?.id ?? null,
+          canCorrect: res.locals.actor?.role === "owner",
+          history: openingBalanceHistory,
+        },
         expenses,
         ownerTransactions,
         entries: [...entryMap.values()],

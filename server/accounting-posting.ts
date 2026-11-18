@@ -460,6 +460,16 @@ export function buildOpeningStockLines(productId: number, totalValueZmw: string)
   ];
 }
 
+export function reversePostingLines(lines: PostingLine[]): PostingLine[] {
+  return lines.map((line) => ({
+    accountKey: line.accountKey,
+    productId: line.productId ?? null,
+    debitZmw: line.creditZmw ?? "0.00",
+    creditZmw: line.debitZmw ?? "0.00",
+    description: line.description ?? null,
+  }));
+}
+
 export async function ensureAccountingAccounts(tx: any) {
   await tx.insert(accountingAccounts).values(accounts).onConflictDoNothing();
   const rows = await tx.select().from(accountingAccounts);

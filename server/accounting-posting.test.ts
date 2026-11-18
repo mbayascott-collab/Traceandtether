@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
-  buildOwnerFundLines, operatingExpenseAccountKey, ownerFundAccountKey, splitLandedCostCorrection, weightedAverageUnitCostCents,
+  buildOwnerFundLines, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
@@ -77,6 +77,26 @@ test("opening balance equity can have a debit balance when credits exceed assets
   });
   assert.equal(journalLinesAreBalanced(lines), true);
   assert.equal(lines.at(-1)?.debitZmw, "5.00");
+});
+
+test("reverses opening balance lines without changing their accounts or descriptions", () => {
+  const original = buildOpeningBalanceLines({
+    cashOnHandZmw: "30.00",
+    bankZmw: "0.00",
+    mobileMoneyZmw: "0.00",
+    otherFundsZmw: "0.00",
+    receivablesZmw: "0.00",
+    payablesZmw: "10.00",
+    loansPayableZmw: "0.00",
+    ownerEquityZmw: "0.00",
+  });
+  const reversal = reversePostingLines(original);
+  assert.equal(journalLinesAreBalanced(reversal), true);
+  assert.deepEqual(reversal.map((line) => [
+    line.accountKey, line.debitZmw, line.creditZmw, line.description,
+  ]), original.map((line) => [
+    line.accountKey, line.creditZmw ?? "0.00", line.debitZmw ?? "0.00", line.description,
+  ]));
 });
 
 test("opening stock debits product inventory and credits opening balance equity", () => {

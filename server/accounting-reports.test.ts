@@ -93,6 +93,23 @@ test("year-end reports use the requested period and balance through its end date
   assert.equal(liabilitiesAndEquity, 1770);
 });
 
+test("opening-balance reversal remains in history while reports use the corrected replacement", () => {
+  const openingAndCorrections: AccountingReportLine[] = [
+    { accountId: 1, entryDate: "2025-12-31", debitZmw: "1000.00", creditZmw: "0.00" },
+    { accountId: 4, entryDate: "2025-12-31", debitZmw: "0.00", creditZmw: "1000.00" },
+    { accountId: 1, entryDate: "2026-01-10", debitZmw: "0.00", creditZmw: "1000.00" },
+    { accountId: 4, entryDate: "2026-01-10", debitZmw: "1000.00", creditZmw: "0.00" },
+    { accountId: 1, entryDate: "2026-01-11", debitZmw: "800.00", creditZmw: "0.00" },
+    { accountId: 4, entryDate: "2026-01-11", debitZmw: "0.00", creditZmw: "800.00" },
+  ];
+  const reports = calculateAccountingReports(accounts, openingAndCorrections, "2026-01-01", "2026-12-31");
+
+  assert.equal(reports.trialBalance.find((row) => row.code === "1010")?.balanceZmw, "800.00");
+  assert.equal(reports.trialBalance.find((row) => row.code === "3000")?.balanceZmw, "800.00");
+  assert.equal(reports.totals.trialDebitsZmw, reports.totals.trialCreditsZmw);
+  assert.equal(openingAndCorrections.length, 6, "the original, reversal, and replacement lines all remain reportable");
+});
+
 test("report export rows exactly reflect the displayed report rows", () => {
   const reports = calculateAccountingReports(accounts, knownBooks, "2026-02-01", "2026-03-31");
   const exports = accountingReportExportRows(reports);

@@ -19,7 +19,18 @@ type ReportData = {
   entries: JournalEntry[];
   expenses: ExpenseEntry[];
   ownerTransactions: OwnerFundTransaction[];
-  openingBalances: { posted: boolean; entryDate: string | null };
+  openingBalances: {
+    posted: boolean;
+    entryDate: string | null;
+    activeEntryId: number | null;
+    replacementReversalId: number | null;
+    canCorrect: boolean;
+    history: Array<{
+      id: number; entryDate: string; entryNumber: string; memo: string;
+      kind: "opening_balance" | "replacement" | "reversal";
+      relatedEntryId: number | null; reversalEntryId: number | null; reversed: boolean;
+    }>;
+  };
   trialBalance: TrialRow[];
   incomeStatement: ReportRow[];
   balanceSheet: ReportRow[];
@@ -100,6 +111,25 @@ export default function AccountingWorkspace() {
     }
   }
 
+  async function reverseOpeningBalances(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setNotice("");
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    const entryId = data?.openingBalances.activeEntryId;
+    if (!entryId) return;
+    try {
+      const response = await fetch(`/api/accounting/opening-balances/${entryId}/reverse`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Opening balances could not be reversed.");
+      setNotice(result.message || "Opening balances reversed.");
+      setRange((current) => ({ ...current }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Opening balances could not be reversed.");
+    }
+  }
+
   async function recordExpense(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
@@ -129,6 +159,12 @@ export default function AccountingWorkspace() {
   const exportTrialBalance = () => exportRows && downloadCsv("trial-balance.csv", exportRows.trialBalance);
   const exportIncome = () => exportRows && downloadCsv("income-statement.csv", exportRows.incomeStatement);
   const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
+  const openingBalanceHistory = data?.openingBalances.history ?? [];
+  const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
+  const canEnterOpeningBalances = Boolean(data && !data.openingBalances.posted && (
+    openingBalanceHistory.length === 0 ||
+    (data.openingBalances.canCorrect && data.openingBalances.replacementReversalId !== null)
+  ));
 
   return <>
     <section className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Accounting</h1><p>Review and export the records posted from business activity.</p></div></section>
@@ -200,17 +236,38 @@ export default function AccountingWorkspace() {
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
-      <h2>Enter starting balances</h2>
-      {data?.openingBalances.posted ? (
+      <h2>Starting balances and corrections</h2>
+      {data?.openingBalances.posted && (
+        <>
+          <div className="notice-strip" role="status">
+            Starting balances were recorded on {data.openingBalances.entryDate}. The journal entry is locked; corrections are recorded as linked entries.
+          </div>
+          {data.openingBalances.canCorrect && data.openingBalances.activeEntryId !== null && (
+            <form className="form-grid" style={{ gridTemplateColumns: "1fr", marginTop: 16 }} onSubmit={reverseOpeningBalances}>
+              <h3>Reverse these starting balances</h3>
+              <p>First post a reasoned reversal. You can then enter corrected balances with a new date and memo.</p>
+              <label>Reversal effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+              <label>Reason for correction<textarea name="reason" minLength={3} maxLength={450} required /></label>
+              <button className="button button-primary">Post reversal</button>
+            </form>
+          )}
+        </>
+      )}
+      {!data?.openingBalances.posted && openingBalanceHistory.length > 0 && !data?.openingBalances.replacementReversalId && (
         <div className="notice-strip" role="status">
-          Starting balances were recorded on {data.openingBalances.entryDate}. This one-time entry is locked.
+          Earlier starting balances were reversed. Only the owner can post their corrected replacement.
         </div>
-      ) : (
+      )}
+      {canEnterOpeningBalances && (
         <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={recordOpeningBalances}>
+          {data?.openingBalances.replacementReversalId !== null && data?.openingBalances.replacementReversalId !== undefined
+            ? <input type="hidden" name="reversalEntryId" value={data.openingBalances.replacementReversalId} />
+            : null}
+          {openingBalanceHistory.length > 0 && <h3>Enter corrected starting balances</h3>}
           <p className="notice-strip" style={{ gridColumn: "1 / -1", margin: 0 }}>
             Enter balances as of one date. Use 0 where there is no balance. Customer and supplier amounts are totals.
             Enter stock separately for each product using the reviewed quantity and average cost on the
-            <a href="/stock-adjustments"> Stock adjustments page</a>. These opening entries are one-time and locked after saving.
+            <a href="/stock-adjustments"> Stock adjustments page</a>. Corrections preserve the earlier entries and require a new effective date and memo.
           </p>
           <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
           <label>Cash on hand (ZMW)<input name="cashOnHandZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>
@@ -224,6 +281,32 @@ export default function AccountingWorkspace() {
           <label style={{ gridColumn: "1 / -1" }}>Note<input name="memo" maxLength={500} defaultValue="Opening balances" required /></label>
           <button className="button button-primary">Save starting balances</button>
         </form>
+      )}
+      {openingBalanceHistory.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <h3>Opening-balance journal history</h3>
+          <div className="table-wrap"><table>
+            <thead><tr><th>Date / entry</th><th>Record</th><th>Memo or reason</th><th>Linked entry</th><th>Status</th></tr></thead>
+            <tbody>
+              {openingBalanceHistory.map((entry) => {
+                const relatedEntry = entry.relatedEntryId ? openingHistoryById.get(entry.relatedEntryId) : null;
+                const reversalEntry = entry.reversalEntryId ? openingHistoryById.get(entry.reversalEntryId) : null;
+                const label = entry.kind === "reversal" ? "Reversal" : entry.kind === "replacement" ? "Replacement" : "Original";
+                return <tr key={entry.id}>
+                  <td>{entry.entryDate}<br /><small>{entry.entryNumber}</small></td>
+                  <td>{label}</td>
+                  <td>{entry.memo}</td>
+                  <td>{relatedEntry ? `${relatedEntry.entryNumber}` : "—"}</td>
+                  <td>{entry.kind === "reversal"
+                    ? `Reverses ${relatedEntry?.entryNumber ?? "opening entry"}`
+                    : entry.reversed
+                      ? `Reversed by ${reversalEntry?.entryNumber ?? "journal entry"}`
+                      : "Active"}</td>
+                </tr>;
+              })}
+            </tbody>
+          </table></div>
+        </div>
       )}
     </section>
     <section className="panel form-grid" style={{ padding: 16, marginBottom: 16 }}>
