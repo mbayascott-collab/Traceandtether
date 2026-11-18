@@ -7,8 +7,10 @@ import {
 } from "../shared/schema";
 import { calculateProductProfitability, toMinorUnits } from "../shared/money";
 import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/business-planning";
+import { allocateLandedCosts } from "../shared/landed-cost";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
+import { supplierDeliveryMetrics } from "./supplier-analytics";
 
 const cents = (value: string) => {
   const [whole, fraction = ""] = value.split(".");
@@ -251,99 +253,149 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       ...(fromDate ? [gte(importExpenses.incurredAt, fromDate)] : []),
       ...(toDate ? [lte(importExpenses.incurredAt, toDate)] : []),
     ];
-    const [orders, purchaseLines, expenses, payments, shipmentRows, shipmentLinks] = await Promise.all([
+    const [orders, allOrders, purchaseLines, expenses, payments, shipmentRows, shipmentLinks] = await Promise.all([
       db.select({
         id: purchaseOrders.id, supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
-        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt,
+        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
       }).from(purchaseOrders).innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(orderConditions),
       db.select({
-        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name, orderId: purchaseOrders.id,
-        status: purchaseOrders.status,
+        id: purchaseOrders.id, supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
+      }).from(purchaseOrders).innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)),
+      db.select({
+        lineId: purchaseOrderLines.id, orderId: purchaseOrders.id,
+        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        status: purchaseOrders.status, orderedAt: purchaseOrders.orderedAt,
+        quantityOrdered: purchaseOrderLines.quantityOrdered, unitPrice: purchaseOrderLines.unitPrice,
+        exchangeRateToZmw: purchaseOrders.exchangeRateToZmw,
         totalZmw: sql<string>`round(${purchaseOrderLines.unitPrice}::numeric * ${purchaseOrderLines.quantityOrdered} * ${purchaseOrders.exchangeRateToZmw}::numeric, 2)::text`,
       }).from(purchaseOrderLines).innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
-        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)).where(orderConditions),
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)),
       db.select({
-        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        id: importExpenses.id, purchaseOrderId: importExpenses.purchaseOrderId, shipmentId: importExpenses.shipmentId,
+        amount: importExpenses.amount, exchangeRateToZmw: importExpenses.exchangeRateToZmw, basis: importExpenses.basis,
         amountZmw: sql<string>`round(${importExpenses.amount}::numeric * ${importExpenses.exchangeRateToZmw}::numeric, 2)::text`,
-      }).from(importExpenses).innerJoin(purchaseOrders, eq(importExpenses.purchaseOrderId, purchaseOrders.id))
-        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
-        .where(and(...expenseConditions)),
+      }).from(importExpenses).where(and(...expenseConditions)),
       db.select({
         supplierId: purchaseOrders.supplierId, supplierName: suppliers.name, amountZmw: businessPayments.amountZmw,
       }).from(businessPayments).innerJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(and(eq(businessPayments.direction, "supplier_payment"), ...paymentConditions)),
       db.select({
-        id: shipments.id, purchaseOrderId: shipments.purchaseOrderId, status: shipments.status, receivedAt: shipments.receivedAt,
+        id: shipments.id, purchaseOrderId: shipments.purchaseOrderId, status: shipments.status,
+        expectedAt: shipments.expectedAt, receivedAt: shipments.receivedAt,
       }).from(shipments),
       db.select({ shipmentId: shipmentPurchaseOrders.shipmentId, purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
         .from(shipmentPurchaseOrders),
     ]);
     type SupplierMetric = {
       supplierId: number; name: string; orderedGoods: bigint; importCosts: bigint; payments: bigint;
-      orders: Set<number>; onTime: number; late: number; overdueOpen: number; missingExpected: number;
+      orders: Set<number>;
     };
     const bySupplier = new Map<number, SupplierMetric>();
     const getSupplier = (supplierId: number, name: string) => {
       let supplier = bySupplier.get(supplierId);
       if (!supplier) {
-        supplier = { supplierId, name, orderedGoods: 0n, importCosts: 0n, payments: 0n, orders: new Set(), onTime: 0, late: 0, overdueOpen: 0, missingExpected: 0 };
+        supplier = { supplierId, name, orderedGoods: 0n, importCosts: 0n, payments: 0n, orders: new Set() };
         bySupplier.set(supplierId, supplier);
       }
       return supplier;
     };
-    const linkedShipmentIds = new Map<number, number[]>();
-    for (const link of shipmentLinks) linkedShipmentIds.set(link.purchaseOrderId, [...(linkedShipmentIds.get(link.purchaseOrderId) ?? []), link.shipmentId]);
-    const shipmentsById = new Map(shipmentRows.map((shipment) => [shipment.id, shipment]));
-    const shipmentsByPrimaryOrder = new Map<number, typeof shipmentRows>();
-    for (const shipment of shipmentRows) {
-      if (shipment.status !== "received" || !shipment.receivedAt) continue;
-      shipmentsByPrimaryOrder.set(shipment.purchaseOrderId, [...(shipmentsByPrimaryOrder.get(shipment.purchaseOrderId) ?? []), shipment]);
-    }
     for (const order of orders) {
       const supplier = getSupplier(order.supplierId, order.supplierName);
-      supplier.orders.add(order.id);
-      if (order.status === "cancelled") continue;
-      if (!order.expectedAt) supplier.missingExpected += 1;
-      else if (order.status === "received") {
-        const linked = linkedShipmentIds.get(order.id) ?? [];
-        const related = linked.length
-          ? linked.flatMap((shipmentId) => {
-            const shipment = shipmentsById.get(shipmentId);
-            return shipment?.receivedAt && shipment.status === "received" ? [shipment] : [];
-          })
-          : shipmentsByPrimaryOrder.get(order.id) ?? [];
-        const actualDates = related.map((shipment) => shipment.receivedAt!);
-        const completedAt = actualDates.sort().at(-1);
-        if (completedAt) {
-          if (completedAt <= order.expectedAt) supplier.onTime += 1;
-          else supplier.late += 1;
-        }
-      } else if (order.expectedAt < new Date().toISOString().slice(0, 10)) supplier.overdueOpen += 1;
+      if (order.status !== "cancelled") supplier.orders.add(order.id);
     }
     for (const line of purchaseLines) {
-      if (line.status !== "cancelled") getSupplier(line.supplierId, line.supplierName).orderedGoods += cents(line.totalZmw);
+      if (line.status !== "cancelled" && (!fromDate || line.orderedAt >= fromDate) && (!toDate || line.orderedAt <= toDate)) {
+        getSupplier(line.supplierId, line.supplierName).orderedGoods += cents(line.totalZmw);
+      }
     }
-    for (const expense of expenses) getSupplier(expense.supplierId, expense.supplierName).importCosts += cents(expense.amountZmw);
     for (const payment of payments) getSupplier(payment.supplierId, payment.supplierName).payments += cents(payment.amountZmw);
+    const orderById = new Map(allOrders.map((order) => [order.id, order]));
+    const shipmentById = new Map(shipmentRows.map((shipment) => [shipment.id, shipment]));
+    const orderIdsByShipment = new Map<number, Set<number>>();
+    for (const shipment of shipmentRows) {
+      const linkedOrders = orderIdsByShipment.get(shipment.id) ?? new Set<number>();
+      linkedOrders.add(shipment.purchaseOrderId);
+      orderIdsByShipment.set(shipment.id, linkedOrders);
+    }
+    for (const link of shipmentLinks) {
+      const linkedOrders = orderIdsByShipment.get(link.shipmentId) ?? new Set<number>();
+      linkedOrders.add(link.purchaseOrderId);
+      orderIdsByShipment.set(link.shipmentId, linkedOrders);
+    }
+    const purchaseLinesByOrder = new Map<number, typeof purchaseLines>();
+    for (const line of purchaseLines) {
+      purchaseLinesByOrder.set(line.orderId, [...(purchaseLinesByOrder.get(line.orderId) ?? []), line]);
+    }
+    let unallocatedImportCosts = 0n;
+    for (const expense of expenses) {
+      if (expense.purchaseOrderId !== null) {
+        const order = orderById.get(expense.purchaseOrderId);
+        if (order) getSupplier(order.supplierId, order.supplierName).importCosts += cents(expense.amountZmw);
+        else unallocatedImportCosts += cents(expense.amountZmw);
+        continue;
+      }
+      if (expense.shipmentId === null) {
+        unallocatedImportCosts += cents(expense.amountZmw);
+        continue;
+      }
+      const shipment = shipmentById.get(expense.shipmentId);
+      const linkedOrders = orderIdsByShipment.get(expense.shipmentId) ?? new Set<number>();
+      if (shipment) linkedOrders.add(shipment.purchaseOrderId);
+      const allocationLines = [...linkedOrders].flatMap((orderId) => purchaseLinesByOrder.get(orderId) ?? []);
+      if (!allocationLines.length) {
+        unallocatedImportCosts += cents(expense.amountZmw);
+        continue;
+      }
+      const allocation = allocateLandedCosts(
+        allocationLines.map((line) => ({
+          lineId: line.lineId, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice,
+          valueExchangeRateToZmw: line.exchangeRateToZmw,
+        })),
+        [{
+          expenseId: expense.id, amount: expense.amount,
+          exchangeRateToZmw: expense.exchangeRateToZmw, basis: expense.basis,
+        }],
+        "1",
+      );
+      const supplierByLine = new Map(allocationLines.map((line) => [line.lineId, { supplierId: line.supplierId, name: line.supplierName }]));
+      for (const allocated of allocation.allocations) {
+        const supplier = supplierByLine.get(allocated.lineId);
+        if (supplier) getSupplier(supplier.supplierId, supplier.name).importCosts += cents(allocated.amountZmw);
+      }
+    }
+    const deliveryMetrics = supplierDeliveryMetrics(orders, shipmentRows, shipmentLinks, new Date().toISOString().slice(0, 10));
     const rows = [...bySupplier.values()].map((supplier) => ({
       supplierId: supplier.supplierId, name: supplier.name, orders: supplier.orders.size,
       orderedGoodsZmw: from(supplier.orderedGoods), importCostsZmw: from(supplier.importCosts),
-      paymentsZmw: from(supplier.payments), onTimeOrders: supplier.onTime, lateOrders: supplier.late,
-      overdueOpenOrders: supplier.overdueOpen, missingExpectedDateOrders: supplier.missingExpected,
-      onTimeRatePercent: supplier.onTime + supplier.late > 0
-        ? ((supplier.onTime / (supplier.onTime + supplier.late)) * 100).toFixed(1) : null,
+      paymentsZmw: from(supplier.payments),
+      onTimeOrders: deliveryMetrics.get(supplier.supplierId)?.onTimeDeliveries ?? 0,
+      lateOrders: deliveryMetrics.get(supplier.supplierId)?.lateDeliveries ?? 0,
+      measuredDeliveryOrders: deliveryMetrics.get(supplier.supplierId)?.measuredDeliveries ?? 0,
+      averageDeliveryVarianceDays: deliveryMetrics.get(supplier.supplierId)?.averageDeliveryVarianceDays ?? null,
+      overdueOpenOrders: deliveryMetrics.get(supplier.supplierId)?.overdueOpenOrders ?? 0,
+      missingExpectedDateOrders: deliveryMetrics.get(supplier.supplierId)?.missingExpectedDateOrders ?? 0,
+      missingActualDateOrders: deliveryMetrics.get(supplier.supplierId)?.missingActualDateOrders ?? 0,
+      incompleteDeliveryOrders: deliveryMetrics.get(supplier.supplierId)?.incompleteDeliveryOrders ?? 0,
     })).sort((a, b) => Number(b.orderedGoodsZmw) - Number(a.orderedGoodsZmw));
+    const allocatedImportCosts = rows.reduce((sum, row) => sum + cents(row.importCostsZmw), 0n);
     res.json({
       period: { from: fromDate || null, to: toDate || null },
       totals: {
-        suppliers: rows.length, orderedGoodsZmw: from(rows.reduce((sum, row) => sum + cents(row.orderedGoodsZmw), 0n)),
-        importCostsZmw: from(rows.reduce((sum, row) => sum + cents(row.importCostsZmw), 0n)),
+        suppliers: rows.length, orders: rows.reduce((sum, row) => sum + row.orders, 0),
+        orderedGoodsZmw: from(rows.reduce((sum, row) => sum + cents(row.orderedGoodsZmw), 0n)),
+        importCostsZmw: from(allocatedImportCosts + unallocatedImportCosts),
         paymentsZmw: from(rows.reduce((sum, row) => sum + cents(row.paymentsZmw), 0n)),
+        unallocatedImportCostsZmw: from(unallocatedImportCosts),
         onTimeOrders: rows.reduce((sum, row) => sum + row.onTimeOrders, 0),
         lateOrders: rows.reduce((sum, row) => sum + row.lateOrders, 0),
         overdueOpenOrders: rows.reduce((sum, row) => sum + row.overdueOpenOrders, 0),
+        measuredDeliveryOrders: rows.reduce((sum, row) => sum + row.measuredDeliveryOrders, 0),
+        missingExpectedDateOrders: rows.reduce((sum, row) => sum + row.missingExpectedDateOrders, 0),
+        missingActualDateOrders: rows.reduce((sum, row) => sum + row.missingActualDateOrders, 0),
+        incompleteDeliveryOrders: rows.reduce((sum, row) => sum + row.incompleteDeliveryOrders, 0),
       },
       suppliers: rows,
     });

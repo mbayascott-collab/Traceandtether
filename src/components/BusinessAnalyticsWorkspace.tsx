@@ -17,13 +17,28 @@ type DashboardData = {
   cashForecast: { estimatedClosingZmw: string; assumption: string };
 };
 type SupplierAnalytics = {
-  totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number };
+  totals: {
+    orderedGoodsZmw: string; importCostsZmw: string; unallocatedImportCostsZmw: string; paymentsZmw: string;
+    orders: number; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number;
+    missingExpectedDateOrders: number; missingActualDateOrders: number; incompleteDeliveryOrders: number;
+    measuredDeliveryOrders: number;
+  };
   suppliers: {
     supplierId: number; name: string; orders: number; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
-    onTimeOrders: number; lateOrders: number; overdueOpenOrders: number; missingExpectedDateOrders: number; onTimeRatePercent: string | null;
+    onTimeOrders: number; lateOrders: number; overdueOpenOrders: number; missingExpectedDateOrders: number;
+    missingActualDateOrders: number; incompleteDeliveryOrders: number; measuredDeliveryOrders: number;
+    averageDeliveryVarianceDays: string | null;
   }[];
 };
 const money = (value: string | null | undefined) => value == null ? "—" : `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const deliveryVariance = (value: string | null) => {
+  if (value == null) return "—";
+  const days = Number(value);
+  if (!Number.isFinite(days)) return "—";
+  if (days === 0) return "0 days · on time";
+  const amount = Math.abs(days).toLocaleString("en", { maximumFractionDigits: 1 });
+  return days > 0 ? `+${amount} days · late` : `−${amount} days · early`;
+};
 const dateRange = () => {
   const end = new Date();
   const start = new Date(end.getFullYear(), end.getMonth() - 11, 1);
@@ -153,17 +168,46 @@ export default function BusinessAnalyticsWorkspace() {
           <div><span>Goods ordered</span><strong>{money(supplierReport.totals.orderedGoodsZmw)}</strong></div>
           <div><span>Import costs recorded</span><strong>{money(supplierReport.totals.importCostsZmw)}</strong></div>
           <div><span>Supplier payments recorded</span><strong>{money(supplierReport.totals.paymentsZmw)}</strong></div>
-          <div><span>Late / overdue orders</span><strong>{supplierReport.totals.lateOrders} / {supplierReport.totals.overdueOpenOrders}</strong></div>
+          <div><span>Orders in period</span><strong>{supplierReport.totals.orders}</strong></div>
         </div>
-        <div className="table-wrap"><table><thead><tr><th>Supplier</th><th>Orders</th><th>Goods ordered</th><th>Import costs</th><th>Payments</th><th>On time</th><th>Late</th><th>Overdue open</th></tr></thead><tbody>
+        {Number(supplierReport.totals.unallocatedImportCostsZmw) > 0 && <p className="analytics-unallocated-costs" role="status">
+          {money(supplierReport.totals.unallocatedImportCostsZmw)} in import costs could not be assigned to a supplier and is not included in supplier rows.
+        </p>}
+        <div className="analytics-delivery-summary" aria-label="Delivery date quality totals">
+          <div className="delivery-summary-item delivery-matched"><span>Matched delivery dates</span><strong>{supplierReport.totals.measuredDeliveryOrders}</strong><small>Expected and actual dates recorded</small></div>
+          <div className="delivery-summary-item delivery-missing"><span>Missing expected date</span><strong>{supplierReport.totals.missingExpectedDateOrders}</strong><small>Orders without a planned date</small></div>
+          <div className="delivery-summary-item delivery-missing"><span>Missing actual date</span><strong>{supplierReport.totals.missingActualDateOrders}</strong><small>Orders with no recorded receipt date</small></div>
+          <div className="delivery-summary-item delivery-open"><span>Incomplete / open deliveries</span><strong>{supplierReport.totals.incompleteDeliveryOrders}</strong><small>Not fully received</small></div>
+          <div className="delivery-summary-item delivery-overdue"><span>Overdue open orders</span><strong>{supplierReport.totals.overdueOpenOrders}</strong><small>Open beyond expected receipt date</small></div>
+        </div>
+        <div className="table-wrap analytics-supplier-table-wrap">
+          <table className="analytics-supplier-table">
+            <caption className="analytics-table-caption">Supplier costs in Zambian kwacha and delivery date quality for the selected period</caption>
+            <thead>
+              <tr>
+                <th scope="col" rowSpan={2}>Supplier</th>
+                <th scope="colgroup" colSpan={4}>Spend · ZMW</th>
+                <th scope="colgroup" colSpan={8}>Delivery record</th>
+              </tr>
+              <tr>
+                <th scope="col">Orders</th><th scope="col">Goods ordered</th><th scope="col">Import costs</th><th scope="col">Payments</th>
+                <th scope="col">Matched dates</th><th scope="col">On time</th><th scope="col">Late</th>
+                <th scope="col">Missing expected</th><th scope="col">Missing actual</th><th scope="col">Incomplete / open</th>
+                <th scope="col">Overdue open</th><th scope="col">Average variance</th>
+              </tr>
+            </thead>
+            <tbody>
           {supplierReport.suppliers.map((supplier) => <tr key={supplier.supplierId}>
-            <td>{supplier.name}</td><td>{supplier.orders}</td><td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td><td>{money(supplier.paymentsZmw)}</td>
-            <td>{supplier.onTimeOrders} {supplier.onTimeRatePercent == null ? "(not enough dates)" : `(${supplier.onTimeRatePercent}%)`}</td>
-            <td>{supplier.lateOrders}</td><td>{supplier.overdueOpenOrders}</td>
+            <th scope="row" className="analytics-supplier-name">{supplier.name}</th>
+            <td>{supplier.orders}</td><td className="analytics-supplier-money">{money(supplier.orderedGoodsZmw)}</td><td className="analytics-supplier-money">{money(supplier.importCostsZmw)}</td><td className="analytics-supplier-money">{money(supplier.paymentsZmw)}</td>
+            <td className="delivery-matched-cell">{supplier.measuredDeliveryOrders}</td><td>{supplier.onTimeOrders}</td><td className="delivery-late-cell">{supplier.lateOrders}</td>
+            <td className="delivery-missing-cell">{supplier.missingExpectedDateOrders}</td><td className="delivery-missing-cell">{supplier.missingActualDateOrders}</td>
+            <td className="delivery-open-cell">{supplier.incompleteDeliveryOrders}</td><td className="delivery-overdue-cell">{supplier.overdueOpenOrders}</td>
+            <td className="analytics-variance-cell">{deliveryVariance(supplier.averageDeliveryVarianceDays)}</td>
           </tr>)}
-          {!supplierReport.suppliers.length && <tr><td colSpan={8}>No supplier orders in this period.</td></tr>}
+          {!supplierReport.suppliers.length && <tr><td colSpan={13} className="analytics-supplier-empty">No supplier orders in this period.</td></tr>}
         </tbody></table></div>
-        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Payments and import costs use their own recorded dates and exchange rates. On-time rates include only fully received orders with expected and actual receipt dates; missing dates are not guessed.</p>
+        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis. Payments and import costs use their own recorded dates and exchange rates. Matched delivery dates use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
       </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
     </>}
