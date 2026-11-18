@@ -8,12 +8,14 @@ import {
   inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockCorrectionInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
-  inventoryLocations, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
+  inventoryLocations, inventoryMovementEvidence, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
   shipmentLines, shipments, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
-import { inspectOpeningStockEvidence } from "./opening-stock-evidence";
+import {
+  inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_FILES, parseOpeningStockEvidenceMultipart,
+} from "./opening-stock-evidence";
 import {
   accountBalance, allocateInventoryValueByLocationCents, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
   journalLinesAreBalanced, postJournal, reverseJournalEntry, weightedAverageUnitCostCents,
@@ -136,7 +138,28 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       .from(inventoryMovements).innerJoin(products, eq(inventoryMovements.productId, products.id))
       .leftJoin(inventoryLocations, eq(inventoryMovements.locationId, inventoryLocations.id))
       .orderBy(desc(inventoryMovements.createdAt)).limit(200);
-    res.json({ movements: rows });
+    const evidenceRows = rows.length
+      ? await db.select({
+        id: inventoryMovementEvidence.id, movementId: inventoryMovementEvidence.movementId,
+        fileName: inventoryMovementEvidence.fileName, mimeType: inventoryMovementEvidence.mimeType,
+      }).from(inventoryMovementEvidence)
+        .where(inArray(inventoryMovementEvidence.movementId, rows.map((row) => row.id)))
+        .orderBy(asc(inventoryMovementEvidence.id))
+      : [];
+    const evidenceByMovement = new Map<number, typeof evidenceRows>();
+    evidenceRows.forEach((evidence) => evidenceByMovement.set(
+      evidence.movementId,
+      [...(evidenceByMovement.get(evidence.movementId) ?? []), evidence],
+    ));
+    res.json({ movements: rows.map(({ evidenceFileName, evidenceMimeType, ...movement }) => ({
+      ...movement,
+      evidenceFiles: [
+        ...(evidenceByMovement.get(movement.id) ?? []).map(({ id, fileName, mimeType }) => ({ id, fileName, mimeType })),
+        ...(evidenceFileName && evidenceMimeType
+          ? [{ id: null, fileName: evidenceFileName, mimeType: evidenceMimeType }]
+          : []),
+      ],
+    })) });
   });
 
   app.get("/api/inventory/movements/:id/opening-evidence", owner, async (req, res) => {
@@ -146,15 +169,51 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       kind: inventoryMovements.kind, evidenceFileName: inventoryMovements.evidenceFileName,
       evidenceMimeType: inventoryMovements.evidenceMimeType, evidenceData: inventoryMovements.evidenceData,
     }).from(inventoryMovements).where(eq(inventoryMovements.id, id)).limit(1);
-    if (movement?.kind !== "opening_stock" || !movement.evidenceData || !movement.evidenceMimeType || !movement.evidenceFileName) {
+    if (movement?.kind !== "opening_stock") {
       return res.status(404).json({ error: "No count evidence is saved for this opening-stock entry." });
     }
-    const downloadName = movement.evidenceFileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    const [firstEvidence] = movement.evidenceData ? [] : await db.select({
+      fileName: inventoryMovementEvidence.fileName,
+      mimeType: inventoryMovementEvidence.mimeType,
+      data: inventoryMovementEvidence.data,
+    }).from(inventoryMovementEvidence).where(eq(inventoryMovementEvidence.movementId, id))
+      .orderBy(asc(inventoryMovementEvidence.id)).limit(1);
+    const fileName = movement.evidenceFileName ?? firstEvidence?.fileName;
+    const mimeType = movement.evidenceMimeType ?? firstEvidence?.mimeType;
+    const data = movement.evidenceData ?? firstEvidence?.data;
+    if (!fileName || !mimeType || !data) {
+      return res.status(404).json({ error: "No count evidence is saved for this opening-stock entry." });
+    }
+    const downloadName = fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Content-Type", movement.evidenceMimeType);
+    res.setHeader("Content-Type", mimeType);
     res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
-    return res.send(movement.evidenceData);
+    return res.send(data);
+  });
+
+  app.get("/api/inventory/movements/:id/opening-evidence/:evidenceId", owner, async (req, res) => {
+    const movementId = getId(req.params.id);
+    const evidenceId = getId(req.params.evidenceId);
+    if (!movementId || !evidenceId) return bad(res, "Invalid opening-stock evidence.");
+    const [evidence] = await db.select({
+      fileName: inventoryMovementEvidence.fileName,
+      mimeType: inventoryMovementEvidence.mimeType,
+      data: inventoryMovementEvidence.data,
+    }).from(inventoryMovementEvidence)
+      .innerJoin(inventoryMovements, eq(inventoryMovementEvidence.movementId, inventoryMovements.id))
+      .where(and(
+        eq(inventoryMovementEvidence.id, evidenceId),
+        eq(inventoryMovementEvidence.movementId, movementId),
+        eq(inventoryMovements.kind, "opening_stock"),
+      )).limit(1);
+    if (!evidence) return res.status(404).json({ error: "Count evidence was not found for this opening-stock entry." });
+    const downloadName = evidence.fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Type", evidence.mimeType);
+    res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
+    return res.send(evidence.data);
   });
 
   app.get("/api/inventory/locations", owner, async (_req, res) => {
@@ -493,15 +552,33 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.post("/api/inventory/opening-stock", owner, async (req, res) => {
-    const rawEvidence = Buffer.isBuffer(req.body);
-    const openingStockBody = rawEvidence
-      ? Object.fromEntries(Object.entries(req.query).filter(([key]) => key !== "fileName"))
-      : req.body;
+    const rawEvidence = Buffer.isBuffer(req.body) && req.is("application/octet-stream");
+    const multipartEvidence = Buffer.isBuffer(req.body) && req.is("multipart/form-data");
+    let openingStockBody = req.body;
+    let uploadedFiles: { fileName: string; data: Buffer }[] = [];
+    if (multipartEvidence) {
+      const parsedMultipart = parseOpeningStockEvidenceMultipart(req.body as Buffer, req.get("content-type") ?? "");
+      if ("error" in parsedMultipart) return bad(res, parsedMultipart.error ?? "The count evidence upload is invalid.");
+      openingStockBody = parsedMultipart.fields;
+      uploadedFiles = parsedMultipart.files;
+    } else if (rawEvidence) {
+      openingStockBody = Object.fromEntries(Object.entries(req.query).filter(([key]) => key !== "fileName"));
+      uploadedFiles = [{
+        fileName: typeof req.query.fileName === "string" ? req.query.fileName : "",
+        data: req.body as Buffer,
+      }];
+    }
     const parsed = openingStockInputSchema.safeParse(openingStockBody);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the opening stock details.");
-    const file = rawEvidence ? req.body as Buffer : null;
-    const evidence = file ? inspectOpeningStockEvidence(file, typeof req.query.fileName === "string" ? req.query.fileName : "") : null;
-    if (evidence && "error" in evidence) return bad(res, evidence.error ?? "Invalid count evidence.");
+    if (uploadedFiles.length > MAX_OPENING_STOCK_EVIDENCE_FILES) {
+      return bad(res, `Attach no more than ${MAX_OPENING_STOCK_EVIDENCE_FILES} count files.`);
+    }
+    const checkedEvidence = uploadedFiles.map((file) => ({
+      data: file.data,
+      result: inspectOpeningStockEvidence(file.data, file.fileName),
+    }));
+    const invalidEvidence = checkedEvidence.find((item) => "error" in item.result);
+    if (invalidEvidence && "error" in invalidEvidence.result) return bad(res, invalidEvidence.result.error ?? "Invalid count evidence.");
     const result = await db.transaction(async (tx) => {
       const [product] = await tx.select({ id: products.id, name: products.name })
         .from(products).where(eq(products.id, parsed.data.productId)).for("update").limit(1);
@@ -522,14 +599,22 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       const movement = (await tx.insert(inventoryMovements).values({
         productId: product.id, locationId, kind: "opening_stock", quantityDelta: parsed.data.quantity,
         reason: memo, reference: parsed.data.reference, sourceKey,
-        evidenceFileName: evidence && !("error" in evidence) ? evidence.fileName : null,
-        evidenceMimeType: evidence && !("error" in evidence) ? evidence.mimeType : null,
-        evidenceData: evidence && !("error" in evidence) ? file : null,
       }).returning({ id: inventoryMovements.id }))[0]!;
+      if (checkedEvidence.length) {
+        await tx.insert(inventoryMovementEvidence).values(checkedEvidence.map(({ data, result: evidence }) => {
+          if ("error" in evidence) throw new Error(evidence.error);
+          return {
+            movementId: movement.id,
+            fileName: evidence.fileName,
+            mimeType: evidence.mimeType,
+            data,
+          };
+        }));
+      }
       await recordBusinessAudit(tx, {
         entityType: "inventory_movement", entityId: movement.id, recordLabel: `Opening stock · ${product.name}`,
         actor: res.locals.actor, action: "created",
-        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", ...(evidence ? ["evidence"] : [])],
+        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", ...(checkedEvidence.length ? ["evidence"] : [])],
       });
       await postJournal(tx, {
         sourceKey, sourceType: "opening_stock", sourceId: movement.id,

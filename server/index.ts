@@ -42,6 +42,10 @@ app.use(
   "/api/inventory/opening-stock",
   express.raw({ type: "application/octet-stream", limit: "5mb" }),
 );
+app.use(
+  "/api/inventory/opening-stock",
+  express.raw({ type: "multipart/form-data", limit: "26mb" }),
+);
 app.use(express.json({ limit: "64kb" }));
 registerApiRoutes(app);
 

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_BYTES } from "./opening-stock-evidence";
+import {
+  inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_BYTES, MAX_OPENING_STOCK_EVIDENCE_FILES,
+  parseOpeningStockEvidenceMultipart,
+} from "./opening-stock-evidence";
 
 test("opening-stock evidence accepts supported worksheet and photo types", () => {
   assert.equal(inspectOpeningStockEvidence(Buffer.from("%PDF-1.7 worksheet"), "count.pdf").mimeType, "application/pdf");
@@ -20,4 +23,37 @@ test("opening-stock evidence rejects empty, oversized, and unsupported files", (
 
 test("opening-stock evidence strips paths and unsafe filename characters", () => {
   assert.equal(inspectOpeningStockEvidence(Buffer.from("%PDF-1.7"), '../count"\n-sheet.pdf').fileName, "count-sheet.pdf");
+});
+
+test("opening-stock multipart upload keeps all count fields and evidence files together", () => {
+  const boundary = "count-boundary";
+  const body = Buffer.from([
+    `--${boundary}\r\nContent-Disposition: form-data; name="productId"\r\n\r\n12`,
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="memo"\r\n\r\nOpening count`,
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="evidence"; filename="signed-count.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-worksheet`,
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="evidence"; filename="stock-photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\nphoto-bytes`,
+    `\r\n--${boundary}--\r\n`,
+  ].join(""));
+  const parsed = parseOpeningStockEvidenceMultipart(body, `multipart/form-data; boundary=${boundary}`);
+
+  assert.ok(!("error" in parsed));
+  if ("error" in parsed) return;
+  assert.deepEqual({ ...parsed.fields }, { productId: "12", memo: "Opening count" });
+  assert.deepEqual(parsed.files.map(({ fileName, data }) => [fileName, data.toString()]), [
+    ["signed-count.pdf", "%PDF-worksheet"],
+    ["stock-photo.jpg", "photo-bytes"],
+  ]);
+});
+
+test("opening-stock multipart upload rejects malformed bodies and too many files", () => {
+  assert.ok("error" in parseOpeningStockEvidenceMultipart(Buffer.from("bad"), "multipart/form-data; boundary=count"));
+
+  const boundary = "count-boundary";
+  const parts = Array.from({ length: MAX_OPENING_STOCK_EVIDENCE_FILES + 1 }, (_, index) =>
+    `--${boundary}\r\nContent-Disposition: form-data; name="evidence"; filename="file-${index}.pdf"\r\n\r\n%PDF-${index}\r\n`,
+  ).join("");
+  const body = Buffer.from(`${parts}--${boundary}--\r\n`);
+  const parsed = parseOpeningStockEvidenceMultipart(body, `multipart/form-data; boundary=${boundary}`);
+  assert.ok("error" in parsed);
+  if ("error" in parsed) assert.match(parsed.error ?? "", /no more than/);
 });

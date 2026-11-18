@@ -644,6 +644,23 @@ export const inventoryMovements = pgTable(
   ],
 );
 
+export const inventoryMovementEvidence = pgTable(
+  "inventory_movement_evidence",
+  {
+    id: serial("id").primaryKey(),
+    movementId: integer("movement_id").notNull().references(() => inventoryMovements.id, { onDelete: "restrict" }),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    mimeType: varchar("mime_type", { length: 80 }).notNull(),
+    data: bytea("data").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("inventory_movement_evidence_movement_idx").on(table.movementId),
+    check("inventory_movement_evidence_file_name_nonempty", sql`length(trim(${table.fileName})) > 0`),
+    check("inventory_movement_evidence_data_nonempty", sql`octet_length(${table.data}) > 0`),
+  ],
+);
+
 export const importExpenses = pgTable(
   "import_expenses",
   {

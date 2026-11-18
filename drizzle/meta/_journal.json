@@ -365,6 +365,13 @@
       "when": 1795034391853,
       "tag": "0051_eager_mister_sinister",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1795034908290,
+      "tag": "0052_opening_stock_multiple_evidence",
+      "breakpoints": true
     }
   ]
 }

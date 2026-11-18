@@ -141,7 +141,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
           productId: Number(d.get("productId")), locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),
           unitCostZmw: String(d.get("unitCostZmw")), effectiveAt: String(d.get("effectiveAt")),
           memo: String(d.get("memo")), reference: String(d.get("reference") || "") || null,
-          evidence: evidence instanceof File && evidence.size > 0 ? evidence : null,
+          evidence: evidence instanceof FileList ? Array.from(evidence).filter((file) => file.size > 0) : [],
         });
       })} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); }}>
         <h2>Add stock you already have</h2>
@@ -154,8 +154,8 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
         <label>Memo<input name="memo" maxLength={500} defaultValue="Reviewed opening stock" required /></label>
         <label>Reference<input name="reference" maxLength={120} placeholder="Opening count or source note" /></label>
-        <label>Count worksheet or photo<input name="evidence" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" /></label>
-        <p className="report-footnote field-full">Optional: attach one PDF or photo, up to 5 MB. The file is saved with the opening entry and cannot be replaced or removed.</p>
+        <label>Count worksheets or photos<input name="evidence" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" /></label>
+        <p className="report-footnote field-full">Optional: attach up to five PDFs or photos, each up to 5 MB. Files are saved with the opening entry and cannot be replaced or removed.</p>
         <button className="button button-primary">Record opening stock</button>
       </form>
       {correctingMovement && <form className="panel form-grid" onSubmit={(event) => submit(event, async (d) => {
@@ -196,6 +196,6 @@ function MovementTable({ movements, onCorrect }: { movements: InventoryMovement[
       : m.correctionOfMovementId !== null
         ? `Replaces reversal #${m.correctionOfMovementId}`
         : child ? `Corrected by #${child.id}` : "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFileName ? <a href={`/api/inventory/movements/${m.id}/opening-evidence`} target="_blank" rel="noreferrer">{m.evidenceFileName}</a> : "—"}</td></tr>;
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={file.id === null ? `/api/inventory/movements/${m.id}/opening-evidence` : `/api/inventory/movements/${m.id}/opening-evidence/${file.id}`} target="_blank" rel="noreferrer">{file.fileName}</a></span>) : "—"}</td></tr>;
   })}{!movements.length && <tr><td colSpan={9}>No stock movements yet.</td></tr>}</tbody></table></div>;
 }

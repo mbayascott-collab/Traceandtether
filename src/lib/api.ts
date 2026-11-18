@@ -47,7 +47,8 @@ export interface InventoryItem {
   stockValueZmw: string; averageUnitCostZmw: string;
   locations: { id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueZmw: string }[];
 }
-export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; salesDeliveryLineId: number | null; correctionOfMovementId: number | null; createdAt: string; evidenceFileName: string | null; evidenceMimeType: string | null; }
+export interface InventoryMovementEvidence { id: number | null; fileName: string; mimeType: string; }
+export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; salesDeliveryLineId: number | null; correctionOfMovementId: number | null; createdAt: string; evidenceFiles: InventoryMovementEvidence[]; }
 export interface InventoryLocation { id: number; name: string; active: boolean; }
 export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; locationName: string | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
@@ -241,11 +242,12 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(url, {
     ...init,
     credentials: "same-origin",
     headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
   });
@@ -442,20 +444,17 @@ export async function createInventoryAdjustment(input: { productId: number; loca
 }
 export async function createOpeningStock(input: {
   productId: number; locationId: number; quantity: number; unitCostZmw: string; effectiveAt: string; memo: string; reference: string | null;
-  evidence: File | null;
+  evidence: File[];
 }): Promise<void> {
   const { evidence, ...details } = input;
-  if (!evidence) {
+  if (!evidence.length) {
     await request("/api/inventory/opening-stock", { method: "POST", body: JSON.stringify(details) });
     return;
   }
-  const query = new URLSearchParams({
-    ...Object.fromEntries(Object.entries(details).map(([key, value]) => [key, String(value ?? "")])),
-    fileName: evidence.name,
-  });
-  await request(`/api/inventory/opening-stock?${query.toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: evidence,
-  });
+  const form = new FormData();
+  Object.entries(details).forEach(([key, value]) => form.append(key, String(value ?? "")));
+  evidence.forEach((file) => form.append("evidence", file, file.name));
+  await request("/api/inventory/opening-stock", { method: "POST", body: form });
 }
 export async function correctOpeningStock(id: number, input: {
   quantity: number; unitCostZmw: string; effectiveAt: string; reason: string; reference: string | null;
