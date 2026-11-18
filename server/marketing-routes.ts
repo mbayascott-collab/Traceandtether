@@ -1,5 +1,6 @@
 import { asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
@@ -25,7 +26,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/marketing/campaigns", owner, async (req, res) => {
     const parsed = campaignSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
-    const [campaign] = await db.insert(marketingCampaigns).values(parsed.data).returning();
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      ...parsed.data, trackingCode: randomUUID(),
+    }).returning();
     res.status(201).json({ campaign });
   });
   app.patch("/api/marketing/campaigns/:id", owner, async (req, res) => {
@@ -138,13 +141,17 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         revenueByOrderInRange.set(order.id, (revenueByOrderInRange.get(order.id) ?? 0n) + value);
       }
     }
-    const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row.campaignId]));
+    const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row]));
     const campaignTotals = new Map(campaigns.map((c) => [c.id, { orderCount: 0, revenue: 0n, spend: 0n }]));
     let unattributedRevenue = 0n, unattributedOrders = 0, generalSpend = 0n;
+    let campaignLinkOrders = 0, ordersWithoutCampaignLinks = 0;
     for (const order of orders) {
       if (deliveredInRange.has(order.id)) {
         const revenue = revenueByOrderInRange.get(order.id) ?? 0n;
-        const campaignId = attributedCampaign.get(order.id);
+        const attribution = attributedCampaign.get(order.id);
+        if (attribution?.source === "campaign_link") campaignLinkOrders += 1;
+        else ordersWithoutCampaignLinks += 1;
+        const campaignId = attribution?.campaignId;
         if (campaignId == null) { unattributedRevenue += revenue; unattributedOrders += 1; }
         else {
           const stat = campaignTotals.get(campaignId);
@@ -202,6 +209,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       totals: {
         spendZmw: formatCents(totalSpend), attributedRevenueZmw: formatCents(attributedRevenue),
         attributedOrders: campaignRows.reduce((total, row) => total + row.orderCount, 0),
+        campaignLinkOrders, ordersWithoutCampaignLinks,
         unattributedRevenueZmw: formatCents(unattributedRevenue), unattributedOrders,
         revenueToSpend: ratio(attributedRevenue, totalSpend),
       },

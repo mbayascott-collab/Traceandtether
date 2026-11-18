@@ -309,6 +309,7 @@ export const publicShopOrderInputSchema = z.object({
   email: z.preprocess((value) => value === "" || value === undefined ? null : value, z.string().trim().email().max(254).nullable()),
   address: z.string().trim().max(5_000).optional().default(""),
   notes: z.string().trim().max(1_000).optional().default(""),
+  trackingCode: z.string().uuid().optional(),
   lines: z.array(z.object({
     productId: positiveInteger,
     quantity: z.number().int().min(1).max(99),

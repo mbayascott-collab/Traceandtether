@@ -162,6 +162,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const parsed = publicShopOrderInputSchema.safeParse(orderBody);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check your order details.");
     const result = await db.transaction(async (tx) => {
+      const [sourceCampaign] = parsed.data.trackingCode
+        ? await tx.select({ id: marketingCampaigns.id }).from(marketingCampaigns)
+          .where(eq(marketingCampaigns.trackingCode, parsed.data.trackingCode)).limit(1)
+        : [];
       const ids = parsed.data.lines.map((line) => line.productId);
       const selected = await tx.select({
         id: products.id, name: products.name, status: products.status, sellingPriceZmw: products.sellingPriceZmw,
@@ -198,6 +202,11 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         quantity: line.quantity,
         unitPriceZmw: byId.get(line.productId)!.sellingPriceZmw!,
       })));
+      if (sourceCampaign) {
+        await tx.insert(marketingAttributions).values({
+          salesOrderId: order.id, campaignId: sourceCampaign.id, source: "campaign_link",
+        });
+      }
       return { orderNumber };
     });
     if ("error" in result) return res.status(409).json({ error: result.error });
@@ -388,8 +397,8 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     }
     const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId)).limit(1);
     if (!campaign) return bad(res, "Choose an existing campaign.");
-    await db.insert(marketingAttributions).values({ salesOrderId: id, campaignId })
-      .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, attributedAt: new Date() } });
+    await db.insert(marketingAttributions).values({ salesOrderId: id, campaignId, source: "manual" })
+      .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, source: "manual", attributedAt: new Date() } });
     res.json({ campaignId });
   });
   app.post("/api/sales-orders", owner, async (req, res) => {

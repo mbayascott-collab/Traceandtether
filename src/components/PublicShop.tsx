@@ -18,6 +18,10 @@ export default function PublicShop() {
   const [orderNumber, setOrderNumber] = useState("");
   const [challenge, setChallenge] = useState("");
   const [website, setWebsite] = useState("");
+  const [trackingCode] = useState(() => {
+    const referral = new URLSearchParams(window.location.search).get("ref") ?? "";
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(referral) ? referral : "";
+  });
   const [customer, setCustomer] = useState({ name: "", phone: "", email: "", address: "", notes: "" });
 
   useEffect(() => {
@@ -56,6 +60,7 @@ export default function PublicShop() {
           ...customer,
           challenge,
           website,
+          trackingCode: trackingCode || undefined,
           lines: cartProducts.map((product) => ({ productId: product.id, quantity: cart[product.id] })),
         }),
       });

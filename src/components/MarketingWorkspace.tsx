@@ -1,12 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Pencil, Plus, RefreshCw, X } from "lucide-react";
+import { Copy, Pencil, Plus, RefreshCw, X } from "lucide-react";
 
-type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null };
+type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
 type MarketingReport = {
   period: { from: string | null; to: string | null };
-  totals: { spendZmw: string; attributedRevenueZmw: string; attributedOrders: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
+  totals: { spendZmw: string; attributedRevenueZmw: string; attributedOrders: number; campaignLinkOrders: number; ordersWithoutCampaignLinks: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
   campaigns: { id: number; name: string; status: string; orderCount: number; attributedRevenueZmw: string; spendZmw: string; revenueToSpend: string | null }[];
   segments: { key: string; name: string; customerCount: number; fulfilledOrders: number; salesZmw: string; customers: { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; salesZmw: string }[] }[];
 };
@@ -109,6 +109,20 @@ export default function MarketingWorkspace() {
       setExpenseForm(expenseEmpty); setMessage(`Expense recorded. ${money(result.amountZmw)} posted to accounting.`); await load();
     } catch (reason) { setError(displayError(reason)); }
   }
+  async function copyShopLink(campaign: Campaign) {
+    try {
+      await navigator.clipboard.writeText(shopLink(campaign));
+      setMessage(`Shop link copied for ${campaign.name}.`);
+      setError("");
+    } catch {
+      setError("Could not copy the shop link. Select the link shown under the campaign name and copy it.");
+    }
+  }
+  function shopLink(campaign: Campaign) {
+    const url = new URL("/shop", window.location.origin);
+    url.searchParams.set("ref", campaign.trackingCode);
+    return url.toString();
+  }
   function editCampaign(item: Campaign) {
     setEditingCampaign(item.id);
     setCampaignForm({ name: item.name, objective: item.objective ?? "", channel: item.channel ?? "", status: item.status, startsOn: item.startsOn ?? "", endsOn: item.endsOn ?? "", budgetZmw: item.budgetZmw ?? "", notes: item.notes ?? "" });
@@ -139,7 +153,7 @@ export default function MarketingWorkspace() {
               <button className="button button-primary button-small"><Plus /> {editingCampaign ? "Save campaign" : "Add campaign"}</button>
               {editingCampaign && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCampaign(null); setCampaignForm(campaignEmpty); }}><X /> Cancel edit</button>}
             </form>
-            <div className="marketing-list">{campaigns.map((item) => <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}</span></div><button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>)}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
+            <div className="marketing-list">{campaigns.map((item) => <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button><button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>)}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
           </section>
 
           <section className="panel marketing-section">
@@ -184,6 +198,8 @@ export default function MarketingWorkspace() {
             <div><span>Marketing spend</span><strong>{money(report.totals.spendZmw)}</strong></div>
             <div><span>Attributed sales</span><strong>{money(report.totals.attributedRevenueZmw)}</strong></div>
             <div><span>Attributed orders</span><strong>{report.totals.attributedOrders}</strong></div>
+            <div><span>Orders from campaign links</span><strong>{report.totals.campaignLinkOrders}</strong></div>
+            <div><span>Orders without campaign links</span><strong>{report.totals.ordersWithoutCampaignLinks}</strong></div>
             <div><span>Sales per ZMW spent</span><strong>{report.totals.revenueToSpend ?? "—"}</strong></div>
           </div>
           <div className="marketing-report-grid">
@@ -194,7 +210,7 @@ export default function MarketingWorkspace() {
             <label>Show customer group<select value={selectedSegment} onChange={(e) => setSelectedSegment(e.target.value)}>{report.segments.map((segment) => <option key={segment.key} value={segment.key}>{segment.name} ({segment.customerCount})</option>)}</select></label>
             <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th></tr></thead><tbody>{(report.segments.find((segment) => segment.key === selectedSegment)?.customers ?? []).map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.salesZmw)}</td></tr>)}</tbody></table></div>
           </div>
-          <p className="marketing-report-note">Unattributed fulfilled sales: {money(report.totals.unattributedRevenueZmw)} across {report.totals.unattributedOrders} orders. Link orders to a campaign on the Sales orders page to include them in campaign results.</p>
+          <p className="marketing-report-note">Campaign-link orders are attributed automatically; orders without a campaign link may still be assigned manually. Unattributed fulfilled sales: {money(report.totals.unattributedRevenueZmw)} across {report.totals.unattributedOrders} orders. Link orders to a campaign on the Sales orders page to include them in campaign results.</p>
         </>}
       </section>
     </>

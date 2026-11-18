@@ -215,6 +215,8 @@ test("validates public shop order requests without accepting client prices", () 
     address: "", notes: "", lines: [{ productId: 2, quantity: 3 }],
   };
   assert.equal(publicShopOrderInputSchema.safeParse(request).success, true);
+  assert.equal(publicShopOrderInputSchema.safeParse({ ...request, trackingCode: "550e8400-e29b-41d4-a716-446655440000" }).success, true);
+  assert.equal(publicShopOrderInputSchema.safeParse({ ...request, trackingCode: "campaign-1" }).success, false);
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ productId: 2, quantity: 0 }] }).success, false);
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [...request.lines, ...request.lines] }).success, false);
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ ...request.lines[0], unitPriceZmw: "0.01" }] }).success, false);

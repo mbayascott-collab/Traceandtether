@@ -617,10 +617,12 @@ export const marketingCampaigns = pgTable(
     endsOn: date("ends_on"),
     budgetZmw: numeric("budget_zmw", { precision: 14, scale: 2 }),
     notes: text("notes"),
+    trackingCode: varchar("tracking_code", { length: 36 }).notNull().default(sql`gen_random_uuid()::text`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex("marketing_campaigns_tracking_code_unique").on(table.trackingCode),
     index("marketing_campaigns_status_idx").on(table.status),
     check("marketing_campaigns_budget_nonnegative", sql`${table.budgetZmw} is null or ${table.budgetZmw} >= 0`),
     check("marketing_campaigns_date_order", sql`${table.startsOn} is null or ${table.endsOn} is null or ${table.endsOn} >= ${table.startsOn}`),
@@ -678,10 +680,12 @@ export const marketingAttributions = pgTable(
     id: serial("id").primaryKey(),
     salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "cascade" }),
     campaignId: integer("campaign_id").notNull().references(() => marketingCampaigns.id, { onDelete: "restrict" }),
+    source: varchar("source", { length: 20 }).notNull().default("manual"),
     attributedAt: timestamp("attributed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("marketing_attributions_order_unique").on(table.salesOrderId),
     index("marketing_attributions_campaign_idx").on(table.campaignId),
+    check("marketing_attributions_source_valid", sql`${table.source} in ('manual', 'campaign_link')`),
   ],
 );
