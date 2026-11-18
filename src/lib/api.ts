@@ -24,7 +24,7 @@ export interface Shipment {
   expectedAt: string | null; lines: ShipmentLine[];
 }
 export interface ImportExpense {
-  id: number; purchaseOrderId: number; category: string; description: string; amount: string; currency: string;
+  id: number; purchaseOrderId: number | null; shipmentId: number | null; category: string; description: string; amount: string; currency: string;
   exchangeRateToZmw: string; basis: AllocationBasis; incurredAt: string; reference: string | null;
 }
 export interface LandedCostOrder extends PurchaseOrder {
@@ -357,7 +357,7 @@ export async function fetchImportExpenses(): Promise<ImportExpense[]> {
   return (await request<{ expenses: ImportExpense[] }>("/api/import-expenses")).expenses;
 }
 export async function createImportExpense(input: {
-  purchaseOrderId: number; category: string; description: string; amount: string; currency: string;
+  purchaseOrderId: number | null; shipmentId: number | null; category: string; description: string; amount: string; currency: string;
   exchangeRateToZmw: string; basis: AllocationBasis; incurredAt: string | null; reference: string | null; notes: string | null;
 }): Promise<void> {
   await request("/api/import-expenses", { method: "POST", body: JSON.stringify(input) });

@@ -26,6 +26,7 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   const [shipmentLineDrafts, setShipmentLineDrafts] = useState<ShipmentLineDraft[]>([{ purchaseOrderLineId: "", quantityShipped: "1" }]);
   const [shipmentOrderIds, setShipmentOrderIds] = useState<string[]>([]);
   const [shipmentOrderToAdd, setShipmentOrderToAdd] = useState("");
+  const [expenseTargetType, setExpenseTargetType] = useState<"order" | "shipment">("order");
   const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({});
   const [adjustingOrderId, setAdjustingOrderId] = useState<number | null>(null);
   const heading = mode === "orders" ? "Purchase orders" : mode === "shipments" ? "Shipments" : mode === "expenses" ? "Import expenses" : "Landed costs";
@@ -41,7 +42,7 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
-    try { await action(new FormData(form)); setNotice("Saved."); setReload((n) => n + 1); form.reset(); setShipmentOrderIds([]); setShipmentOrderToAdd(""); setShipmentLineDrafts([{ purchaseOrderLineId: "", quantityShipped: "1" }]); }
+    try { await action(new FormData(form)); setNotice("Saved."); setReload((n) => n + 1); form.reset(); setShipmentOrderIds([]); setShipmentOrderToAdd(""); setShipmentLineDrafts([{ purchaseOrderLineId: "", quantityShipped: "1" }]); setExpenseTargetType("order"); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not save this record."); }
   }
 
@@ -127,12 +128,18 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
     </>}
     {mode === "expenses" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createImportExpense({
-        purchaseOrderId: Number(d.get("purchaseOrderId")), category: String(d.get("category")), description: String(d.get("description")),
+        purchaseOrderId: expenseTargetType === "order" ? Number(d.get("purchaseOrderId")) : null,
+        shipmentId: expenseTargetType === "shipment" ? Number(d.get("shipmentId")) : null,
+        category: String(d.get("category")), description: String(d.get("description")),
         amount: String(d.get("amount")), currency: String(d.get("currency")).toUpperCase(), exchangeRateToZmw: String(d.get("exchangeRateToZmw")),
         basis: String(d.get("basis")) as "value" | "quantity", incurredAt: String(d.get("incurredAt") || "") || null,
         reference: String(d.get("reference") || "") || null, notes: null,
       }))}>
-        <h2>Record import expense</h2><label>Purchase order<select name="purchaseOrderId" required defaultValue=""><option value="">Select order</option>{orders.filter((o) => o.status !== "cancelled").map((o) => <option key={o.id} value={o.id}>{o.orderNumber} · {o.supplierName}</option>)}</select></label>
+        <h2>Record import expense</h2>
+        <label>Apply expense to<select value={expenseTargetType} onChange={(e) => setExpenseTargetType(e.target.value as "order" | "shipment")}><option value="order">One purchase order</option><option value="shipment">A shared shipment</option></select></label>
+        {expenseTargetType === "order"
+          ? <label>Purchase order<select name="purchaseOrderId" required defaultValue=""><option value="">Select order</option>{orders.filter((o) => o.status !== "cancelled").map((o) => <option key={o.id} value={o.id}>{o.orderNumber} · {o.supplierName}</option>)}</select></label>
+          : <label>Shipment<select name="shipmentId" required defaultValue=""><option value="">Select shipment</option>{shipments.filter((s) => s.status !== "cancelled").map((s) => <option key={s.id} value={s.id}>{s.shipmentReference || `Shipment #${s.id}`} · {s.orderNumbers.join(", ")}</option>)}</select></label>}
         <label>Category<input name="category" required placeholder="Freight, customs, clearing…" /></label><label>Description<input name="description" required /></label>
         <label>Amount<input name="amount" inputMode="decimal" required /></label><label>Currency<input name="currency" maxLength={3} defaultValue="ZMW" required /></label>
         <label>Rate to ZMW<input name="exchangeRateToZmw" inputMode="decimal" defaultValue="1" required /></label>
@@ -140,7 +147,12 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
         <label>Date<input name="incurredAt" type="date" defaultValue={today()} /></label><label>Reference<input name="reference" /></label>
         <button className="button button-primary">Save expense</button>
       </form>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Expense</th><th>Recorded amount</th><th>FX to ZMW</th><th>Basis</th><th>Date</th></tr></thead><tbody>{expenses.map((x) => <tr key={x.id}><td>{orders.find((o) => o.id === x.purchaseOrderId)?.orderNumber}</td><td>{x.category} · {x.description}</td><td>{money(x.amount, x.currency)}</td><td>{x.exchangeRateToZmw}</td><td>{x.basis}</td><td>{x.incurredAt}</td></tr>)}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Order / shipment</th><th>Expense</th><th>Recorded amount</th><th>FX to ZMW</th><th>Basis</th><th>Date</th></tr></thead><tbody>{expenses.map((x) => {
+        const shipment = x.shipmentId !== null ? shipments.find((item) => item.id === x.shipmentId) : null;
+        return <tr key={x.id}><td>{shipment
+          ? `${shipment.shipmentReference || `Shipment #${shipment.id}`} · ${shipment.orderNumbers.join(", ")}`
+          : orders.find((o) => o.id === x.purchaseOrderId)?.orderNumber}</td><td>{x.category} · {x.description}</td><td>{money(x.amount, x.currency)}</td><td>{x.exchangeRateToZmw}</td><td>{x.basis}</td><td>{x.incurredAt}</td></tr>;
+      })}</tbody></table></div>
     </>}
     {mode === "landed" && <>
       <div className="notice-strip">Expenses use their recorded exchange rates. The adjustment preview keeps costs for stock not yet posted in clearing, and estimates the inventory share using each product’s current weighted-average value. Sold stock is assigned to cost of goods sold.</div>

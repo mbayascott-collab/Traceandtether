@@ -3,11 +3,12 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { allocateLandedCosts } from "../shared/landed-cost";
+import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 import {
   inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
-  importExpenses, inventoryLocations, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
+  inventoryLocations, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
   shipmentLines, shipments, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
@@ -168,10 +169,13 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         .where(and(eq(inventoryLocations.id, locationId), eq(inventoryLocations.active, true))).limit(1);
       if (!location) return { error: "Choose an active receiving location.", status: 400 };
       const orderLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, order.id));
-      const expenses = await tx.select().from(importExpenses).where(eq(importExpenses.purchaseOrderId, order.id));
+      const expenses = await importExpensesForPurchaseOrder(tx, order.id);
       const allocated = allocateLandedCosts(
         orderLines.map((row) => ({ lineId: row.id, quantityOrdered: row.quantityOrdered, unitPrice: row.unitPrice })),
-        expenses.map((row) => ({ expenseId: row.id, amount: row.amount, exchangeRateToZmw: row.exchangeRateToZmw, basis: row.basis })),
+        expenses.map((row) => ({
+          expenseId: row.id, amount: row.amount, exchangeRateToZmw: row.exchangeRateToZmw,
+          basis: row.basis, lineAllocations: row.lineAllocations,
+        })),
         order.exchangeRateToZmw,
       );
       const [stockedBefore] = await tx.select({ quantity: sum(shipmentLines.quantityStocked) })

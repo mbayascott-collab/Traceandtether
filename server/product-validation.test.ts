@@ -143,10 +143,13 @@ test("validates shipment and expense inputs", () => {
   assert.equal(shipmentInputSchema.safeParse({ ...shipment, purchaseOrderIds: [] }).success, false);
   assert.equal(shipmentReceiptSchema.safeParse({ lines: [{ shipmentLineId: 1, quantityReceived: -1 }] }).success, false);
   const expense = {
-    purchaseOrderId: 1, category: "Freight", description: "Sea freight", amount: "120.00", currency: "USD",
+    purchaseOrderId: 1, shipmentId: null, category: "Freight", description: "Sea freight", amount: "120.00", currency: "USD",
     exchangeRateToZmw: "26.50000000", basis: "value", incurredAt: "2026-11-03", reference: null, notes: null,
   };
   assert.equal(importExpenseInputSchema.safeParse(expense).success, true);
+  assert.equal(importExpenseInputSchema.safeParse({ ...expense, purchaseOrderId: null, shipmentId: 7 }).success, true);
+  assert.equal(importExpenseInputSchema.safeParse({ ...expense, purchaseOrderId: null, shipmentId: null }).success, false);
+  assert.equal(importExpenseInputSchema.safeParse({ ...expense, shipmentId: 7 }).success, false);
   assert.equal(importExpenseInputSchema.safeParse({ ...expense, amount: "0.00" }).success, false);
 });
 

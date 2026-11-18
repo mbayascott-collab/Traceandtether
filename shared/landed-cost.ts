@@ -2,6 +2,7 @@ export type LandedCostLine = {
   lineId: number;
   quantityOrdered: number;
   unitPrice: string;
+  valueExchangeRateToZmw?: string;
 };
 
 export type LandedCostExpense = {
@@ -9,6 +10,7 @@ export type LandedCostExpense = {
   amount: string;
   exchangeRateToZmw: string;
   basis: "value" | "quantity";
+  lineAllocations?: { lineId: number; amountZmw: string }[];
 };
 
 export type LandedCostAllocation = {
@@ -65,9 +67,22 @@ export function allocateLandedCosts(
   const allocations: LandedCostAllocation[] = [];
 
   for (const expense of expenses) {
-    let weights = lines.map((line) => expense.basis === "quantity"
-      ? BigInt(line.quantityOrdered)
-      : minorUnits(line.unitPrice) * BigInt(line.quantityOrdered));
+    if (expense.lineAllocations) {
+      for (const allocation of expense.lineAllocations) {
+        if (!allocatedByLine.has(allocation.lineId)) continue;
+        const amount = minorUnits(allocation.amountZmw);
+        allocatedByLine.set(allocation.lineId, (allocatedByLine.get(allocation.lineId) ?? 0n) + amount);
+        allocations.push({ expenseId: expense.expenseId, lineId: allocation.lineId, amountZmw: money(amount) });
+      }
+      continue;
+    }
+    let weights = lines.map((line) => {
+      if (expense.basis === "quantity") return BigInt(line.quantityOrdered);
+      const lineValue = minorUnits(line.unitPrice) * BigInt(line.quantityOrdered);
+      return line.valueExchangeRateToZmw
+        ? lineValue * rateUnits(line.valueExchangeRateToZmw)
+        : lineValue;
+    });
     if (weights.every((weight) => weight === 0n)) {
       weights = lines.map((line) => BigInt(line.quantityOrdered));
     }

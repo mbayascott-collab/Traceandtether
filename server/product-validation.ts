@@ -199,7 +199,14 @@ export const shipmentReceiptSchema = z.object({
 }).strict();
 
 export const importExpenseInputSchema = z.object({
-  purchaseOrderId: positiveInteger,
+  purchaseOrderId: z.preprocess(
+    (value) => value === "" || value === undefined || value === null ? null : typeof value === "string" ? Number(value) : value,
+    positiveInteger.nullable(),
+  ),
+  shipmentId: z.preprocess(
+    (value) => value === "" || value === undefined || value === null ? null : typeof value === "string" ? Number(value) : value,
+    positiveInteger.nullable(),
+  ),
   category: z.string().trim().min(1).max(80),
   description: z.string().trim().min(1).max(240),
   amount: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/).refine((value) => toMinorUnits(value)! > 0n),
@@ -209,7 +216,15 @@ export const importExpenseInputSchema = z.object({
   incurredAt: validDate,
   reference: nullableText(120),
   notes: nullableText(5_000),
-}).strict();
+}).strict().superRefine((expense, context) => {
+  if ((expense.purchaseOrderId === null) === (expense.shipmentId === null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["purchaseOrderId"],
+      message: "Choose exactly one purchase order or shipment.",
+    });
+  }
+});
 
 export const inventoryReservationInputSchema = z.object({
   productId: positiveInteger,

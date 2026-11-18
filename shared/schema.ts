@@ -537,7 +537,8 @@ export const importExpenses = pgTable(
   "import_expenses",
   {
     id: serial("id").primaryKey(),
-    purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    shipmentId: integer("shipment_id").references(() => shipments.id, { onDelete: "restrict" }),
     category: varchar("category", { length: 80 }).notNull(),
     description: varchar("description", { length: 240 }).notNull(),
     amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
@@ -552,8 +553,13 @@ export const importExpenses = pgTable(
   },
   (table) => [
     index("import_expenses_order_idx").on(table.purchaseOrderId),
+    index("import_expenses_shipment_idx").on(table.shipmentId),
     check("import_expenses_amount_positive", sql`${table.amount} > 0`),
     check("import_expenses_fx_positive", sql`${table.exchangeRateToZmw} > 0`),
+    check(
+      "import_expenses_single_target",
+      sql`(${table.purchaseOrderId} is not null and ${table.shipmentId} is null) or (${table.purchaseOrderId} is null and ${table.shipmentId} is not null)`,
+    ),
   ],
 );
 

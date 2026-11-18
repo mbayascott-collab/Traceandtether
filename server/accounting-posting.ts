@@ -2,9 +2,10 @@ import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import {
-  accountingAccounts, importExpenses, inventoryMovements, journalEntries, journalLines,
+  accountingAccounts, inventoryMovements, journalEntries, journalLines,
   products, purchaseOrderLines, purchaseOrders, shipmentLines,
 } from "../shared/schema";
+import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 
 export const accounts = [
   { code: "1000", name: "Cash and bank (previously combined)", type: "asset" as const, systemKey: "cash_bank" },
@@ -85,12 +86,6 @@ function roundedDivide(numerator: bigint, denominator: bigint) {
   return (numerator + denominator / 2n) / denominator;
 }
 
-function exchangeToZmwCents(amount: string, rate: string) {
-  const [whole, fraction = ""] = rate.split(".");
-  const rateUnits = BigInt(whole) * 100_000_000n + BigInt(fraction.padEnd(8, "0").slice(0, 8));
-  return roundedDivide(cents(amount) * rateUnits, 100_000_000n);
-}
-
 export type LandedCostAdjustmentLine = {
   lineId: number;
   productId: number;
@@ -145,19 +140,18 @@ export function splitLandedCostCorrection(input: {
 export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: number): Promise<LandedCostAdjustmentPreview | null> {
   const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, purchaseOrderId)).limit(1);
   if (!order) return null;
-  const [orderLines, expenses] = await Promise.all([
-    tx.select({ line: purchaseOrderLines, productName: products.name })
-      .from(purchaseOrderLines)
-      .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
-      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId)),
-    tx.select().from(importExpenses).where(eq(importExpenses.purchaseOrderId, purchaseOrderId)),
-  ]);
+  const orderLines = await tx.select({ line: purchaseOrderLines, productName: products.name })
+    .from(purchaseOrderLines)
+    .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+    .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+  const expenses = await importExpensesForPurchaseOrder(tx, purchaseOrderId);
   const rows = orderLines.map((row: any) => ({ ...row.line, productName: row.productName }));
   const allocation = allocateLandedCosts(
     rows.map((line: any) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
     expenses.map((expense: any) => ({
       expenseId: expense.id, amount: expense.amount,
       exchangeRateToZmw: expense.exchangeRateToZmw, basis: expense.basis,
+      lineAllocations: expense.lineAllocations,
     })),
     order.exchangeRateToZmw,
   );
@@ -280,8 +274,8 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
   const hasNegativeLine = corrections.some((line: any) => line.adjustmentCents < 0n);
   const adjustmentCents = corrections.reduce((total: bigint, line: any) =>
     total + (line.adjustmentCents > 0n ? line.adjustmentCents : 0n), 0n);
-  const totalExpenseCents = expenses.reduce((total: bigint, expense: any) =>
-    total + exchangeToZmwCents(expense.amount, expense.exchangeRateToZmw), 0n);
+  const totalExpenseCents = allocation.lines.reduce((total, line) =>
+    total + cents(line.allocatedExpensesZmw), 0n);
   const receiptClearingCents = [...actualClearingByProduct.values()].reduce((total, value) => total + value, 0n);
   const clearingBalanceCents = totalExpenseCents - receiptClearingCents - priorClearingCredits;
   const unpostedCents = clearingBalanceCents - adjustmentCents;

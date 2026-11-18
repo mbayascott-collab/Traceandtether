@@ -1,0 +1,5 @@
+ALTER TABLE "import_expenses" ALTER COLUMN "purchase_order_id" DROP NOT NULL;--> statement-breakpoint
+ALTER TABLE "import_expenses" ADD COLUMN "shipment_id" integer;--> statement-breakpoint
+ALTER TABLE "import_expenses" ADD CONSTRAINT "import_expenses_shipment_id_shipments_id_fk" FOREIGN KEY ("shipment_id") REFERENCES "public"."shipments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "import_expenses_shipment_idx" ON "import_expenses" USING btree ("shipment_id");--> statement-breakpoint
+ALTER TABLE "import_expenses" ADD CONSTRAINT "import_expenses_single_target" CHECK (("import_expenses"."purchase_order_id" is not null and "import_expenses"."shipment_id" is null) or ("import_expenses"."purchase_order_id" is null and "import_expenses"."shipment_id" is not null));

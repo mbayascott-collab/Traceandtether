@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne, sql, sum } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, or, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -12,6 +12,7 @@ import {
 } from "./product-validation";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
+import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 import { cents, formatCents, landedCostAdjustmentPreview, postJournal, type PostingLine } from "./accounting-posting";
 
 const invalid = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
@@ -235,8 +236,19 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/import-expenses", owner, async (req, res) => {
     const purchaseOrderId = req.query.purchaseOrderId ? Number(req.query.purchaseOrderId) : undefined;
     if (purchaseOrderId !== undefined && (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0)) return invalid(res, "Invalid purchase order filter.");
+    const linkedShipments = purchaseOrderId
+      ? await db.select({ shipmentId: shipmentPurchaseOrders.shipmentId }).from(shipmentPurchaseOrders)
+        .where(eq(shipmentPurchaseOrders.purchaseOrderId, purchaseOrderId))
+      : [];
     const rows = await db.select().from(importExpenses)
-      .where(purchaseOrderId ? eq(importExpenses.purchaseOrderId, purchaseOrderId) : undefined)
+      .where(purchaseOrderId
+        ? linkedShipments.length
+          ? or(
+            eq(importExpenses.purchaseOrderId, purchaseOrderId),
+            inArray(importExpenses.shipmentId, linkedShipments.map((row) => row.shipmentId)),
+          )
+          : eq(importExpenses.purchaseOrderId, purchaseOrderId)
+        : undefined)
       .orderBy(asc(importExpenses.incurredAt));
     res.json({ expenses: rows });
   });
@@ -245,9 +257,18 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     const parsed = importExpenseInputSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.issues[0]?.message ?? "Check expense details.");
     const result = await db.transaction(async (tx) => {
-      const [order] = await tx.select({ status: purchaseOrders.status }).from(purchaseOrders)
-        .where(eq(purchaseOrders.id, parsed.data.purchaseOrderId)).for("update").limit(1);
-      if (!order || order.status === "cancelled") return { error: "Choose an open purchase order.", status: 400 };
+      if (parsed.data.purchaseOrderId !== null) {
+        const [order] = await tx.select({ status: purchaseOrders.status }).from(purchaseOrders)
+          .where(eq(purchaseOrders.id, parsed.data.purchaseOrderId)).for("update").limit(1);
+        if (!order || order.status === "cancelled") return { error: "Choose a purchase order that has not been cancelled.", status: 400 };
+      } else if (parsed.data.shipmentId !== null) {
+        const [shipment] = await tx.select({ status: shipments.status }).from(shipments)
+          .where(eq(shipments.id, parsed.data.shipmentId)).for("update").limit(1);
+        if (!shipment || shipment.status === "cancelled") return { error: "Choose a shipment that has not been cancelled.", status: 400 };
+        const [shipmentOrder] = await tx.select({ purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
+          .from(shipmentPurchaseOrders).where(eq(shipmentPurchaseOrders.shipmentId, parsed.data.shipmentId)).limit(1);
+        if (!shipmentOrder) return { error: "The shipment has no linked purchase orders.", status: 400 };
+      }
       const [created] = await tx.insert(importExpenses).values({
         ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
       }).returning();
@@ -284,13 +305,15 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       .where(requestedId ? eq(purchaseOrders.id, requestedId) : undefined).orderBy(asc(purchaseOrders.createdAt));
     const lines = await db.select({ line: purchaseOrderLines, productName: products.name, sku: products.sku })
       .from(purchaseOrderLines).innerJoin(products, eq(purchaseOrderLines.productId, products.id));
-    const expenses = await db.select().from(importExpenses);
     res.json({ orders: await Promise.all(orders.map(async ({ order, supplierName }) => {
       const orderLines = lines.filter(({ line }) => line.purchaseOrderId === order.id);
+      const expenses = await importExpensesForPurchaseOrder(db, order.id);
       const allocated = allocateLandedCosts(
         orderLines.map(({ line }) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
-        expenses.filter((expense) => expense.purchaseOrderId === order.id)
-          .map((expense) => ({ expenseId: expense.id, amount: expense.amount, exchangeRateToZmw: expense.exchangeRateToZmw, basis: expense.basis })),
+        expenses.map((expense) => ({
+          expenseId: expense.id, amount: expense.amount, exchangeRateToZmw: expense.exchangeRateToZmw,
+          basis: expense.basis, lineAllocations: expense.lineAllocations,
+        })),
         order.exchangeRateToZmw,
       );
       const adjustmentPreview = await landedCostAdjustmentPreview(db, order.id);
