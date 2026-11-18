@@ -9,6 +9,7 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
+import { publicShopProtection } from "./public-shop-protection";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -120,6 +121,7 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
 
 export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/shop/products", async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const rows = await db.select({
       id: products.id,
       name: products.name,
@@ -134,11 +136,25 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const available = Math.max(0, balance.onHand - balance.reserved);
       if (available > 0) catalog.push(product);
     }
-    res.json({ products: catalog });
+    res.json({ products: catalog, challenge: publicShopProtection.issueChallenge(_req.ip || _req.socket.remoteAddress || "") });
   });
 
   app.post("/api/shop/orders", async (req, res) => {
-    const parsed = publicShopOrderInputSchema.safeParse(req.body);
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    const check = publicShopProtection.checkSubmission(
+      req.ip || req.socket.remoteAddress || "",
+      body.challenge,
+      body.website,
+    );
+    if (!check.ok) {
+      if (check.reason === "rate_limited") {
+        res.setHeader("Retry-After", String(check.retryAfterSeconds));
+        return res.status(429).json({ error: "Too many order requests. Please try again later." });
+      }
+      return bad(res, "Please refresh the shop and try again.");
+    }
+    const { challenge: _challenge, website: _website, ...orderBody } = body;
+    const parsed = publicShopOrderInputSchema.safeParse(orderBody);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check your order details.");
     const result = await db.transaction(async (tx) => {
       const ids = parsed.data.lines.map((line) => line.productId);

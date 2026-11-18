@@ -4,6 +4,7 @@ import {
   customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
+import { PublicShopProtection } from "./public-shop-protection";
 
 const validProduct = {
   sku: "mz-001",
@@ -204,4 +205,56 @@ test("validates public shop order requests without accepting client prices", () 
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ productId: 2, quantity: 0 }] }).success, false);
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [...request.lines, ...request.lines] }).success, false);
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ ...request.lines[0], unitPriceZmw: "0.01" }] }).success, false);
+});
+
+test("limits public shop submissions per IP and resets after the window", () => {
+  let now = 1_000;
+  let nextToken = 0;
+  const protection = new PublicShopProtection({
+    now: () => now,
+    tokenFactory: () => `token-${++nextToken}`,
+    orderLimit: 2,
+    orderWindowMs: 10_000,
+    minimumFormAgeMs: 0,
+  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = protection.issueChallenge("192.0.2.1");
+    assert.deepEqual(protection.checkSubmission("192.0.2.1", token, ""), { ok: true });
+  }
+  const blockedToken = protection.issueChallenge("192.0.2.1");
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", blockedToken, ""), {
+    ok: false, reason: "rate_limited", retryAfterSeconds: 10,
+  });
+  const otherIpToken = protection.issueChallenge("192.0.2.2");
+  assert.deepEqual(protection.checkSubmission("192.0.2.2", otherIpToken, ""), { ok: true });
+  now += 10_000;
+  const afterWindowToken = protection.issueChallenge("192.0.2.1");
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", afterWindowToken, ""), { ok: true });
+});
+
+test("rejects filled honeypots, missing, reused, premature, expired, and cross-IP challenges", () => {
+  let now = 1_000;
+  let nextToken = 0;
+  const protection = new PublicShopProtection({
+    now: () => now,
+    tokenFactory: () => `token-${++nextToken}`,
+    minimumFormAgeMs: 1_500,
+    challengeLifetimeMs: 5_000,
+  });
+
+  const earlyToken = protection.issueChallenge("192.0.2.1");
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", earlyToken, ""), { ok: false, reason: "bot_check" });
+  now += 1_500;
+  const filledFieldToken = protection.issueChallenge("192.0.2.1");
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", filledFieldToken, "https://spam.example"), { ok: false, reason: "bot_check" });
+  const crossIpToken = protection.issueChallenge("192.0.2.1");
+  assert.deepEqual(protection.checkSubmission("192.0.2.2", crossIpToken, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(protection.checkSubmission("192.0.2.3", undefined, ""), { ok: false, reason: "bot_check" });
+  const reusableToken = protection.issueChallenge("192.0.2.1");
+  now += 1_500;
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: true });
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: false, reason: "bot_check" });
+  const expiredToken = protection.issueChallenge("192.0.2.1");
+  now += 5_001;
+  assert.deepEqual(protection.checkSubmission("192.0.2.1", expiredToken, ""), { ok: false, reason: "bot_check" });
 });

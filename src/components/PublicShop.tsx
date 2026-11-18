@@ -16,6 +16,8 @@ export default function PublicShop() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [orderNumber, setOrderNumber] = useState("");
+  const [challenge, setChallenge] = useState("");
+  const [website, setWebsite] = useState("");
   const [customer, setCustomer] = useState({ name: "", phone: "", email: "", address: "", notes: "" });
 
   useEffect(() => {
@@ -24,6 +26,7 @@ export default function PublicShop() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Could not load products.");
         setProducts(data.products);
+        setChallenge(data.challenge);
       })
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load products."))
       .finally(() => setLoading(false));
@@ -51,6 +54,8 @@ export default function PublicShop() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...customer,
+          challenge,
+          website,
           lines: cartProducts.map((product) => ({ productId: product.id, quantity: cart[product.id] })),
         }),
       });
@@ -60,6 +65,15 @@ export default function PublicShop() {
       setCart({});
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not submit your order.");
+      try {
+        const refresh = await fetch("/api/shop/products");
+        const data = await refresh.json();
+        if (!refresh.ok || typeof data.challenge !== "string") throw new Error("Could not refresh the order form.");
+        setChallenge(data.challenge);
+      } catch {
+        setChallenge("");
+        setError("Could not refresh the order form. Please reload the shop and try again.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -115,6 +129,7 @@ export default function PublicShop() {
           </div>
           <form className="shop-order-form" onSubmit={submit}>
             <span className="shop-eyebrow">SEND ORDER REQUEST</span><h2>Where can we reach you?</h2>
+            <label className="shop-honeypot" aria-hidden="true">Leave this field empty<input name="website" value={website} onChange={(e) => setWebsite(e.target.value)} tabIndex={-1} autoComplete="off" /></label>
             <label>Your name<input required maxLength={160} value={customer.name} onChange={(e) => setCustomer({ ...customer, name: e.target.value })} /></label>
             <label>Phone number<input required type="tel" maxLength={60} value={customer.phone} onChange={(e) => setCustomer({ ...customer, phone: e.target.value })} /></label>
             <label>Email <span>(optional)</span><input type="email" maxLength={254} value={customer.email} onChange={(e) => setCustomer({ ...customer, email: e.target.value })} /></label>

@@ -2440,6 +2440,13 @@ textarea:focus-visible {
 }
 
 .shop-order-form label span { color: #98a29c; font-weight: 400; }
+.shop-honeypot {
+  position: absolute !important;
+  left: -10000px !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+}
 .shop-order-form input,
 .shop-order-form textarea {
   width: 100%;
