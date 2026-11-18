@@ -174,6 +174,18 @@ export default function MarketingWorkspace() {
       setError("Could not copy the shop link. Select the link shown under the campaign name and copy it.");
     }
   }
+  async function replaceShopLink(campaign: Campaign) {
+    const confirmed = window.confirm(
+      `Replace the shop link for “${campaign.name}”? The current link will stop attributing new requests. Orders already attributed to this campaign will remain in reports.`,
+    );
+    if (!confirmed) return;
+    setError(""); setMessage("");
+    try {
+      await request(`/api/marketing/campaigns/${campaign.id}/replace-link`, "POST");
+      setMessage(`A new shop link is ready for ${campaign.name}. The previous link no longer attributes new requests.`);
+      await load();
+    } catch (reason) { setError(displayError(reason)); }
+  }
   function shopLink(campaign: Campaign) {
     const url = new URL("/shop", window.location.origin);
     url.searchParams.set("ref", campaign.trackingCode);
@@ -209,7 +221,7 @@ export default function MarketingWorkspace() {
               <button className="button button-primary button-small"><Plus /> {editingCampaign ? "Save campaign" : "Add campaign"}</button>
               {editingCampaign && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCampaign(null); setCampaignForm(campaignEmpty); }}><X /> Cancel edit</button>}
             </form>
-            <div className="marketing-list">{campaigns.map((item) => <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button><button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>)}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
+             <div className="marketing-list">{campaigns.map((item) => <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button>{canManageCustomerGroups && <button className="icon-button" aria-label={`Replace shop link for ${item.name}`} title="Replace shop link" onClick={() => void replaceShopLink(item)}><RefreshCw /></button>}<button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>)}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
           </section>
 
           <section className="panel marketing-section">

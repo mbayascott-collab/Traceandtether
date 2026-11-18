@@ -64,9 +64,9 @@ test("public shop campaign links attribute orders and reports count them without
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const headers = { "content-type": "application/json", "x-forwarded-for": clientIp };
-  const request = async (path: string, body?: unknown) => {
+  const request = async (path: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
     const response = await fetch(`${baseUrl}${path}`, {
-      method: body === undefined ? "GET" : "POST",
+      method,
       headers: body === undefined ? { "x-forwarded-for": clientIp } : headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -101,7 +101,7 @@ test("public shop campaign links attribute orders and reports count them without
     const baseline = before.payload.totals;
 
     const challenges = [];
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       const shop = await request("/api/shop/products");
       assert.equal(shop.response.status, 200);
       assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
@@ -109,12 +109,7 @@ test("public shop campaign links attribute orders and reports count them without
     }
     await new Promise((resolve) => setTimeout(resolve, 1_700));
 
-    const submissions = [
-      { trackingCode, challenge: challenges[0] },
-      { trackingCode: randomUUID(), challenge: challenges[1] },
-      { trackingCode: undefined, challenge: challenges[2] },
-    ];
-    for (const [index, submission] of submissions.entries()) {
+    const submitOrder = async (index: number, code: string | undefined, challenge: string) => {
       const { response, payload } = await request("/api/shop/orders", {
         name: `Campaign attribution customer ${suffix}-${index}`,
         phone: `+260 977 ${String(index).padStart(3, "0")} 000`,
@@ -122,28 +117,46 @@ test("public shop campaign links attribute orders and reports count them without
         address: "",
         notes: "",
         lines: [{ productId, quantity: 1 }],
-        ...submission,
+        trackingCode: code,
+        challenge,
       });
       assert.equal(response.status, 201, JSON.stringify(payload));
       assert.deepEqual(Object.keys(payload).sort(), ["orderNumber"]);
       assert.equal(JSON.stringify(payload).includes(campaignName), false);
-      assert.equal(JSON.stringify(payload).includes(trackingCode), false);
+      assert.equal(JSON.stringify(payload).includes(code ?? trackingCode), false);
       orderNumbers.push(payload.orderNumber);
-    }
+    };
+    await submitOrder(0, trackingCode, challenges[0]);
+
+    const replaced = await request(`/api/marketing/campaigns/${campaignId}/replace-link`, undefined, "POST");
+    assert.equal(replaced.response.status, 200, JSON.stringify(replaced.payload));
+    const replacementCode = replaced.payload.campaign.trackingCode as string;
+    assert.ok(replacementCode);
+    assert.notEqual(replacementCode, trackingCode);
+    await submitOrder(1, trackingCode, challenges[1]);
+    await submitOrder(2, replacementCode, challenges[2]);
+    await submitOrder(3, undefined, challenges[3]);
 
     const testOrders = await db.select({ id: salesOrders.id, orderNumber: salesOrders.orderNumber })
       .from(salesOrders).where(inArray(salesOrders.orderNumber, orderNumbers));
-    assert.equal(testOrders.length, 3);
+    assert.equal(testOrders.length, 4);
 
     const attributions = await db.select().from(marketingAttributions);
     const testAttributions = attributions.filter((row) => testOrders.some((order) => order.id === row.salesOrderId));
     assert.deepEqual(testAttributions.map(({ salesOrderId, campaignId: savedCampaignId, source }) => ({
       salesOrderId, campaignId: savedCampaignId, source,
-    })), [{
-      salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[0])!.id,
-      campaignId,
-      source: "campaign_link",
-    }]);
+    })).sort((a, b) => a.salesOrderId - b.salesOrderId), [
+      {
+        salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[0])!.id,
+        campaignId,
+        source: "campaign_link",
+      },
+      {
+        salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[2])!.id,
+        campaignId,
+        source: "campaign_link",
+      },
+    ].sort((a, b) => a.salesOrderId - b.salesOrderId));
 
     await db.update(salesOrders).set({ status: "fulfilled", orderDate: oldReportDate })
       .where(inArray(salesOrders.id, testOrders.map((order) => order.id)));
@@ -152,11 +165,11 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(report.response.status, 200);
     const testCampaign = report.payload.campaigns.find((item: { id: number }) => item.id === campaignId);
     assert.ok(testCampaign);
-    assert.equal(testCampaign.orderCount, 1);
-    assert.equal(testCampaign.attributedRevenueZmw, "100.00");
-    assert.equal(report.payload.totals.campaignLinkOrders - baseline.campaignLinkOrders, 1);
+    assert.equal(testCampaign.orderCount, 2);
+    assert.equal(testCampaign.attributedRevenueZmw, "200.00");
+    assert.equal(report.payload.totals.campaignLinkOrders - baseline.campaignLinkOrders, 2);
     assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 2);
-    assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 1);
+    assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 2);
     assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

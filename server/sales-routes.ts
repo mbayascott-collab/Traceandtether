@@ -216,7 +216,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [sourceCampaign] = parsed.data.trackingCode
         ? await tx.select({ id: marketingCampaigns.id }).from(marketingCampaigns)
-          .where(eq(marketingCampaigns.trackingCode, parsed.data.trackingCode)).limit(1)
+          .where(eq(marketingCampaigns.trackingCode, parsed.data.trackingCode)).limit(1).for("share")
         : [];
       const ids = parsed.data.lines.map((line) => line.productId);
       const selected = await tx.select({

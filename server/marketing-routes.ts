@@ -103,6 +103,22 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     if (!campaign) return res.status(404).json({ error: "Campaign not found." });
     res.json({ campaign });
   });
+  app.post("/api/marketing/campaigns/:id/replace-link", owner, ownerOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
+    const [campaign] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(marketingCampaigns)
+        .set({ trackingCode: randomUUID(), updatedAt: new Date() })
+        .where(eq(marketingCampaigns.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "marketing_campaign", entityId: updated.id, recordLabel: updated.name,
+        actor: res.locals.actor, action: "updated", changedFields: ["trackingCode"],
+      });
+      return [updated];
+    });
+    if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+    res.json({ campaign });
+  });
 
   app.get("/api/marketing/content", owner, async (_req, res) => {
     const rows = await db.select({ item: marketingContentItems, campaignName: marketingCampaigns.name })
