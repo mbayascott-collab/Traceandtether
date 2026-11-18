@@ -11,7 +11,7 @@ import { allocateLandedCosts } from "../shared/landed-cost";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
 import { supplierDeliveryMetrics, supplierMonthlySpend } from "./supplier-analytics";
-import { calculateSalesActivity } from "./sales-analytics";
+import { calculateDashboardSales, calculateSalesActivity } from "./sales-analytics";
 
 const cents = (value: string) => {
   const [whole, fraction = ""] = value.split(".");
@@ -40,9 +40,11 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       db.select({
         orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
         productId: salesOrderLines.productId, quantity: salesDeliveryLines.quantity, price: salesOrderLines.unitPriceZmw,
+        orderStatus: salesOrders.status,
       }).from(salesDeliveryLines)
         .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
-        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+        .innerJoin(salesOrders, eq(salesOrders.id, salesDeliveries.salesOrderId)),
       db.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders),
       db.select().from(purchaseOrderLines),
       db.select({ purchaseOrderLineId: shipmentLines.purchaseOrderLineId, quantityStocked: shipmentLines.quantityStocked }).from(shipmentLines),
@@ -57,17 +59,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     const onHand = new Map<number, number>(), reserved = new Map<number, number>();
     for (const row of movements) onHand.set(row.productId, (onHand.get(row.productId) ?? 0) + row.quantityDelta);
     for (const row of reservations) reserved.set(row.productId, (reserved.get(row.productId) ?? 0) + row.quantity);
-    const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
-    const monthSales = deliveryRows.reduce((total, row) => row.deliveryDate >= monthStart ? total + cents(row.price) * BigInt(row.quantity) : total, 0n)
-      + lines.reduce((total, line) => {
-        const order = orders.find(({ order: row }) => row.id === line.orderId)?.order;
-        return order?.status === "fulfilled" && !ordersWithDeliveries.has(line.orderId) && order.orderDate >= monthStart
-          ? total + cents(line.price) * BigInt(line.quantity) : total;
-      }, 0n);
-    const demand = new Map<number, number>();
-    for (const row of deliveryRows) if (row.deliveryDate >= salesWindowStart) demand.set(row.productId, (demand.get(row.productId) ?? 0) + row.quantity);
-    const recentFulfilledIds = new Set(orders.filter(({ order }) => order.status === "fulfilled" && !ordersWithDeliveries.has(order.id) && order.orderDate >= salesWindowStart).map(({ order }) => order.id));
-    for (const line of lines) if (recentFulfilledIds.has(line.orderId)) demand.set(line.productId, (demand.get(line.productId) ?? 0) + line.quantity);
+    const dashboardSales = calculateDashboardSales({
+      monthStart, salesWindowStart,
+      orders: orders.map(({ order }) => ({ id: order.id, status: order.status, orderDate: order.orderDate })),
+      lines,
+      deliveries: deliveryRows,
+    });
     const purchaseStatus = new Map(purchaseHeaders.map((order) => [order.id, order.status]));
     const stockedByLine = new Map<number, number>();
     for (const line of postedShipLines) stockedByLine.set(line.purchaseOrderLineId, (stockedByLine.get(line.purchaseOrderLineId) ?? 0) + line.quantityStocked);
@@ -82,7 +79,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         const incomingQty = incoming.get(product.id) ?? 0;
         return {
           id: product.id, name: product.name, sku: product.sku, supplierName: product.supplierName,
-          available, incoming: incomingQty, salesLast90Days: demand.get(product.id) ?? 0,
+          available, incoming: incomingQty, salesLast90Days: dashboardSales.demand.get(product.id) ?? 0,
           reorderLevel: product.reorderThreshold,
           suggestedQuantity: suggestedReorderQuantity(onHand.get(product.id) ?? 0, reserved.get(product.id) ?? 0, incomingQty, product.reorderThreshold),
         };
@@ -96,7 +93,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       metrics: {
         products: allProducts.length, activeProducts: allProducts.filter((p) => p.status === "active").length,
         customers: allCustomers.length, openOrders: orders.filter(({ order }) => order.status === "draft" || order.status === "confirmed" || order.status === "partially_fulfilled").length,
-        monthSalesZmw: from(monthSales), inStockProducts: allProducts.filter((p) => (onHand.get(p.id) ?? 0) - (reserved.get(p.id) ?? 0) > 0).length,
+        monthSalesZmw: from(dashboardSales.monthSales), inStockProducts: allProducts.filter((p) => (onHand.get(p.id) ?? 0) - (reserved.get(p.id) ?? 0) > 0).length,
         inventoryValueZmw: from(inventoryValue),
       },
       cashForecast: {

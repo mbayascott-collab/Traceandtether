@@ -32,10 +32,44 @@ type SalesActivityInput = {
   deliveries: SalesDeliveryLine[];
 };
 
+type DashboardSalesInput = {
+  monthStart: string;
+  salesWindowStart: string;
+  orders: { id: number; status: string; orderDate: string }[];
+  lines: { orderId: number; productId: number; quantity: number; price: string }[];
+  deliveries: { orderId: number; deliveryDate: string; productId: number; quantity: number; price: string; orderStatus: string }[];
+};
+
 const toCents = (value: string) => {
   const [whole, fraction = ""] = value.split(".");
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
 };
+
+export function calculateDashboardSales({ monthStart, salesWindowStart, orders, lines, deliveries }: DashboardSalesInput) {
+  const orderById = new Map(orders.map((order) => [order.id, order]));
+  const ordersWithDeliveries = new Set(deliveries.map((delivery) => delivery.orderId));
+  let monthSales = 0n;
+  const demand = new Map<number, number>();
+
+  for (const delivery of deliveries) {
+    if (delivery.orderStatus === "cancelled") continue;
+    if (delivery.deliveryDate >= monthStart) monthSales += toCents(delivery.price) * BigInt(delivery.quantity);
+    if (delivery.deliveryDate >= salesWindowStart) {
+      demand.set(delivery.productId, (demand.get(delivery.productId) ?? 0) + delivery.quantity);
+    }
+  }
+
+  for (const line of lines) {
+    const order = orderById.get(line.orderId);
+    if (!order || order.status !== "fulfilled" || ordersWithDeliveries.has(order.id)) continue;
+    if (order.orderDate >= monthStart) monthSales += toCents(line.price) * BigInt(line.quantity);
+    if (order.orderDate >= salesWindowStart) {
+      demand.set(line.productId, (demand.get(line.productId) ?? 0) + line.quantity);
+    }
+  }
+
+  return { monthSales, demand };
+}
 
 export function calculateSalesActivity({ fromDate = "", toDate = "", orders, lines, deliveries }: SalesActivityInput) {
   const orderById = new Map(orders.map((order) => [order.id, order]));

@@ -1,6 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateSalesActivity } from "./sales-analytics";
+import { calculateDashboardSales, calculateSalesActivity } from "./sales-analytics";
+
+test("dashboard sales and demand exclude cancelled deliveries but include undelivered fulfillments", () => {
+  const activity = calculateDashboardSales({
+    monthStart: "2025-02-01",
+    salesWindowStart: "2024-11-01",
+    orders: [
+      { id: 1, status: "partially_fulfilled", orderDate: "2025-02-01" },
+      { id: 2, status: "cancelled", orderDate: "2025-02-10" },
+      { id: 3, status: "fulfilled", orderDate: "2025-02-15" },
+    ],
+    lines: [
+      { orderId: 1, productId: 100, quantity: 10, price: "10.00" },
+      { orderId: 2, productId: 200, quantity: 7, price: "100.00" },
+      { orderId: 3, productId: 300, quantity: 2, price: "25.00" },
+    ],
+    deliveries: [
+      { orderId: 1, deliveryDate: "2025-02-05", productId: 100, quantity: 3, price: "10.00", orderStatus: "partially_fulfilled" },
+      { orderId: 2, deliveryDate: "2025-02-12", productId: 200, quantity: 7, price: "100.00", orderStatus: "cancelled" },
+    ],
+  });
+
+  assert.equal(activity.monthSales, 8_000n);
+  assert.deepEqual([...activity.demand.entries()].sort(([a], [b]) => a - b), [
+    [100, 3],
+    [300, 2],
+  ]);
+});
 
 test("counts partial deliveries and undelivered fulfillments once within inclusive period bounds", () => {
   const report = calculateSalesActivity({
