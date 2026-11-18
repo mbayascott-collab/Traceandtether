@@ -707,6 +707,23 @@ export const paymentReminders = pgTable(
   ],
 );
 
+export const paymentStatementImportBatches = pgTable(
+  "payment_statement_import_batches",
+  {
+    id: serial("id").primaryKey(),
+    accountId: integer("account_id").notNull().references(() => accountingAccounts.id, { onDelete: "restrict" }),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    lineCount: integer("line_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("payment_statement_import_batches_account_created_idx").on(table.accountId, table.createdAt),
+    index("payment_statement_import_batches_fingerprint_idx").on(table.accountId, table.fingerprint),
+    check("payment_statement_import_batches_positive_line_count", sql`${table.lineCount} > 0`),
+  ],
+);
+
 export const paymentStatementLines = pgTable(
   "payment_statement_lines",
   {
@@ -717,11 +734,13 @@ export const paymentStatementLines = pgTable(
     amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
     description: varchar("description", { length: 240 }).notNull().default(""),
     reference: varchar("reference", { length: 120 }),
+    importBatchId: integer("import_batch_id").references(() => paymentStatementImportBatches.id, { onDelete: "cascade" }),
     matchedPaymentId: integer("matched_payment_id").references(() => businessPayments.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("payment_statement_lines_account_date_idx").on(table.accountId, table.transactionDate),
+    index("payment_statement_lines_import_batch_idx").on(table.importBatchId),
     uniqueIndex("payment_statement_lines_matched_payment_unique").on(table.matchedPaymentId),
     check("payment_statement_lines_positive_amount", sql`${table.amountZmw} > 0`),
   ],

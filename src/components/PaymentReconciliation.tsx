@@ -11,8 +11,20 @@ type StatementLine = {
   description: string; reference: string | null; matchedPaymentId: number | null; duplicateLike: boolean;
   matchedPayment: (Pick<Payment, "id" | "paymentNumber" | "paymentDate" | "amountZmw" | "method" | "direction" | "reference" | "orderNumber" | "partyName">) | null;
 };
-type ReconciliationData = { lines: StatementLine[]; payments: Payment[] };
+type ImportBatch = { id: number; accountId: number; fileName: string; lineCount: number; createdAt: string };
+type ReconciliationData = { lines: StatementLine[]; payments: Payment[]; importBatches: ImportBatch[] };
 type CsvLine = { transactionDate: string; flow: "in" | "out"; amountZmw: string; description: string; reference: string };
+type ImportPreview = {
+  accountId: string;
+  from: string;
+  to: string;
+  fileName: string;
+  lines: CsvLine[];
+  duplicateRows: boolean[];
+  duplicateBatch: { id: number; fileName: string; createdAt: string; lineCount: number } | null;
+  included: boolean[];
+  allowDuplicateBatch: boolean;
+};
 
 const today = () => new Date().toISOString().slice(0, 10);
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -78,13 +90,14 @@ export default function PaymentReconciliation() {
   const [from, setFrom] = useState(`${new Date().getFullYear()}-01-01`);
   const [to, setTo] = useState(today());
   const [range, setRange] = useState({ from: `${new Date().getFullYear()}-01-01`, to: today() });
-  const [data, setData] = useState<ReconciliationData>({ lines: [], payments: [] });
+  const [data, setData] = useState<ReconciliationData>({ lines: [], payments: [], importBatches: [] });
   const [reload, setReload] = useState(0);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [selectedPayments, setSelectedPayments] = useState<Record<number, string>>({});
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
 
   useEffect(() => {
     fetch("/api/payments/reconciliation/accounts").then(async (response) => {
@@ -145,9 +158,68 @@ export default function PaymentReconciliation() {
     const file = input.files?.[0];
     if (!file) return;
     setBusy(true); setError(""); setNotice("");
-    try { await addLines(parseCsv(await file.text())); }
+    setImportPreview(null);
+    try {
+      const lines = parseCsv(await file.text());
+      if (!accountId) throw new Error("Choose an account first.");
+      if (range.from > range.to) throw new Error("Start date must be on or before end date.");
+      const response = await fetch("/api/payments/reconciliation/imports/preview", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: Number(accountId), fileName: file.name, ...range, lines }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "The statement could not be reviewed.");
+      setImportPreview({
+        accountId, ...range, fileName: file.name, lines,
+        duplicateRows: result.duplicateRows,
+        duplicateBatch: result.duplicateBatch,
+        included: lines.map((_, index) => !result.duplicateRows[index]),
+        allowDuplicateBatch: false,
+      });
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : "CSV could not be imported."); }
     finally { setBusy(false); input.value = ""; }
+  }
+
+  async function saveImport() {
+    if (!importPreview) return;
+    const includedIndexes = importPreview.included
+      .map((included, index) => included ? index : -1)
+      .filter((index) => index >= 0);
+    if (!includedIndexes.length) {
+      setError("Select at least one statement row to import.");
+      return;
+    }
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/payments/reconciliation/imports", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId: Number(importPreview.accountId), fileName: importPreview.fileName,
+          from: importPreview.from, to: importPreview.to, lines: importPreview.lines,
+          includedIndexes, allowDuplicateBatch: importPreview.allowDuplicateBatch,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "The statement import could not be saved.");
+      setNotice(`${result.added} statement line${result.added === 1 ? "" : "s"} imported from ${importPreview.fileName}. Entries were not changed.`);
+      setImportPreview(null);
+      setReload((value) => value + 1);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The statement import could not be saved."); }
+    finally { setBusy(false); }
+  }
+
+  async function deleteImport(batch: ImportBatch) {
+    if (!window.confirm(`Remove ${batch.lineCount} statement line${batch.lineCount === 1 ? "" : "s"} from “${batch.fileName}”? Matches will be removed too; accounting entries will not change.`)) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/payments/reconciliation/imports/${batch.id}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "The statement import could not be removed.");
+      setNotice(`Import ${batch.fileName} removed. Accounting entries were not changed.`);
+      setReload((value) => value + 1);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The statement import could not be removed."); }
+    finally { setBusy(false); }
   }
 
   async function enterLine(event: FormEvent<HTMLFormElement>) {
@@ -199,6 +271,50 @@ export default function PaymentReconciliation() {
       <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
         <label>Import CSV statement<input type="file" accept=".csv,text/csv" disabled={busy} onChange={importCsv} /></label>
         <p className="report-footnote">CSV columns: date, flow, amount; optional description and reference. Use YYYY-MM-DD and in/credit or out/debit. Lines must fall within the selected date range.</p>
+      </div>
+      {importPreview && <div className="data-table-wrap" aria-labelledby="statement-import-review-heading">
+        <h3 id="statement-import-review-heading">Review {importPreview.fileName}</h3>
+        {importPreview.duplicateBatch && <div className="notice-strip" role="status">
+          This exact statement was already imported as “{importPreview.duplicateBatch.fileName}” on {new Date(importPreview.duplicateBatch.createdAt).toLocaleString()}.
+          Review the rows below. A repeated transaction may be legitimate, so choose which rows to include.
+          <label><input type="checkbox" checked={importPreview.allowDuplicateBatch} disabled={busy}
+            onChange={(event) => setImportPreview((current) => current ? { ...current, allowDuplicateBatch: event.target.checked } : current)} />
+            I reviewed the repeated statement and want to import selected rows again
+          </label>
+        </div>}
+        {!importPreview.duplicateBatch && importPreview.duplicateRows.some(Boolean) && <p className="report-footnote">
+          Rows marked as possible duplicates are deselected by default. Select one only if this is a separate legitimate transaction.
+        </p>}
+        <table><thead><tr><th>Include</th><th>Date</th><th>Flow</th><th>Amount</th><th>Description and reference</th><th>Review</th></tr></thead>
+          <tbody>{importPreview.lines.map((line, index) => <tr key={`${line.transactionDate}-${index}`}>
+            <td><input type="checkbox" aria-label={`Include statement row ${index + 1}`} checked={importPreview.included[index]}
+              disabled={busy} onChange={(event) => setImportPreview((current) => current ? {
+                ...current, included: current.included.map((included, rowIndex) => rowIndex === index ? event.target.checked : included),
+              } : current)} /></td>
+            <td>{line.transactionDate}</td><td>{flowName(line.flow)}</td><td>{money(line.amountZmw)}</td>
+            <td>{line.description || "—"}{line.reference ? <><br /><small>Ref: {line.reference}</small></> : null}</td>
+            <td>{importPreview.duplicateRows[index] ? <strong>Possible duplicate · review</strong> : "No matching row found"}</td>
+          </tr>)}</tbody>
+        </table>
+        <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+          <p className="report-footnote">{importPreview.included.filter(Boolean).length} of {importPreview.lines.length} rows selected. Excluded rows will not be saved.</p>
+          <button className="button button-primary" type="button" disabled={busy || !importPreview.included.some(Boolean)
+            || Boolean(importPreview.duplicateBatch && !importPreview.allowDuplicateBatch)} onClick={saveImport}>
+            {busy ? "Saving…" : "Import selected rows"}
+          </button>
+          <button className="button button-secondary" type="button" disabled={busy} onClick={() => setImportPreview(null)}>Cancel import</button>
+        </div>
+      </div>}
+      <div className="data-table-wrap">
+        <h3>Recent statement imports</h3>
+        <table><thead><tr><th>Imported file</th><th>Imported</th><th>Rows</th><th>Action</th></tr></thead>
+          <tbody>{data.importBatches.map((batch) => <tr key={batch.id}>
+            <td>{batch.fileName}</td><td>{new Date(batch.createdAt).toLocaleString()}</td><td>{batch.lineCount}</td>
+            <td><button className="button button-secondary button-small" type="button" disabled={busy}
+              onClick={() => deleteImport(batch)}>Remove import</button></td>
+          </tr>)}
+          {!data.importBatches.length && <tr><td colSpan={4}>No CSV imports recorded for this account yet.</td></tr>}</tbody>
+        </table>
       </div>
       <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={enterLine}>
         <h3>Enter a statement line</h3>

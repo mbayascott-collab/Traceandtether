@@ -3,7 +3,7 @@ import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementLines,
+  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementImportBatches, paymentStatementLines,
   paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { effectivePaymentDueDate, paymentAging } from "../shared/payment-aging";
@@ -12,6 +12,10 @@ import { recordBusinessAudit } from "./audit";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
 import { sendPaymentReminderEmail } from "./payment-reminder-email";
+import {
+  findDuplicateStatementRows, normalizeStatementText, statementImportFingerprint,
+  type StatementImportLine,
+} from "./payment-statement-import";
 
 const bad = (res: import("express").Response, message: string, status = 400) => res.status(status).json({ error: message });
 const dueDateInputSchema = z.object({
@@ -47,6 +51,23 @@ const statementLinesSchema = z.object({
 }).refine((value) => value.from <= value.to, "Start date must be on or before end date.")
   .refine((value) => value.lines.every((line) => line.transactionDate >= value.from && line.transactionDate <= value.to),
     "Every statement date must be within the selected date range.");
+const statementImportPreviewSchema = z.object({
+  accountId: z.number().int().positive(),
+  fileName: z.string().trim().min(1).max(255),
+  from: z.string().refine(validDate, "Choose a valid start date."),
+  to: z.string().refine(validDate, "Choose a valid end date."),
+  lines: statementLinesSchema.shape.lines,
+}).refine((value) => value.from <= value.to, "Start date must be on or before end date.")
+  .refine((value) => value.lines.every((line) => line.transactionDate >= value.from && line.transactionDate <= value.to),
+    "Every statement date must be within the selected date range.");
+const statementImportSchema = statementImportPreviewSchema.extend({
+  includedIndexes: z.array(z.number().int().nonnegative()).min(1),
+  allowDuplicateBatch: z.boolean(),
+}).refine((value) => new Set(value.includedIndexes).size === value.includedIndexes.length,
+  "Each selected statement row must appear only once.")
+  .refine((value) => value.includedIndexes.every((index) => index < value.lines.length),
+    "A selected statement row is not part of this file.");
+const importBatchIdSchema = z.coerce.number().int().positive();
 const reconciliationMatchSchema = z.object({
   lineId: z.number().int().positive(),
   paymentId: z.number().int().positive().nullable(),
@@ -62,7 +83,7 @@ function accountMethod(systemKey: string | null) {
 }
 
 function normalizeReference(value: string | null | undefined) {
-  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  return normalizeStatementText(value);
 }
 
 function isUniqueViolation(error: unknown) {
@@ -167,6 +188,9 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       db.select({ paymentId: paymentStatementLines.matchedPaymentId }).from(paymentStatementLines)
         .where(sql`${paymentStatementLines.matchedPaymentId} is not null`),
     ]);
+    const importBatches = await db.select().from(paymentStatementImportBatches)
+      .where(eq(paymentStatementImportBatches.accountId, accountId))
+      .orderBy(desc(paymentStatementImportBatches.createdAt), desc(paymentStatementImportBatches.id));
     const lineKeys = new Map<string, number>();
     const lineCounts = new Map<number, number>();
     for (const { line } of statementRows) {
@@ -200,8 +224,143 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         matched: matchedIds.has(payment.id),
         duplicateLike: (paymentKeys.get(`${payment.paymentDate}|${payment.method}|${payment.amountZmw}|${normalizeReference(payment.reference)}`) ?? 0) > 1,
       })),
+      importBatches,
       from, to,
     });
+  });
+
+  app.post("/api/payments/reconciliation/imports/preview", owner, async (req, res) => {
+    const parsed = statementImportPreviewSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the statement file.");
+    const input = parsed.data;
+    const accountsByKey = await ensureAccountingAccounts(db);
+    const account = [...accountsByKey.values()].find((item) => item.id === input.accountId && item.active);
+    if (!account || !RECONCILIATION_ACCOUNT_KEYS.has(account.systemKey ?? "")) {
+      return bad(res, "Choose an active cash, bank, mobile money, or other funds account.", 404);
+    }
+    if (input.lines.some((line) => cents(line.amountZmw) <= 0n)) return bad(res, "Enter amounts greater than zero.");
+    const lines = input.lines as StatementImportLine[];
+    const fingerprint = statementImportFingerprint(lines);
+    const [existingBatch, existingLines] = await Promise.all([
+      db.select({
+        id: paymentStatementImportBatches.id,
+        fileName: paymentStatementImportBatches.fileName,
+        createdAt: paymentStatementImportBatches.createdAt,
+        lineCount: paymentStatementImportBatches.lineCount,
+      }).from(paymentStatementImportBatches)
+        .where(and(
+          eq(paymentStatementImportBatches.accountId, input.accountId),
+          eq(paymentStatementImportBatches.fingerprint, fingerprint),
+        ))
+        .orderBy(desc(paymentStatementImportBatches.createdAt))
+        .limit(1),
+      db.select({
+        transactionDate: paymentStatementLines.transactionDate,
+        flow: paymentStatementLines.flow,
+        amountZmw: paymentStatementLines.amountZmw,
+        reference: paymentStatementLines.reference,
+      }).from(paymentStatementLines)
+        .where(and(
+          eq(paymentStatementLines.accountId, input.accountId),
+          gte(paymentStatementLines.transactionDate, input.from),
+          lte(paymentStatementLines.transactionDate, input.to),
+        )),
+    ]);
+    res.json({
+      duplicateBatch: existingBatch[0] ?? null,
+      duplicateRows: findDuplicateStatementRows(lines, existingLines.map((line) => ({
+        ...line, amountZmw: String(line.amountZmw), reference: line.reference ?? "",
+      }))),
+    });
+  });
+
+  app.post("/api/payments/reconciliation/imports", owner, async (req, res) => {
+    const parsed = statementImportSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the statement file.");
+    const input = parsed.data;
+    const accountsByKey = await ensureAccountingAccounts(db);
+    const account = [...accountsByKey.values()].find((item) => item.id === input.accountId && item.active);
+    if (!account || !RECONCILIATION_ACCOUNT_KEYS.has(account.systemKey ?? "")) {
+      return bad(res, "Choose an active cash, bank, mobile money, or other funds account.", 404);
+    }
+    if (input.lines.some((line) => cents(line.amountZmw) <= 0n)) return bad(res, "Enter amounts greater than zero.");
+    const fingerprint = statementImportFingerprint(input.lines as StatementImportLine[]);
+    const selectedLines = input.includedIndexes.map((index) => input.lines[index]);
+    const inserted = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(0, hashtext(${`${input.accountId}:${fingerprint}`}))`);
+      const matchingBatch = await tx.select({
+        id: paymentStatementImportBatches.id,
+        fileName: paymentStatementImportBatches.fileName,
+        createdAt: paymentStatementImportBatches.createdAt,
+        lineCount: paymentStatementImportBatches.lineCount,
+      }).from(paymentStatementImportBatches)
+        .where(and(
+          eq(paymentStatementImportBatches.accountId, input.accountId),
+          eq(paymentStatementImportBatches.fingerprint, fingerprint),
+        ))
+        .orderBy(desc(paymentStatementImportBatches.createdAt))
+        .limit(1);
+      if (matchingBatch.length && !input.allowDuplicateBatch) {
+        return { duplicateBatch: matchingBatch[0] };
+      }
+      const [batch] = await tx.insert(paymentStatementImportBatches).values({
+        accountId: input.accountId,
+        fileName: input.fileName,
+        fingerprint,
+        lineCount: selectedLines.length,
+      }).returning();
+      const rows = await tx.insert(paymentStatementLines).values(selectedLines.map((line) => ({
+        accountId: input.accountId,
+        transactionDate: line.transactionDate,
+        flow: line.flow,
+        amountZmw: formatCents(cents(line.amountZmw)),
+        description: line.description,
+        reference: line.reference || null,
+        importBatchId: batch.id,
+      }))).returning();
+      for (const line of rows) await recordBusinessAudit(tx, {
+        entityType: "payment_statement_line", entityId: line.id,
+        recordLabel: `Statement line #${line.id}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["accountId", "transactionDate", "flow", "amountZmw", "description", "reference", "importBatchId"],
+      });
+      await recordBusinessAudit(tx, {
+        entityType: "payment_statement_import_batch", entityId: batch.id,
+        recordLabel: batch.fileName, actor: res.locals.actor, action: "created",
+        changedFields: ["accountId", "fileName", "fingerprint", "lineCount"],
+      });
+      return { batch, added: rows.length };
+    });
+    if ("duplicateBatch" in inserted) {
+      return res.status(409).json({ error: "This exact statement was already imported. Review it before importing again.", duplicateBatch: inserted.duplicateBatch });
+    }
+    res.status(201).json({ added: inserted.added, batch: inserted.batch });
+  });
+
+  app.delete("/api/payments/reconciliation/imports/:id", owner, async (req, res) => {
+    const parsed = importBatchIdSchema.safeParse(req.params.id);
+    if (!parsed.success) return bad(res, "Choose a valid statement import.");
+    const batchId = parsed.data;
+    const [batch] = await db.select().from(paymentStatementImportBatches)
+      .where(eq(paymentStatementImportBatches.id, batchId)).limit(1);
+    if (!batch) return bad(res, "Statement import not found.", 404);
+    await db.transaction(async (tx) => {
+      const lines = await tx.select({ id: paymentStatementLines.id })
+        .from(paymentStatementLines).where(eq(paymentStatementLines.importBatchId, batchId));
+      for (const line of lines) await recordBusinessAudit(tx, {
+        entityType: "payment_statement_line", entityId: line.id,
+        recordLabel: `Statement line #${line.id}`,
+        actor: res.locals.actor, action: "deleted",
+        changedFields: ["accountId", "transactionDate", "flow", "amountZmw", "description", "reference", "matchedPaymentId", "importBatchId"],
+      });
+      await recordBusinessAudit(tx, {
+        entityType: "payment_statement_import_batch", entityId: batch.id,
+        recordLabel: batch.fileName, actor: res.locals.actor, action: "deleted",
+        changedFields: ["accountId", "fileName", "fingerprint", "lineCount"],
+      });
+      await tx.delete(paymentStatementImportBatches).where(eq(paymentStatementImportBatches.id, batchId));
+    });
+    res.json({ ok: true });
   });
 
   app.post("/api/payments/reconciliation/lines", owner, async (req, res) => {
