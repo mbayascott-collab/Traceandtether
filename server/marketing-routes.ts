@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
+import { requireBusinessOwner } from "./access-control";
 import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { customerGroupContactsCsv, matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
@@ -59,13 +60,7 @@ async function loadCustomerHistory() {
 }
 
 export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
-  const ownerOnly: RequestHandler = (_req, res, next) => {
-    if (res.locals.actor?.role !== "owner") {
-      res.status(403).json({ error: "Only the business owner can manage customer groups." });
-      return;
-    }
-    next();
-  };
+  const ownerOnly = requireBusinessOwner("Only the business owner can manage customer groups.");
 
   async function hasCampaign(id: number | null | undefined) {
     if (!id) return true;

@@ -82,6 +82,17 @@ export function requireAccessManager(): RequestHandler {
   };
 }
 
+export function requireBusinessOwner(errorMessage: string): RequestHandler {
+  return (_req, res, next) => {
+    const actor = res.locals.actor as { role?: unknown } | undefined;
+    if (actor?.role !== "owner") {
+      res.status(403).json({ error: errorMessage });
+      return;
+    }
+    next();
+  };
+}
+
 export function createBusinessAccessMiddleware(
   resolveUser: (userId: string) => Promise<UserResolution>,
   getUserId: (req: Parameters<RequestHandler>[0]) => string | null | undefined,

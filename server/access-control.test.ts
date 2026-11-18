@@ -3,7 +3,8 @@ import test from "node:test";
 import type { Request, Response } from "express";
 import {
   approvedBusinessRole, createBusinessAccessMiddleware, isPrimaryOwnerEmail,
-  isProtectedAccessTarget, normalizeVerifiedEmail, requireAccessManager, resolveBusinessAccount,
+  isProtectedAccessTarget, normalizeVerifiedEmail, requireAccessManager, requireBusinessOwner,
+  resolveBusinessAccount,
 } from "./access-control";
 
 function invokeMiddleware(
@@ -158,6 +159,46 @@ test("only approved owners and managers may grant or revoke access", async () =>
     assert.equal(statusCode, 403);
     assert.equal(nextCalled, false);
   }
+});
+
+test("only owners can access owner-only customer-group operations", () => {
+  const ownerGuard = requireBusinessOwner("Only the business owner can manage customer groups.");
+
+  for (const role of ["manager", "sales", "reviewer", undefined]) {
+    let statusCode: number | undefined;
+    let body: unknown;
+    let nextCalled = false;
+    const res = {
+      locals: role ? { actor: { role } } : {},
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(value: unknown) {
+        body = value;
+        return this;
+      },
+    };
+    ownerGuard({} as Request, res as unknown as Response, (() => { nextCalled = true; }) as never);
+    assert.equal(statusCode, 403, `${role ?? "missing role"} must be denied`);
+    assert.deepEqual(body, { error: "Only the business owner can manage customer groups." });
+    assert.equal(nextCalled, false, `${role ?? "missing role"} must not reach the handler`);
+  }
+
+  let nextCalled = false;
+  const ownerResponse = {
+    locals: { actor: { role: "owner" } },
+    status(code: number) {
+      assert.fail(`Owner was denied with ${code}`);
+      return this;
+    },
+    json(value: unknown) {
+      assert.fail(`Owner was denied: ${JSON.stringify(value)}`);
+      return this;
+    },
+  };
+  ownerGuard({} as Request, ownerResponse as unknown as Response, (() => { nextCalled = true; }) as never);
+  assert.equal(nextCalled, true);
 });
 
 test("the primary owner and the current manager cannot be locked out", () => {
