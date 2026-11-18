@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import express, { type RequestHandler } from "express";
 import test from "node:test";
+import { eq, sum } from "drizzle-orm";
+import {
+  products, purchaseOrderLines, shipmentLines as shipmentLineRows,
+  shipmentPurchaseOrders, shipments as shipmentHeaders, suppliers,
+} from "../shared/schema";
 import { calculatePurchaseReceiptPosting, journalLinesAreBalanced } from "./accounting-posting";
 import {
   purchaseOrderReceiptStatus, shipmentReceiptStatus, validateShipmentReceipt,
@@ -53,6 +61,117 @@ test("rejects quantities beyond shipped or ordered amounts and protects cancelle
     validationError(new Map([[11, 1], [12, 1]]), { orderStatuses: new Map([[1, "cancelled"], [2, "ordered"]]) }) ?? "",
     /cancelled/i,
   );
+});
+
+test("rejects one of two concurrent receipts that exceed the purchase order quantity", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerProcurementRoutes }] = await Promise.all([
+    import("./db"),
+    import("./procurement-routes"),
+  ]);
+  const auditTable = await pool.query<{ exists: boolean }>(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    await pool.end();
+    t.skip("requires the business audit migration used by the receiving route");
+    return;
+  }
+  const suffix = randomUUID();
+  const actorEmail = `shipment-receiving-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerProcurementRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let supplierId: number | undefined;
+  let productId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  try {
+    const [supplier] = await db.insert(suppliers).values({ name: `Receipt concurrency supplier ${suffix}` }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `RCV-${suffix}`, name: `Receipt concurrency product ${suffix}`, status: "active", purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+
+    const orderResponse = await fetch(`${baseUrl}/api/purchase-orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        supplierId, currency: "CNY", exchangeRateToZmw: "2", expectedAt: null, notes: null,
+        lines: [{ productId, quantityOrdered: 5, unitPrice: "10.00" }],
+      }),
+    });
+    const { order } = await orderResponse.json() as { order: { id: number } };
+    assert.equal(orderResponse.status, 201);
+    purchaseOrderId = order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+
+    // Seed separately shipped quantities that compete for the same remaining order-line capacity.
+    const createdShipments = await db.transaction(async (tx) => {
+      const rows = [];
+      for (let index = 0; index < 2; index += 1) {
+        const [shipment] = await tx.insert(shipmentHeaders).values({
+          purchaseOrderId: purchaseOrderId!, shipmentReference: `RCV-${suffix}-${index}`,
+        }).returning();
+        await tx.insert(shipmentPurchaseOrders).values({ shipmentId: shipment.id, purchaseOrderId: purchaseOrderId! });
+        const [line] = await tx.insert(shipmentLineRows).values({
+          shipmentId: shipment.id, purchaseOrderLineId: orderLine.id, quantityShipped: 3, quantityReceived: 0,
+        }).returning();
+        rows.push({ id: shipment.id, lineId: line.id });
+      }
+      return rows;
+    });
+
+    const responses = await Promise.all(createdShipments.map(({ id, lineId }) => fetch(
+      `${baseUrl}/api/shipments/${id}/receive`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lines: [{ shipmentLineId: lineId, quantityReceived: 3 }] }),
+      },
+    )));
+    const payloads = await Promise.all(responses.map((response) => response.json() as Promise<{ error?: string }>));
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 400]);
+    assert.match(payloads.find((payload) => payload.error)?.error ?? "", /quantity ordered/i);
+
+    const [receiptTotal] = await db.select({ quantity: sum(shipmentLineRows.quantityReceived) })
+      .from(shipmentLineRows).where(eq(shipmentLineRows.purchaseOrderLineId, orderLine.id));
+    assert.equal(Number(receiptTotal.quantity), 3);
+  } finally {
+    try {
+      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (purchaseOrderId) {
+        await pool.query(
+          "DELETE FROM shipment_lines WHERE shipment_id IN (SELECT id FROM shipments WHERE purchase_order_id = $1)",
+          [purchaseOrderId],
+        );
+        await pool.query(
+          "DELETE FROM shipment_purchase_orders WHERE purchase_order_id = $1",
+          [purchaseOrderId],
+        );
+        await pool.query("DELETE FROM shipments WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await pool.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await pool.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await pool.end();
+    }
+  }
 });
 
 test("posts each consolidated receipt at its own order-line cost", () => {

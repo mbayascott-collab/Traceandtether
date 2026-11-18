@@ -171,35 +171,52 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     if (!Number.isSafeInteger(id) || id <= 0) return invalid(res, "Invalid shipment.");
     const parsed = shipmentReceiptSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.issues[0]?.message ?? "Check received quantities.");
-    const [shipment] = await db.select().from(shipments).where(eq(shipments.id, id)).limit(1);
-    if (!shipment || shipment.status === "cancelled") return res.status(404).json({ error: "Open shipment not found." });
-    const currentLines = await db.select().from(shipmentLines).where(eq(shipmentLines.shipmentId, id));
-    if (currentLines.length !== parsed.data.lines.length || parsed.data.lines.some((item) => !currentLines.some((line) => line.id === item.shipmentLineId))) {
-      return invalid(res, "Include a received quantity for every line in this shipment.");
-    }
-    const currentOrderLines = await db.select().from(purchaseOrderLines)
-      .where(inArray(purchaseOrderLines.id, currentLines.map((line) => line.purchaseOrderLineId)));
-    const orderIds = [...new Set(currentOrderLines.map((line) => line.purchaseOrderId))];
-    const allOrderLines = await db.select().from(purchaseOrderLines).where(inArray(purchaseOrderLines.purchaseOrderId, orderIds));
-    const linkedOrders = await db.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders)
-      .where(inArray(purchaseOrders.id, orderIds));
-    const receipts = await db.select({ shipmentId: shipmentLines.shipmentId, lineId: shipmentLines.purchaseOrderLineId, quantity: shipmentLines.quantityReceived })
-      .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-      .where(ne(shipments.status, "cancelled"));
-    const next = new Map(parsed.data.lines.map((line) => [line.shipmentLineId, line.quantityReceived]));
-    const otherReceivedByLine = new Map<number, number>();
-    receipts.filter((row) => row.shipmentId !== id).forEach((row) => {
-      otherReceivedByLine.set(row.lineId, (otherReceivedByLine.get(row.lineId) ?? 0) + row.quantity);
-    });
-    const validationError = validateShipmentReceipt({
-      shipmentLines: currentLines,
-      requestedQuantities: next,
-      purchaseOrderLines: currentOrderLines,
-      otherReceivedByLine,
-      purchaseOrderStatuses: new Map(linkedOrders.map((order) => [order.id, order.status])),
-    });
-    if (validationError) return invalid(res, validationError);
-    const updated = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
+      const [shipment] = await tx.select().from(shipments).where(eq(shipments.id, id)).for("update").limit(1);
+      if (!shipment || shipment.status === "cancelled") return { ok: false as const, error: "Open shipment not found.", status: 404 };
+
+      const currentLines = await tx.select().from(shipmentLines).where(eq(shipmentLines.shipmentId, id))
+        .orderBy(asc(shipmentLines.id));
+      if (currentLines.length !== parsed.data.lines.length || parsed.data.lines.some((item) => !currentLines.some((line) => line.id === item.shipmentLineId))) {
+        return { ok: false as const, error: "Include a received quantity for every line in this shipment.", status: 400 };
+      }
+
+      const selectedOrderLines = await tx.select().from(purchaseOrderLines)
+        .where(inArray(purchaseOrderLines.id, currentLines.map((line) => line.purchaseOrderLineId)));
+      const orderIds = [...new Set(selectedOrderLines.map((line) => line.purchaseOrderId))].sort((a, b) => a - b);
+      if (selectedOrderLines.length !== new Set(currentLines.map((line) => line.purchaseOrderLineId)).size || orderIds.length === 0) {
+        return { ok: false as const, error: "Purchase order line not found.", status: 409 };
+      }
+
+      // Serialize receipt validation for each order before reading the committed receipt totals.
+      const allOrderLines = await tx.select().from(purchaseOrderLines)
+        .where(inArray(purchaseOrderLines.purchaseOrderId, orderIds))
+        .orderBy(asc(purchaseOrderLines.id))
+        .for("update");
+      const currentOrderLineIds = new Set(currentLines.map((line) => line.purchaseOrderLineId));
+      const currentOrderLines = allOrderLines.filter((line) => currentOrderLineIds.has(line.id));
+      const linkedOrders = await tx.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders)
+        .where(inArray(purchaseOrders.id, orderIds));
+      const orderLineIds = allOrderLines.map((line) => line.id);
+      const receipts = await tx.select({
+        shipmentId: shipmentLines.shipmentId, lineId: shipmentLines.purchaseOrderLineId, quantity: shipmentLines.quantityReceived,
+      })
+        .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
+        .where(and(inArray(shipmentLines.purchaseOrderLineId, orderLineIds), ne(shipments.status, "cancelled")));
+      const next = new Map(parsed.data.lines.map((line) => [line.shipmentLineId, line.quantityReceived]));
+      const otherReceivedByLine = new Map<number, number>();
+      receipts.filter((row) => row.shipmentId !== id).forEach((row) => {
+        otherReceivedByLine.set(row.lineId, (otherReceivedByLine.get(row.lineId) ?? 0) + row.quantity);
+      });
+      const validationError = validateShipmentReceipt({
+        shipmentLines: currentLines,
+        requestedQuantities: next,
+        purchaseOrderLines: currentOrderLines,
+        otherReceivedByLine,
+        purchaseOrderStatuses: new Map(linkedOrders.map((order) => [order.id, order.status])),
+      });
+      if (validationError) return { ok: false as const, error: validationError, status: 400 };
+
       for (const line of currentLines) {
         await tx.update(shipmentLines).set({ quantityReceived: next.get(line.id)! }).where(eq(shipmentLines.id, line.id));
       }
@@ -228,9 +245,10 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
           actor: res.locals.actor, action: "updated", changedFields: ["status"],
         });
       }
-      return saved;
+      return { ok: true as const, shipment: saved };
     });
-    res.json({ shipment: updated });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ shipment: result.shipment });
   });
 
   app.get("/api/import-expenses", owner, async (req, res) => {
