@@ -2878,6 +2878,20 @@ textarea:focus-visible {
 .customer-quote-document-meta div { display: grid; gap: 3px; }
 .customer-quote-document-meta span { color: #657a75; font-size: 9px; }
 .customer-quote-document-meta strong { font-size: 11px; }
+.customer-quote-status {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #1d6e64;
+  background: #eaf3ef;
+}
+.customer-quote-expired {
+  color: #a14332;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  text-transform: uppercase;
+}
 .customer-quote-document-customer { display: grid; gap: 5px; margin: 25px 0; }
 .customer-quote-document-customer strong { font-size: 16px; }
 .customer-quote-document-customer p { margin: 0; color: #526963; font-size: 11px; white-space: pre-line; }

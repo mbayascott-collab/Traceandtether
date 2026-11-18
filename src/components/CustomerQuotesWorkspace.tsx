@@ -71,6 +71,15 @@ export default function CustomerQuotesWorkspace() {
   function quoteDate(value: string) {
     return new Date(value).toLocaleDateString("en-ZM", { day: "numeric", month: "long", year: "numeric" });
   }
+  function quoteStatusLabel(status: CustomerQuote["status"]) {
+    return status.charAt(0).toUpperCase() + status.slice(1);
+  }
+  function isQuoteExpired(quote: CustomerQuote) {
+    if (!quote.validUntil) return false;
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    return quote.validUntil < today;
+  }
 
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>Customer quotes</h1><p>Prepare a price offer, mark it accepted, then turn it into a draft sales order.</p></div></header>
@@ -101,7 +110,7 @@ export default function CustomerQuotesWorkspace() {
         {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>Convert to order</button>}
         {quote.status !== "converted" && <button className="button button-danger button-small" onClick={() => removeQuote(quote)}>Delete</button>}
         {quote.status === "converted" && <span>{quote.salesOrderNumber || "Order created"}</span>}
-        <button className="button button-secondary button-small" onClick={() => setPrintQuote(quote)}>Save PDF</button>
+        <button className="button button-secondary button-small" onClick={() => setPrintQuote(quote)}>Print / Save PDF</button>
       </td></tr>)}
     </tbody></table>{!quotes.length && <p className="report-footnote">No customer quotes yet.</p>}</div>
     {printQuote && <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
@@ -120,7 +129,12 @@ export default function CustomerQuotesWorkspace() {
               <div><span className="customer-quote-document-kicker">CUSTOMER QUOTATION</span><h1>{printQuote.quoteNumber}</h1></div>
               <div className="customer-quote-document-meta">
                 <div><span>Quote date</span><strong>{quoteDate(printQuote.createdAt)}</strong></div>
-                <div><span>Valid until</span><strong>{printQuote.validUntil ? quoteDate(printQuote.validUntil) : "No expiry date"}</strong></div>
+                <div><span>Status</span><strong className="customer-quote-status">{quoteStatusLabel(printQuote.status)}</strong></div>
+                <div>
+                  <span>Valid until</span>
+                  <strong>{printQuote.validUntil ? quoteDate(printQuote.validUntil) : "No expiry date"}</strong>
+                  {isQuoteExpired(printQuote) && <em className="customer-quote-expired">Expired</em>}
+                </div>
               </div>
             </div>
           </header>
