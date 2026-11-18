@@ -112,6 +112,40 @@ export function weightedAverageUnitCostCents(inventoryValueCents: bigint, onHand
   return (inventoryValueCents + BigInt(Math.floor(onHand / 2))) / BigInt(onHand);
 }
 
+export function allocateInventoryValueByLocationCents(
+  inventoryValueCents: bigint,
+  locations: { locationId: number | null; onHand: number }[],
+): Map<number | null, bigint> {
+  const values = new Map<number | null, bigint>(locations.map(({ locationId }) => [locationId, 0n]));
+  const stockedLocations = locations.filter(({ onHand }) => Number.isSafeInteger(onHand) && onHand > 0);
+  if (!stockedLocations.length) {
+    values.set(null, inventoryValueCents);
+    return values;
+  }
+
+  const totalQuantity = stockedLocations.reduce((total, location) => total + BigInt(location.onHand), 0n);
+  const absoluteValue = inventoryValueCents < 0n ? -inventoryValueCents : inventoryValueCents;
+  const sign = inventoryValueCents < 0n ? -1n : 1n;
+  const allocations = stockedLocations.map(({ locationId, onHand }) => {
+    const numerator = absoluteValue * BigInt(onHand);
+    const value = numerator / totalQuantity;
+    return { locationId, value, remainder: numerator % totalQuantity };
+  });
+  let remainingCents = absoluteValue - allocations.reduce((total, allocation) => total + allocation.value, 0n);
+  allocations.sort((a, b) => {
+    if (a.remainder !== b.remainder) return a.remainder > b.remainder ? -1 : 1;
+    if (a.locationId === null) return b.locationId === null ? 0 : 1;
+    if (b.locationId === null) return -1;
+    return a.locationId - b.locationId;
+  });
+  for (const allocation of allocations) {
+    const extraCent = remainingCents > 0n ? 1n : 0n;
+    values.set(allocation.locationId, sign * (allocation.value + extraCent));
+    remainingCents -= extraCent;
+  }
+  return values;
+}
+
 function roundedDivide(numerator: bigint, denominator: bigint) {
   return (numerator + denominator / 2n) / denominator;
 }

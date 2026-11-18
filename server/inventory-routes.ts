@@ -15,7 +15,7 @@ import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { inspectOpeningStockEvidence } from "./opening-stock-evidence";
 import {
-  accountBalance, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
+  accountBalance, allocateInventoryValueByLocationCents, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
   journalLinesAreBalanced, postJournal, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -54,7 +54,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const [items, movements, locations, reservations, inventoryLines] = await Promise.all([
       db.select({ id: products.id, name: products.name, sku: products.sku, unit: products.unit, status: products.status }).from(products).orderBy(asc(products.name)),
       db.select({ productId: inventoryMovements.productId, locationId: inventoryMovements.locationId, delta: inventoryMovements.quantityDelta }).from(inventoryMovements),
-      db.select().from(inventoryLocations).where(eq(inventoryLocations.active, true)),
+       db.select().from(inventoryLocations),
       db.select({ productId: inventoryReservations.productId, locationId: inventoryReservations.locationId, quantity: inventoryReservations.quantity }).from(inventoryReservations).where(eq(inventoryReservations.status, "active")),
       db.select({
         productId: journalLines.productId, debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
@@ -86,16 +86,38 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     res.json({ inventory: items.map((item) => {
       const stock = onHand.get(item.id) ?? 0, held = reserved.get(item.id) ?? 0;
       const value = stockValue.get(item.id) ?? 0n;
+      const unassignedOnHand = byLocation.get(`${item.id}:null`) ?? 0;
+      const locationQuantities = [
+        ...locations.map((location) => ({
+          locationId: location.id,
+          onHand: byLocation.get(`${item.id}:${location.id}`) ?? 0,
+        })),
+        ...(unassignedOnHand !== 0 ? [{ locationId: null, onHand: unassignedOnHand }] : []),
+      ];
+      const valueByLocation = allocateInventoryValueByLocationCents(value, locationQuantities);
+      const locationValues: {
+        id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueZmw: string;
+      }[] = locations.map((location) => ({
+        id: location.id, name: location.name,
+        onHand: byLocation.get(`${item.id}:${location.id}`) ?? 0,
+        reserved: reservedByLocation.get(`${item.id}:${location.id}`) ?? 0,
+        available: (byLocation.get(`${item.id}:${location.id}`) ?? 0) - (reservedByLocation.get(`${item.id}:${location.id}`) ?? 0),
+        stockValueZmw: formatCents(valueByLocation.get(location.id) ?? 0n),
+      }));
+      if (unassignedOnHand !== 0 || (valueByLocation.has(null) && (valueByLocation.get(null) ?? 0n) !== 0n)) {
+        locationValues.push({
+          id: null, name: "Unassigned",
+          onHand: unassignedOnHand,
+          reserved: reservedByLocation.get(`${item.id}:null`) ?? 0,
+          available: unassignedOnHand - (reservedByLocation.get(`${item.id}:null`) ?? 0),
+          stockValueZmw: formatCents(valueByLocation.get(null) ?? 0n),
+        });
+      }
       return {
         ...item, onHand: stock, reserved: held, available: stock - held,
         stockValueZmw: formatCents(value),
         averageUnitCostZmw: formatCents(weightedAverageUnitCostCents(value, stock)),
-        locations: locations.map((location) => ({
-          id: location.id, name: location.name,
-          onHand: byLocation.get(`${item.id}:${location.id}`) ?? 0,
-          reserved: reservedByLocation.get(`${item.id}:${location.id}`) ?? 0,
-          available: (byLocation.get(`${item.id}:${location.id}`) ?? 0) - (reservedByLocation.get(`${item.id}:${location.id}`) ?? 0),
-        })),
+        locations: locationValues,
       };
     }) });
   });

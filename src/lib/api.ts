@@ -44,7 +44,8 @@ export interface LandedCostOrder extends PurchaseOrder {
 }
 export interface InventoryItem {
   id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number;
-  stockValueZmw: string; averageUnitCostZmw: string; locations: { id: number; name: string; onHand: number; reserved: number; available: number }[];
+  stockValueZmw: string; averageUnitCostZmw: string;
+  locations: { id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueZmw: string }[];
 }
 export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; createdAt: string; evidenceFileName: string | null; evidenceMimeType: string | null; }
 export interface InventoryLocation { id: number; name: string; active: boolean; }

@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
 import { journalEntries } from "../shared/schema";
 import {
-  buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  allocateInventoryValueByLocationCents, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -132,6 +132,26 @@ test("rounds the current weighted-average cost in exact ZMW cents", () => {
   assert.equal(weightedAverageUnitCostCents(100n, 3), 33n);
   assert.equal(weightedAverageUnitCostCents(101n, 2), 51n);
   assert.equal(weightedAverageUnitCostCents(100n, 0), 0n);
+});
+
+test("allocates pooled inventory value by location quantity and reconciles every cent", () => {
+  const values = allocateInventoryValueByLocationCents(10n, [
+    { locationId: 4, onHand: 1 },
+    { locationId: 2, onHand: 1 },
+    { locationId: 8, onHand: 1 },
+  ]);
+  assert.deepEqual([...values], [[4, 3n], [2, 4n], [8, 3n]]);
+  assert.equal([...values.values()].reduce((total, value) => total + value, 0n), 10n);
+});
+
+test("allocates value to unassigned stock and preserves credits when locations have no positive stock", () => {
+  const values = allocateInventoryValueByLocationCents(-275n, [
+    { locationId: 4, onHand: 0 },
+    { locationId: null, onHand: 0 },
+  ]);
+  assert.equal(values.get(4), 0n);
+  assert.equal(values.get(null), -275n);
+  assert.equal([...values.values()].reduce((total, value) => total + value, 0n), -275n);
 });
 
 test("splits late import costs by the weighted-average value still represented in stock", () => {
