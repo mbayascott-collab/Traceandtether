@@ -4,7 +4,7 @@ import {
   customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
-import { PublicShopProtection } from "./public-shop-protection";
+import { PublicShopProtection, type OrderLimitStore } from "./public-shop-protection";
 
 const validProduct = {
   sku: "mz-001",
@@ -237,54 +237,124 @@ test("validates public shop order requests without accepting client prices", () 
   assert.equal(publicShopOrderInputSchema.safeParse({ ...request, lines: [{ ...request.lines[0], unitPriceZmw: "0.01" }] }).success, false);
 });
 
-test("limits public shop submissions per IP and resets after the window", () => {
+class MemoryOrderLimitStore implements OrderLimitStore {
+  private readonly buckets = new Map<string, { startedAt: number; count: number }>();
+
+  async recordAttempt(ipHash: string, { now, windowMs, orderLimit }: { now: number; windowMs: number; orderLimit: number }) {
+    let bucket = this.buckets.get(ipHash);
+    if (!bucket || now - bucket.startedAt >= windowMs) {
+      bucket = { startedAt: now, count: 0 };
+      this.buckets.set(ipHash, bucket);
+    }
+    bucket.count = Math.min(bucket.count + 1, orderLimit + 1);
+    return {
+      count: bucket.count,
+      retryAfterSeconds: Math.max(1, Math.ceil((windowMs - (now - bucket.startedAt)) / 1_000)),
+    };
+  }
+}
+
+test("limits public shop submissions per IP and resets after the window", async () => {
   let now = 1_000;
   let nextToken = 0;
   const protection = new PublicShopProtection({
     now: () => now,
     tokenFactory: () => `token-${++nextToken}`,
+    orderLimitStore: new MemoryOrderLimitStore(),
     orderLimit: 2,
     orderWindowMs: 10_000,
     minimumFormAgeMs: 0,
   });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const token = protection.issueChallenge("192.0.2.1");
-    assert.deepEqual(protection.checkSubmission("192.0.2.1", token, ""), { ok: true });
+    assert.deepEqual(await protection.checkSubmission("192.0.2.1", token, ""), { ok: true });
   }
   const blockedToken = protection.issueChallenge("192.0.2.1");
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", blockedToken, ""), {
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", blockedToken, ""), {
     ok: false, reason: "rate_limited", retryAfterSeconds: 10,
   });
   const otherIpToken = protection.issueChallenge("192.0.2.2");
-  assert.deepEqual(protection.checkSubmission("192.0.2.2", otherIpToken, ""), { ok: true });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.2", otherIpToken, ""), { ok: true });
   now += 10_000;
   const afterWindowToken = protection.issueChallenge("192.0.2.1");
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", afterWindowToken, ""), { ok: true });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", afterWindowToken, ""), { ok: true });
 });
 
-test("rejects filled honeypots, missing, reused, premature, expired, and cross-IP challenges", () => {
+test("shares public shop order limits across server instances and restarts", async () => {
+  let now = 1_000;
+  let nextToken = 0;
+  const sharedStore = new MemoryOrderLimitStore();
+  const createServer = () => new PublicShopProtection({
+    now: () => now,
+    tokenFactory: () => `token-${++nextToken}`,
+    orderLimitStore: sharedStore,
+    orderLimit: 2,
+    orderWindowMs: 10_000,
+    minimumFormAgeMs: 0,
+  });
+
+  const firstServer = createServer();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = firstServer.issueChallenge("192.0.2.10");
+    assert.deepEqual(await firstServer.checkSubmission("192.0.2.10", token, ""), { ok: true });
+  }
+
+  // A new instance represents another server or a restarted process.
+  const restartedServer = createServer();
+  const token = restartedServer.issueChallenge("192.0.2.10");
+  assert.deepEqual(await restartedServer.checkSubmission("192.0.2.10", token, ""), {
+    ok: false, reason: "rate_limited", retryAfterSeconds: 10,
+  });
+  now += 10_000;
+  const afterExpiry = restartedServer.issueChallenge("192.0.2.10");
+  assert.deepEqual(await restartedServer.checkSubmission("192.0.2.10", afterExpiry, ""), { ok: true });
+});
+
+test("enforces a shared order limit for simultaneous submissions", async () => {
+  let nextToken = 0;
+  const sharedStore = new MemoryOrderLimitStore();
+  const servers = Array.from({ length: 4 }, () => new PublicShopProtection({
+    now: () => 1_000,
+    tokenFactory: () => `token-${++nextToken}`,
+    orderLimitStore: sharedStore,
+    orderLimit: 3,
+    orderWindowMs: 10_000,
+    minimumFormAgeMs: 0,
+  }));
+  const submissions = servers.flatMap((server) => Array.from({ length: 3 }, () => {
+    const token = server.issueChallenge("192.0.2.20");
+    return server.checkSubmission("192.0.2.20", token, "");
+  }));
+
+  const results = await Promise.all(submissions);
+  assert.equal(results.filter((result) => result.ok).length, 3);
+  assert.equal(results.filter((result) => !result.ok && result.reason === "rate_limited").length, 9);
+});
+
+test("rejects filled honeypots, missing, reused, premature, expired, and cross-IP challenges", async () => {
   let now = 1_000;
   let nextToken = 0;
   const protection = new PublicShopProtection({
     now: () => now,
     tokenFactory: () => `token-${++nextToken}`,
+    orderLimitStore: new MemoryOrderLimitStore(),
     minimumFormAgeMs: 1_500,
     challengeLifetimeMs: 5_000,
   });
 
   const earlyToken = protection.issueChallenge("192.0.2.1");
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", earlyToken, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", earlyToken, ""), { ok: false, reason: "bot_check" });
   now += 1_500;
   const filledFieldToken = protection.issueChallenge("192.0.2.1");
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", filledFieldToken, "https://spam.example"), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", filledFieldToken, "https://spam.example"), { ok: false, reason: "bot_check" });
   const crossIpToken = protection.issueChallenge("192.0.2.1");
-  assert.deepEqual(protection.checkSubmission("192.0.2.2", crossIpToken, ""), { ok: false, reason: "bot_check" });
-  assert.deepEqual(protection.checkSubmission("192.0.2.3", undefined, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.2", crossIpToken, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.3", undefined, ""), { ok: false, reason: "bot_check" });
   const reusableToken = protection.issueChallenge("192.0.2.1");
   now += 1_500;
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: true });
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: true });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: false, reason: "bot_check" });
   const expiredToken = protection.issueChallenge("192.0.2.1");
   now += 5_001;
-  assert.deepEqual(protection.checkSubmission("192.0.2.1", expiredToken, ""), { ok: false, reason: "bot_check" });
+  assert.deepEqual(await protection.checkSubmission("192.0.2.1", expiredToken, ""), { ok: false, reason: "bot_check" });
 });

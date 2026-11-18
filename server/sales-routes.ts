@@ -195,7 +195,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
 
   app.post("/api/shop/orders", async (req, res) => {
     const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
-    const check = publicShopProtection.checkSubmission(
+    const check = await publicShopProtection.checkSubmission(
       req.ip || req.socket.remoteAddress || "",
       body.challenge,
       body.website,

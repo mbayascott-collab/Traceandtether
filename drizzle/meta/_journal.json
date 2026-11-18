@@ -232,6 +232,13 @@
       "when": 1794994788369,
       "tag": "0032_owner_fund_transactions",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794996571901,
+      "tag": "0033_public_shop_order_limits",
+      "breakpoints": true
     }
   ]
 }

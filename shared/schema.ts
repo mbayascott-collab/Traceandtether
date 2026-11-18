@@ -811,3 +811,17 @@ export const marketingAttributions = pgTable(
     check("marketing_attributions_source_valid", sql`${table.source} in ('manual', 'campaign_link')`),
   ],
 );
+
+export const publicShopOrderLimits = pgTable(
+  "public_shop_order_limits",
+  {
+    ipHash: varchar("ip_hash", { length: 64 }).primaryKey(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+    hitCount: integer("hit_count").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("public_shop_order_limits_expires_at_idx").on(table.expiresAt),
+    check("public_shop_order_limits_hit_count_positive", sql`${table.hitCount} > 0`),
+  ],
+);
