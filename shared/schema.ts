@@ -1037,11 +1037,15 @@ export const publicShopOrderAttemptCounts = pgTable(
     id: integer("id").primaryKey().default(1),
     acceptedCount: integer("accepted_count").notNull().default(0),
     blockedCount: integer("blocked_count").notNull().default(0),
+    rateLimitedCount: integer("rate_limited_count").notNull().default(0),
+    botCheckCount: integer("bot_check_count").notNull().default(0),
   },
   (table) => [
     check("public_shop_order_attempt_counts_singleton", sql`${table.id} = 1`),
     check("public_shop_order_attempt_counts_accepted_nonnegative", sql`${table.acceptedCount} >= 0`),
     check("public_shop_order_attempt_counts_blocked_nonnegative", sql`${table.blockedCount} >= 0`),
+    check("public_shop_order_attempt_counts_rate_limited_nonnegative", sql`${table.rateLimitedCount} >= 0`),
+    check("public_shop_order_attempt_counts_bot_check_nonnegative", sql`${table.botCheckCount} >= 0`),
   ],
 );
 
@@ -1051,9 +1055,13 @@ export const publicShopOrderAttemptDailyCounts = pgTable(
     day: date("day", { mode: "string" }).primaryKey(),
     acceptedCount: integer("accepted_count").notNull().default(0),
     blockedCount: integer("blocked_count").notNull().default(0),
+    rateLimitedCount: integer("rate_limited_count").notNull().default(0),
+    botCheckCount: integer("bot_check_count").notNull().default(0),
   },
   (table) => [
     check("public_shop_order_attempt_daily_counts_accepted_nonnegative", sql`${table.acceptedCount} >= 0`),
     check("public_shop_order_attempt_daily_counts_blocked_nonnegative", sql`${table.blockedCount} >= 0`),
+    check("public_shop_order_attempt_daily_counts_rate_limited_nonnegative", sql`${table.rateLimitedCount} >= 0`),
+    check("public_shop_order_attempt_daily_counts_bot_check_nonnegative", sql`${table.botCheckCount} >= 0`),
   ],
 );

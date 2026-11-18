@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
-  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type SalesDelivery, type SalesOrder,
+  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
 type Mode = "customers" | "orders";
@@ -33,7 +33,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [inventoryLocations, setInventoryLocations] = useState<InventoryLocation[]>([]);
   const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
-  const [shopAttemptSummary, setShopAttemptSummary] = useState<{ accepted: number; blocked: number } | null>(null);
+  const [shopAttemptSummary, setShopAttemptSummary] = useState<PublicShopAttemptSummary | null>(null);
   const [shopAttemptFrom, setShopAttemptFrom] = useState(() => publicShopDateOffset(29));
   const [shopAttemptTo, setShopAttemptTo] = useState(() => publicShopDateOffset(0));
   const [shopAttemptDays, setShopAttemptDays] = useState<PublicShopAttemptDay[] | null>(null);
@@ -234,8 +234,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     return !value || customer.name.toLowerCase().includes(value) || customerCode(customer.id).toLowerCase().includes(value);
   }
   const shopAttemptRangeTotals = (shopAttemptDays ?? []).reduce(
-    (totals, day) => ({ accepted: totals.accepted + day.accepted, blocked: totals.blocked + day.blocked }),
-    { accepted: 0, blocked: 0 },
+    (totals, day) => ({
+      accepted: totals.accepted + day.accepted,
+      blocked: totals.blocked + day.blocked,
+      rateLimited: totals.rateLimited + day.rateLimited,
+      botCheck: totals.botCheck + day.botCheck,
+      unclassifiedBlocked: totals.unclassifiedBlocked + day.unclassifiedBlocked,
+    }),
+    { accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
   );
   const filteredCustomers = customers.filter((customer) => matchesCustomer(customer, customerSearch));
   const title = mode === "customers" ? "Customers" : "Sales orders";
@@ -326,8 +332,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <div className="metric-grid">
           <article className="metric-card"><div className="metric-top"><span>Accepted requests</span></div><strong className="metric-value">{shopAttemptSummary?.accepted ?? "—"}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Blocked requests</span></div><strong className="metric-value">{shopAttemptSummary?.blocked ?? "—"}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Rate-limited</span></div><strong className="metric-value">{shopAttemptSummary?.rateLimited ?? "—"}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Challenge or honeypot failed</span></div><strong className="metric-value">{shopAttemptSummary?.botCheck ?? "—"}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Reason not recorded</span></div><strong className="metric-value">{shopAttemptSummary?.unclassifiedBlocked ?? "—"}</strong></article>
         </div>
-        <p className="report-footnote">Only aggregate totals are saved; visitor contact details and IP addresses are not stored in this report. Daily history starts with this tracking update, while lifetime totals include earlier requests.</p>
+        <p className="report-footnote">Only aggregate counts are included in this report; rejected visitor details are not collected or exposed here. Reason tracking starts with this update. Older blocked requests appear under “Reason not recorded.”</p>
         <h3>Daily request activity</h3>
         <p className="report-footnote">Choose a date range to see accepted and blocked requests per day. Dates use UTC.</p>
         <div className="form-grid">
@@ -337,6 +346,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         {shopAttemptDays && <div className="metric-grid">
           <article className="metric-card"><div className="metric-top"><span>Accepted in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.accepted}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Blocked in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.blocked}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Rate-limited in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.rateLimited}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Challenge or honeypot failed</span></div><strong className="metric-value">{shopAttemptRangeTotals.botCheck}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Reason not recorded in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.unclassifiedBlocked}</strong></article>
         </div>}
         {!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo
           ? <p role="alert">Choose a valid range with the start date on or before the end date.</p>
@@ -344,11 +356,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             ? <p className="report-footnote">Loading daily requests…</p>
             : <div className="data-table-wrap">
               <table>
-                <thead><tr><th>Date (UTC)</th><th>Accepted</th><th>Blocked</th></tr></thead>
+                <thead><tr><th>Date (UTC)</th><th>Accepted</th><th>Blocked</th><th>Rate-limited</th><th>Challenge or honeypot failed</th><th>Reason not recorded</th></tr></thead>
                 <tbody>{shopAttemptDays.map((day) => <tr key={day.day}>
                   <td>{new Date(`${day.day}T00:00:00.000Z`).toLocaleDateString("en-ZM", { timeZone: "UTC", dateStyle: "medium" })}</td>
                   <td>{day.accepted}</td>
                   <td>{day.blocked}</td>
+                  <td>{day.rateLimited}</td>
+                  <td>{day.botCheck}</td>
+                  <td>{day.unclassifiedBlocked}</td>
                 </tr>)}</tbody>
               </table>
             </div>}

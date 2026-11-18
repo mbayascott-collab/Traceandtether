@@ -358,6 +358,13 @@
       "when": 1795033963235,
       "tag": "0050_public_shop_daily_attempt_counts",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1795034391853,
+      "tag": "0051_eager_mister_sinister",
+      "breakpoints": true
     }
   ]
 }

@@ -474,10 +474,17 @@ export async function saveCustomer(input: Omit<Customer, "id">, id?: number): Pr
 export async function fetchSalesOrders(): Promise<SalesOrder[]> {
   return (await request<{ orders: SalesOrder[] }>("/api/sales-orders")).orders;
 }
-export async function fetchPublicShopOrderAttemptSummary(): Promise<{ accepted: number; blocked: number }> {
-  return (await request<{ summary: { accepted: number; blocked: number } }>("/api/shop/order-attempt-summary")).summary;
+export type PublicShopAttemptSummary = {
+  accepted: number;
+  blocked: number;
+  rateLimited: number;
+  botCheck: number;
+  unclassifiedBlocked: number;
+};
+export async function fetchPublicShopOrderAttemptSummary(): Promise<PublicShopAttemptSummary> {
+  return (await request<{ summary: PublicShopAttemptSummary }>("/api/shop/order-attempt-summary")).summary;
 }
-export type PublicShopAttemptDay = { day: string; accepted: number; blocked: number };
+export type PublicShopAttemptDay = PublicShopAttemptSummary & { day: string };
 export async function fetchPublicShopOrderAttemptDays(from: string, to: string): Promise<PublicShopAttemptDay[]> {
   const params = new URLSearchParams({ from, to });
   return (await request<{ days: PublicShopAttemptDay[] }>(`/api/shop/order-attempt-days?${params}`)).days;

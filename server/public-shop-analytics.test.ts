@@ -8,7 +8,9 @@ import {
 
 test("records accepted and blocked shop requests as aggregate-only counters", async () => {
   const dialect = new PgDialect();
-  const counts: PublicShopAttemptSummary = { accepted: 0, blocked: 0 };
+  const counts: PublicShopAttemptSummary = {
+    accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0,
+  };
   const statements: string[] = [];
   const executor = {
     async execute(query: Parameters<typeof dialect.sqlToQuery>[0]) {
@@ -16,15 +18,19 @@ test("records accepted and blocked shop requests as aggregate-only counters", as
       statements.push(statement.sql);
       counts.accepted += Number(statement.params[0]);
       counts.blocked += Number(statement.params[1]);
+      counts.rateLimited += Number(statement.params[2]);
+      counts.botCheck += Number(statement.params[3]);
       return {};
     },
   };
 
   await recordPublicShopAttempt(executor, "accepted");
-  await recordPublicShopAttempt(executor, "blocked");
-  await recordPublicShopAttempt(executor, "blocked");
+  await recordPublicShopAttempt(executor, "rate_limited");
+  await recordPublicShopAttempt(executor, "bot_check");
 
-  assert.deepEqual(counts, { accepted: 1, blocked: 2 });
+  assert.deepEqual(counts, {
+    accepted: 1, blocked: 2, rateLimited: 1, botCheck: 1, unclassifiedBlocked: 0,
+  });
   assert.equal(statements.length, 3);
   assert.ok(statements.every((statement) => /ON CONFLICT \(id\) DO UPDATE/.test(statement)));
   assert.ok(statements.every((statement) => /ON CONFLICT \(day\) DO UPDATE/.test(statement)));
@@ -33,26 +39,39 @@ test("records accepted and blocked shop requests as aggregate-only counters", as
   assert.deepEqual(publicShopAttemptSummary({
     acceptedCount: counts.accepted,
     blockedCount: counts.blocked,
-  }), { accepted: 1, blocked: 2 });
-  assert.deepEqual(publicShopAttemptSummary(), { accepted: 0, blocked: 0 });
+    rateLimitedCount: counts.rateLimited,
+    botCheckCount: counts.botCheck,
+  }), {
+    accepted: 1, blocked: 2, rateLimited: 1, botCheck: 1, unclassifiedBlocked: 0,
+  });
+  assert.deepEqual(publicShopAttemptSummary(), {
+    accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0,
+  });
+  assert.deepEqual(publicShopAttemptSummary({
+    acceptedCount: 4, blockedCount: 7, rateLimitedCount: 2, botCheckCount: 3,
+  }), {
+    accepted: 4, blocked: 7, rateLimited: 2, botCheck: 3, unclassifiedBlocked: 2,
+  });
+  assert.ok(statements.every((statement) => /rate_limited_count/.test(statement)));
+  assert.ok(statements.every((statement) => /bot_check_count/.test(statement)));
 });
 
 test("daily request activity includes both date boundaries and fills empty days", () => {
-  const rows: PublicShopAttemptDay[] = [
-    { day: "2026-11-30", accepted: 2, blocked: 1 },
-    { day: "2026-12-02", accepted: 0, blocked: 3 },
+  const rows: Array<Pick<PublicShopAttemptDay, "day" | "accepted" | "blocked" | "rateLimited" | "botCheck">> = [
+    { day: "2026-11-30", accepted: 2, blocked: 1, rateLimited: 1, botCheck: 0 },
+    { day: "2026-12-02", accepted: 0, blocked: 3, rateLimited: 1, botCheck: 1 },
   ];
   assert.deepEqual(completePublicShopAttemptDays("2026-11-30", "2026-12-02", rows), [
-    { day: "2026-11-30", accepted: 2, blocked: 1 },
-    { day: "2026-12-01", accepted: 0, blocked: 0 },
-    { day: "2026-12-02", accepted: 0, blocked: 3 },
+    { day: "2026-11-30", accepted: 2, blocked: 1, rateLimited: 1, botCheck: 0, unclassifiedBlocked: 0 },
+    { day: "2026-12-01", accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
+    { day: "2026-12-02", accepted: 0, blocked: 3, rateLimited: 1, botCheck: 1, unclassifiedBlocked: 1 },
   ]);
 });
 
 test("daily request activity returns zero-count dates for an empty period", () => {
   assert.deepEqual(completePublicShopAttemptDays("2026-02-28", "2026-03-01", []), [
-    { day: "2026-02-28", accepted: 0, blocked: 0 },
-    { day: "2026-03-01", accepted: 0, blocked: 0 },
+    { day: "2026-02-28", accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
+    { day: "2026-03-01", accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
   ]);
 });
 

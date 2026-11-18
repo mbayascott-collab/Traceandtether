@@ -19,6 +19,7 @@ import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
 import { chooseSalesStockLocation } from "./sales-stock-allocation";
+import { requireBusinessOwner } from "./access-control";
 import { sendCustomerQuoteEmail } from "./customer-quote-email";
 import {
   customerQuoteDeliveryEventSchema, hasValidDeliveryWebhookToken,
@@ -198,6 +199,9 @@ async function recordDelivery(tx: any, orderId: number,
 }
 
 export function registerSalesRoutes(app: Express, owner: RequestHandler) {
+  const publicShopAnalyticsOwner = requireBusinessOwner(
+    "Only the business owner can view public shop request activity.",
+  );
   app.post("/api/webhooks/customer-quote-email", async (req, res) => {
     if (!hasValidDeliveryWebhookToken(req.get("authorization"), process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET)) {
       return res.status(process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET ? 401 : 503)
@@ -278,7 +282,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       body.website,
     );
     if (!check.ok) {
-      await recordPublicShopAttempt(db, "blocked");
+      await recordPublicShopAttempt(db, check.reason);
       if (check.reason === "rate_limited") {
         res.setHeader("Retry-After", String(check.retryAfterSeconds));
         return res.status(429).json({ error: "Too many order requests. Please try again later." });
@@ -350,15 +354,17 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     res.status(201).json({ orderNumber: result.orderNumber });
   });
 
-  app.get("/api/shop/order-attempt-summary", owner, async (_req, res) => {
+  app.get("/api/shop/order-attempt-summary", owner, publicShopAnalyticsOwner, async (_req, res) => {
     const [counts] = await db.select({
       acceptedCount: publicShopOrderAttemptCounts.acceptedCount,
       blockedCount: publicShopOrderAttemptCounts.blockedCount,
+      rateLimitedCount: publicShopOrderAttemptCounts.rateLimitedCount,
+      botCheckCount: publicShopOrderAttemptCounts.botCheckCount,
     }).from(publicShopOrderAttemptCounts).limit(1);
     res.json({ summary: publicShopAttemptSummary(counts) });
   });
 
-  app.get("/api/shop/order-attempt-days", owner, async (req, res) => {
+  app.get("/api/shop/order-attempt-days", owner, publicShopAnalyticsOwner, async (req, res) => {
     const { from, to } = req.query;
     if (typeof from !== "string" || typeof to !== "string" || !isPublicShopAttemptDateRange(from, to)) {
       return res.status(400).json({ error: "Choose a valid date range with the start date on or before the end date." });
@@ -367,6 +373,8 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       day: publicShopOrderAttemptDailyCounts.day,
       accepted: publicShopOrderAttemptDailyCounts.acceptedCount,
       blocked: publicShopOrderAttemptDailyCounts.blockedCount,
+      rateLimited: publicShopOrderAttemptDailyCounts.rateLimitedCount,
+      botCheck: publicShopOrderAttemptDailyCounts.botCheckCount,
     }).from(publicShopOrderAttemptDailyCounts)
       .where(and(gte(publicShopOrderAttemptDailyCounts.day, from), lte(publicShopOrderAttemptDailyCounts.day, to)))
       .orderBy(asc(publicShopOrderAttemptDailyCounts.day));
