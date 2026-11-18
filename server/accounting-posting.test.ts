@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
-import { journalEntries } from "../shared/schema";
+import { journalEntries, paymentStatementLines } from "../shared/schema";
 import {
   allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
@@ -23,6 +23,16 @@ test("journal source keys are unique to prevent concurrent duplicate opening ent
   );
   assert.equal(sourceKeyIndex?.config.unique, true);
   assert.equal(sourceKeyIndex?.config.columns.length, 1);
+});
+
+test("a payment can be matched to only one statement line", () => {
+  const matchedPaymentIndex = getTableConfig(paymentStatementLines).indexes.find(
+    ({ config }) => config.name === "payment_statement_lines_matched_payment_unique",
+  );
+  assert.equal(matchedPaymentIndex?.config.unique, true);
+  assert.equal(matchedPaymentIndex?.config.columns.length, 1);
+  const indexedColumn = matchedPaymentIndex?.config.columns[0] as { name?: string } | undefined;
+  assert.equal(indexedColumn?.name, "matched_payment_id");
 });
 
 test("parses and formats ZMW using exact minor units", () => {
