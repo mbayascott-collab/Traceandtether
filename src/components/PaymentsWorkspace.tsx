@@ -25,6 +25,12 @@ export default function PaymentsWorkspace() {
   const [sendingReminder, setSendingReminder] = useState("");
   const pendingAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const options = direction === "customer_receipt" ? data.invoices : data.bills;
+  const balanceValue = (item: PaymentOption) => item.importExpenseId != null
+    ? `expense:${item.importExpenseId}`
+    : `order:${item.orderId}`;
+  const balanceKey = (item: PaymentOption) => item.importExpenseId != null
+    ? `expense-${item.importExpenseId}`
+    : `order-${item.orderId}`;
   const pendingBalances = [
     ...data.invoices.map((item) => ({ ...item, direction: "customer_receipt" as const, balanceType: "Customer owes us" })),
     ...data.bills.map((item) => ({ ...item, direction: "supplier_payment" as const, balanceType: "We owe supplier" })),
@@ -49,6 +55,7 @@ export default function PaymentsWorkspace() {
   }, [reload]);
 
   async function saveDueDate(direction: PaymentDirection, item: PaymentOption) {
+    if (item.orderId === null) return;
     const key = `${direction}-${item.orderId}`;
     setSavingDueDate(key); setError(""); setNotice("");
     try {
@@ -98,8 +105,13 @@ export default function PaymentsWorkspace() {
     const formElement = event.currentTarget;
     setBusy(true); setError(""); setNotice("");
     const form = new FormData(formElement);
+    const [targetType, targetIdText] = String(form.get("target")).split(":");
+    const targetId = Number(targetIdText);
     const paymentDetails = {
-      direction, orderId: Number(form.get("orderId")), amountZmw: String(form.get("amountZmw")),
+      direction,
+      orderId: targetType === "order" ? targetId : null,
+      importExpenseId: targetType === "expense" ? targetId : null,
+      amountZmw: String(form.get("amountZmw")),
       paymentDate: String(form.get("paymentDate")), method: String(form.get("method")),
       reference: String(form.get("reference") || ""), notes: String(form.get("notes") || ""),
     };
@@ -124,7 +136,7 @@ export default function PaymentsWorkspace() {
   }
 
   return <section className="supplier-workspace">
-    <header className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Payments</h1><p>Record customer money received and payments made to suppliers.</p></div></header>
+    <header className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Payments</h1><p>Record customer money received and payments made to suppliers or forwarders.</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}
     {notice && <div className="notice-strip" role="status">{notice}</div>}
     <div className="panel form-grid">
@@ -134,10 +146,10 @@ export default function PaymentsWorkspace() {
         <option value="supplier_payment">Money paid to supplier</option>
       </select></label>
       <form key={direction} className="form-grid payment-form" onSubmit={submit}>
-          <label>{direction === "customer_receipt" ? "Customer order balance" : "Supplier purchase order"}
-          <select name="orderId" required defaultValue="">
+          <label>{direction === "customer_receipt" ? "Customer order balance" : "Supplier order or shared forwarder bill"}
+          <select name="target" required defaultValue="">
             <option value="">Choose an outstanding balance</option>
-            {options.map((option) => <option key={option.orderId} value={option.orderId}>
+            {options.map((option) => <option key={balanceKey(option)} value={balanceValue(option)}>
               {option.partyName} · {option.orderNumber} · owes {money(option.outstandingZmw)}
             </option>)}
           </select>
@@ -153,7 +165,7 @@ export default function PaymentsWorkspace() {
         <button className="button button-primary" disabled={busy || !options.length}>{busy ? "Saving…" : "Save payment"}</button>
       </form>
       {!options.length && <p className="report-footnote">No outstanding balances are available for this payment type.</p>}
-      <p className="report-footnote">Payments are recorded in ZMW. Supplier balances include received goods and recorded import costs.</p>
+      <p className="report-footnote">Payments are recorded in ZMW. Purchase-order balances include received goods and order-specific import costs; shared shipment bills appear once as separate forwarder balances.</p>
     </div>
     <div className="panel data-table-wrap">
       <h2>Pending payments</h2>
@@ -162,17 +174,19 @@ export default function PaymentsWorkspace() {
         <tbody><tr>{agingTotals.map(({ bucket, amountCents }) => <td key={bucket}><strong>{money((amountCents / 100).toFixed(2))}</strong></td>)}</tr></tbody>
       </table>
       <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th><th>Aging</th><th>Due date</th><th>Reminder</th></tr></thead>
-        <tbody>{pendingBalances.map((item) => <tr key={`${item.balanceType}-${item.orderId}`}>
+        <tbody>{pendingBalances.map((item) => <tr key={`${item.balanceType}-${balanceKey(item)}`}>
           <td>{item.balanceType}</td><td>{item.partyName}</td><td>{item.orderNumber}</td>
           <td>{money(item.totalZmw)}</td><td>{money(item.paidZmw)}</td><td><strong>{money(item.outstandingZmw)}</strong></td>
           <td>{agingLabels[item.agingBucket]}{item.overdueDays > 0 ? ` · ${item.overdueDays} days` : ""}</td>
-          <td><div className="form-grid payment-due-date">
-            <input aria-label={`Due date for ${item.orderNumber}`} type="date"
-              value={dueDateDrafts[`${item.direction}-${item.orderId}`] ?? item.dueDate}
-              onChange={(event) => setDueDateDrafts((drafts) => ({ ...drafts, [`${item.direction}-${item.orderId}`]: event.target.value }))} />
-            <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
-              onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
-          </div></td>
+          <td>{item.orderId === null
+            ? item.dueDate
+            : <div className="form-grid payment-due-date">
+              <input aria-label={`Due date for ${item.orderNumber}`} type="date"
+                value={dueDateDrafts[`${item.direction}-${item.orderId}`] ?? item.dueDate}
+                onChange={(event) => setDueDateDrafts((drafts) => ({ ...drafts, [`${item.direction}-${item.orderId}`]: event.target.value }))} />
+              <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
+                onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
+            </div>}</td>
           <td>{item.direction === "customer_receipt" && item.overdueDays > 0 ? <div className="form-grid">
             <button type="button" className="button button-secondary button-small"
               disabled={!item.customerEmail || sendingReminder === String(item.orderId)}

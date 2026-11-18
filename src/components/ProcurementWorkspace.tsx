@@ -136,6 +136,7 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
         reference: String(d.get("reference") || "") || null, notes: null,
       }))}>
         <h2>Record import expense</h2>
+        <p className="report-footnote">Shared shipment expenses create one forwarder bill. Record its payment on the <a href="/payments">Payments page</a>.</p>
         <label>Apply expense to<select value={expenseTargetType} onChange={(e) => setExpenseTargetType(e.target.value as "order" | "shipment")}><option value="order">One purchase order</option><option value="shipment">A shared shipment</option></select></label>
         {expenseTargetType === "order"
           ? <label>Purchase order<select name="purchaseOrderId" required defaultValue=""><option value="">Select order</option>{orders.filter((o) => o.status !== "cancelled").map((o) => <option key={o.id} value={o.id}>{o.orderNumber} · {o.supplierName}</option>)}</select></label>

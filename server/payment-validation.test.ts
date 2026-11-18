@@ -22,3 +22,20 @@ test("validates positive ZMW payments and real dates", () => {
   assert.equal(paymentInputSchema.safeParse({ ...goodPayment, method: "cheque" }).success, false);
   assert.equal(paymentInputSchema.safeParse({ ...goodPayment, idempotencyKey: "not-a-key" }).success, false);
 });
+
+test("supplier payments target one purchase order or one shared shipment bill", () => {
+  const supplierPayment = { ...goodPayment, direction: "supplier_payment" as const };
+  assert.equal(paymentInputSchema.safeParse(supplierPayment).success, true);
+  assert.equal(paymentInputSchema.safeParse({
+    ...supplierPayment, orderId: null, importExpenseId: "17",
+  }).success, true);
+  assert.equal(paymentInputSchema.safeParse({
+    ...supplierPayment, orderId: null, importExpenseId: null,
+  }).success, false);
+  assert.equal(paymentInputSchema.safeParse({
+    ...supplierPayment, importExpenseId: "17",
+  }).success, false);
+  assert.equal(paymentInputSchema.safeParse({
+    ...goodPayment, importExpenseId: "17",
+  }).success, false);
+});

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   accountingAccounts, businessPayments, customers, importExpenses, inventoryMovements, journalEntries, journalLines, paymentStatementImportBatches, paymentStatementLines,
-  paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
+  paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, shipments, suppliers,
 } from "../shared/schema";
 import { effectivePaymentDueDate, paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
@@ -117,8 +117,9 @@ async function payableForPurchaseOrder(tx: any, orderId: number, orderNumber: st
 function paymentMatchesRequest(payment: typeof businessPayments.$inferSelect, input: z.infer<typeof paymentInputSchema>) {
   return payment.idempotencyKey === input.idempotencyKey
     && payment.direction === input.direction
-    && payment.salesOrderId === (input.direction === "customer_receipt" ? input.orderId : null)
-    && payment.purchaseOrderId === (input.direction === "supplier_payment" ? input.orderId : null)
+    && payment.salesOrderId === (input.direction === "customer_receipt" ? input.orderId ?? null : null)
+    && payment.purchaseOrderId === (input.direction === "supplier_payment" ? input.orderId ?? null : null)
+    && payment.importExpenseId === (input.direction === "supplier_payment" ? input.importExpenseId ?? null : null)
     && cents(payment.amountZmw) === cents(input.amountZmw)
     && payment.paymentDate === input.paymentDate
     && payment.method === input.method
@@ -439,11 +440,15 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       db.select({
         payment: businessPayments, salesOrderNumber: salesOrders.orderNumber, customerName: customers.name,
         purchaseOrderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name,
+        importExpenseId: importExpenses.id, importExpenseCategory: importExpenses.category,
+        shipmentReference: shipments.shipmentReference,
       }).from(businessPayments)
         .leftJoin(salesOrders, eq(businessPayments.salesOrderId, salesOrders.id))
         .leftJoin(customers, eq(salesOrders.customerId, customers.id))
         .leftJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
         .leftJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .leftJoin(importExpenses, eq(businessPayments.importExpenseId, importExpenses.id))
+        .leftJoin(shipments, eq(importExpenses.shipmentId, shipments.id))
         .orderBy(desc(businessPayments.paymentDate), desc(businessPayments.createdAt)),
       db.select({
         order: salesOrders, customerName: customers.name, customerEmail: customers.email,
@@ -473,6 +478,14 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
         .where(eq(inventoryMovements.kind, "stock_return")),
     ]);
+    const sharedExpenseRows = await db.select({
+      expense: importExpenses,
+      shipmentReference: shipments.shipmentReference,
+      carrier: shipments.carrier,
+      totalZmw: sql<string>`round(${importExpenses.amount}::numeric * ${importExpenses.exchangeRateToZmw}::numeric, 2)::text`,
+    }).from(importExpenses)
+      .innerJoin(shipments, eq(importExpenses.shipmentId, shipments.id))
+      .orderBy(desc(importExpenses.incurredAt), desc(importExpenses.id));
 
     const payments = await db.select().from(businessPayments);
     const reminderRows = await db.select().from(paymentReminders)
@@ -483,10 +496,15 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     }
     const paidSales = new Map<number, bigint>();
     const paidPurchases = new Map<number, bigint>();
+    const paidSharedExpenses = new Map<number, bigint>();
     for (const payment of payments) {
-      const key = payment.direction === "customer_receipt" ? payment.salesOrderId : payment.purchaseOrderId;
-      const target = payment.direction === "customer_receipt" ? paidSales : paidPurchases;
-      if (key !== null) target.set(key, (target.get(key) ?? 0n) + cents(payment.amountZmw));
+      if (payment.direction === "customer_receipt" && payment.salesOrderId !== null) {
+        paidSales.set(payment.salesOrderId, (paidSales.get(payment.salesOrderId) ?? 0n) + cents(payment.amountZmw));
+      } else if (payment.importExpenseId !== null) {
+        paidSharedExpenses.set(payment.importExpenseId, (paidSharedExpenses.get(payment.importExpenseId) ?? 0n) + cents(payment.amountZmw));
+      } else if (payment.purchaseOrderId !== null) {
+        paidPurchases.set(payment.purchaseOrderId, (paidPurchases.get(payment.purchaseOrderId) ?? 0n) + cents(payment.amountZmw));
+      }
     }
 
     const deliveredTotals = new Map<number, bigint>();
@@ -529,7 +547,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     }).filter((item) => cents(item.outstandingZmw) > 0n);
 
     const bills: Array<{
-      orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string;
+      orderId: number | null; importExpenseId?: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string;
       outstandingZmw: string; dueDate: string; overdueDays: number; agingBucket: string;
     }> = [];
     for (const { order, supplierName, supplierPaymentTermDays } of openPurchaseOrders) {
@@ -542,11 +560,26 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       });
     }
+    for (const { expense, shipmentReference, carrier, totalZmw } of sharedExpenseRows) {
+      const total = cents(totalZmw);
+      const paid = paidSharedExpenses.get(expense.id) ?? 0n;
+      const shipmentLabel = shipmentReference || carrier || `Shipment #${expense.shipmentId}`;
+      const dueDate = expense.incurredAt;
+      if (total > paid) bills.push({
+        orderId: null, importExpenseId: expense.id,
+        orderNumber: `Forwarder bill · ${shipmentLabel} · ${expense.category}`,
+        partyName: "Forwarder",
+        totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid),
+        dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
+      });
+    }
 
     res.json({
-      payments: paymentRows.map(({ payment, salesOrderNumber, customerName, purchaseOrderNumber, supplierName }) => ({
-        ...payment, orderNumber: salesOrderNumber ?? purchaseOrderNumber ?? "—",
-        partyName: customerName ?? supplierName ?? "—",
+      payments: paymentRows.map(({ payment, salesOrderNumber, customerName, purchaseOrderNumber, supplierName, importExpenseId, importExpenseCategory, shipmentReference }) => ({
+        ...payment,
+        orderNumber: salesOrderNumber ?? purchaseOrderNumber
+          ?? (importExpenseId !== null ? `Forwarder bill · ${shipmentReference || `Expense #${importExpenseId}`} · ${importExpenseCategory}` : "—"),
+        partyName: customerName ?? supplierName ?? (importExpenseId !== null ? "Forwarder" : "—"),
       })),
       invoices, bills,
     });
@@ -724,9 +757,10 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       let orderNumber: string;
       let invoiceId: number | null = null;
       let purchaseId: number | null = null;
+      let expenseId: number | null = null;
       let outstanding: bigint;
       if (input.direction === "customer_receipt") {
-        const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, input.orderId)).for("update").limit(1);
+        const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, input.orderId!)).for("update").limit(1);
         if (!order) return { error: "Sales order not found.", status: 404 };
         if (order.status !== "fulfilled" && order.status !== "partially_fulfilled" && order.status !== "cancelled") {
           return { error: "Deliver goods before recording a customer payment.", status: 409 };
@@ -759,23 +793,43 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
           .where(and(eq(businessPayments.direction, "customer_receipt"), eq(businessPayments.salesOrderId, order.id)));
         outstanding = total - returned - cents(String(existing[0]?.amount ?? "0.00"));
       } else {
-        const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.orderId)).for("update").limit(1);
-        if (!order) return { error: "Purchase order not found.", status: 404 };
-        if (order.status === "cancelled") return { error: "Cancelled purchase orders cannot receive supplier payments.", status: 409 };
-        orderNumber = order.orderNumber;
-        purchaseId = order.id;
-        const total = await payableForPurchaseOrder(tx, order.id, order.orderNumber);
-        const existing = await tx.select({ amount: sum(businessPayments.amountZmw) }).from(businessPayments)
-          .where(and(eq(businessPayments.direction, "supplier_payment"), eq(businessPayments.purchaseOrderId, order.id)));
-        outstanding = total - cents(String(existing[0]?.amount ?? "0.00"));
+        if (input.importExpenseId != null) {
+          const [expense] = await tx.select().from(importExpenses)
+            .where(and(eq(importExpenses.id, input.importExpenseId), sql`${importExpenses.shipmentId} is not null`))
+            .for("update").limit(1);
+          if (!expense) return { error: "Shared shipment bill not found.", status: 404 };
+          expenseId = expense.id;
+          const amountResult = await tx.execute(sql`
+            select round(${expense.amount}::numeric * ${expense.exchangeRateToZmw}::numeric, 2)::text as amount
+          `);
+          const amountRow = amountResult.rows[0] as { amount: string } | undefined;
+          const existing = await tx.select({ amount: sum(businessPayments.amountZmw) }).from(businessPayments)
+            .where(and(eq(businessPayments.direction, "supplier_payment"), eq(businessPayments.importExpenseId, expense.id)));
+          outstanding = cents(String(amountRow?.amount ?? "0.00")) - cents(String(existing[0]?.amount ?? "0.00"));
+          const [shipment] = await tx.select({ shipmentReference: shipments.shipmentReference, carrier: shipments.carrier })
+            .from(shipments).where(eq(shipments.id, expense.shipmentId!)).limit(1);
+          orderNumber = `Forwarder bill · ${shipment?.shipmentReference || shipment?.carrier || `Shipment #${expense.shipmentId}`} · ${expense.category}`;
+        } else {
+          const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.orderId!)).for("update").limit(1);
+          if (!order) return { error: "Purchase order not found.", status: 404 };
+          if (order.status === "cancelled") return { error: "Cancelled purchase orders cannot receive supplier payments.", status: 409 };
+          orderNumber = order.orderNumber;
+          purchaseId = order.id;
+          const total = await payableForPurchaseOrder(tx, order.id, order.orderNumber);
+          const existing = await tx.select({ amount: sum(businessPayments.amountZmw) }).from(businessPayments)
+            .where(and(eq(businessPayments.direction, "supplier_payment"), eq(businessPayments.purchaseOrderId, order.id)));
+          outstanding = total - cents(String(existing[0]?.amount ?? "0.00"));
+        }
       }
       if (input.reference) {
         const matchingReference = await tx.select({ id: businessPayments.id }).from(businessPayments)
           .where(and(
             eq(businessPayments.direction, input.direction),
             input.direction === "customer_receipt"
-              ? eq(businessPayments.salesOrderId, input.orderId)
-              : eq(businessPayments.purchaseOrderId, input.orderId),
+              ? eq(businessPayments.salesOrderId, input.orderId!)
+              : expenseId !== null
+                ? eq(businessPayments.importExpenseId, expenseId)
+                : eq(businessPayments.purchaseOrderId, input.orderId!),
             eq(businessPayments.amountZmw, formatCents(amount)),
             eq(businessPayments.paymentDate, input.paymentDate),
             eq(businessPayments.method, input.method),
@@ -791,13 +845,13 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       const [payment] = await tx.insert(businessPayments).values({
         paymentNumber: `PAY-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
         idempotencyKey: input.idempotencyKey,
-        direction: input.direction, salesOrderId: invoiceId, purchaseOrderId: purchaseId,
+        direction: input.direction, salesOrderId: invoiceId, purchaseOrderId: purchaseId, importExpenseId: expenseId,
         amountZmw: formatCents(amount), paymentDate: input.paymentDate, method: input.method,
         reference: input.reference, notes: input.notes,
       }).returning();
       await recordBusinessAudit(tx, {
         entityType: "payment", entityId: payment.id, recordLabel: payment.paymentNumber,
-        actor: res.locals.actor, action: "created", changedFields: ["direction", "salesOrderId", "purchaseOrderId", "amountZmw", "paymentDate", "method", "reference", "notes"],
+        actor: res.locals.actor, action: "created", changedFields: ["direction", "salesOrderId", "purchaseOrderId", "importExpenseId", "amountZmw", "paymentDate", "method", "reference", "notes"],
       });
       const cashAccountKey = cashAccountKeyForMethod(input.method);
       await postJournal(tx, {

@@ -81,12 +81,12 @@ export interface MarketingCampaignOption { id: number; name: string; status: str
 export type PaymentDirection = "customer_receipt" | "supplier_payment";
 export type PaymentMethod = "cash" | "bank_transfer" | "mobile_money" | "other";
 export interface PaymentOption {
-  orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string;
+  orderId: number | null; importExpenseId?: number | null; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string;
   dueDate: string; overdueDays: number; agingBucket: "not_due" | "1_30_days" | "31_60_days" | "over_60_days";
   customerEmail?: string | null;
   lastReminder?: { status: "sending" | "sent" | "failed"; attemptedAt: string; sentAt: string | null; recipientEmail: string; error: string | null } | null;
 }
-export interface BusinessPayment { id: number; paymentNumber: string; direction: PaymentDirection; amountZmw: string; paymentDate: string; method: PaymentMethod; reference: string | null; notes: string | null; orderNumber: string; partyName: string; }
+export interface BusinessPayment { id: number; paymentNumber: string; direction: PaymentDirection; importExpenseId?: number | null; amountZmw: string; paymentDate: string; method: PaymentMethod; reference: string | null; notes: string | null; orderNumber: string; partyName: string; }
 export interface PaymentOverview { payments: BusinessPayment[]; invoices: PaymentOption[]; bills: PaymentOption[]; }
 
 export interface CurrentUser {

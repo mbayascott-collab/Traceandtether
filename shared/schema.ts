@@ -735,6 +735,7 @@ export const businessPayments = pgTable(
     direction: paymentDirection("direction").notNull(),
     salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "restrict" }),
+    importExpenseId: integer("import_expense_id").references(() => importExpenses.id, { onDelete: "restrict" }),
     amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
     paymentDate: date("payment_date").notNull(),
     method: paymentMethod("method").notNull(),
@@ -747,11 +748,12 @@ export const businessPayments = pgTable(
     uniqueIndex("business_payments_idempotency_key_unique").on(table.idempotencyKey),
     index("business_payments_sales_order_idx").on(table.salesOrderId),
     index("business_payments_purchase_order_idx").on(table.purchaseOrderId),
+    index("business_payments_import_expense_idx").on(table.importExpenseId),
     index("business_payments_date_idx").on(table.paymentDate),
     check("business_payments_positive_amount", sql`${table.amountZmw} > 0`),
     check(
       "business_payments_order_matches_direction",
-      sql`(${table.direction} = 'customer_receipt' and ${table.salesOrderId} is not null and ${table.purchaseOrderId} is null) or (${table.direction} = 'supplier_payment' and ${table.purchaseOrderId} is not null and ${table.salesOrderId} is null)`,
+      sql`(${table.direction} = 'customer_receipt' and ${table.salesOrderId} is not null and ${table.purchaseOrderId} is null and ${table.importExpenseId} is null) or (${table.direction} = 'supplier_payment' and ${table.salesOrderId} is null and (( ${table.purchaseOrderId} is not null and ${table.importExpenseId} is null) or (${table.purchaseOrderId} is null and ${table.importExpenseId} is not null)))`,
     ),
   ],
 );
