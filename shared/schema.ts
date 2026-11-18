@@ -2,6 +2,7 @@ import {
   check,
   date,
   boolean,
+  bigint,
   type AnyPgColumn,
   customType,
   index,
@@ -1014,6 +1015,19 @@ export const publicShopOrderLimits = pgTable(
   (table) => [
     index("public_shop_order_limits_expires_at_idx").on(table.expiresAt),
     check("public_shop_order_limits_hit_count_positive", sql`${table.hitCount} > 0`),
+  ],
+);
+
+export const publicShopChallenges = pgTable(
+  "public_shop_challenges",
+  {
+    id: serial("id").primaryKey(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+    ipHash: varchar("ip_hash", { length: 64 }).notNull(),
+    issuedAt: bigint("issued_at", { mode: "number" }).notNull(),
+  },
+  (table) => [
+    index("public_shop_challenges_issued_at_idx").on(table.issuedAt),
   ],
 );
 

@@ -4,7 +4,7 @@ import {
   customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, isDuplicateShipmentImportExpense, openingStockCorrectionInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
-import { PublicShopProtection, type OrderLimitStore } from "./public-shop-protection";
+import { PublicShopProtection, type ChallengeStore, type OrderLimitStore } from "./public-shop-protection";
 
 const validProduct = {
   sku: "mz-001",
@@ -314,29 +314,56 @@ class MemoryOrderLimitStore implements OrderLimitStore {
   }
 }
 
+class MemoryChallengeStore implements ChallengeStore {
+  private readonly challenges = new Map<string, { ipHash: string; issuedAt: number }>();
+
+  async issue(
+    tokenHash: string,
+    challenge: { ipHash: string; issuedAt: number },
+    { now, lifetimeMs, maxChallenges }: { now: number; lifetimeMs: number; maxChallenges: number },
+  ) {
+    for (const [key, value] of this.challenges) {
+      if (now - value.issuedAt > lifetimeMs) this.challenges.delete(key);
+    }
+    this.challenges.set(tokenHash, challenge);
+    while (this.challenges.size > maxChallenges) {
+      const oldest = this.challenges.keys().next().value;
+      if (oldest === undefined) break;
+      this.challenges.delete(oldest);
+    }
+  }
+
+  async consume(tokenHash: string) {
+    const challenge = this.challenges.get(tokenHash);
+    this.challenges.delete(tokenHash);
+    return challenge;
+  }
+}
+
 test("limits public shop submissions per IP and resets after the window", async () => {
   let now = 1_000;
   let nextToken = 0;
   const protection = new PublicShopProtection({
     now: () => now,
     tokenFactory: () => `token-${++nextToken}`,
+    challengeStore: new MemoryChallengeStore(),
     orderLimitStore: new MemoryOrderLimitStore(),
     orderLimit: 2,
     orderWindowMs: 10_000,
     minimumFormAgeMs: 0,
   });
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const token = protection.issueChallenge("192.0.2.1");
+    const token = await protection.issueChallenge("192.0.2.1");
     assert.deepEqual(await protection.checkSubmission("192.0.2.1", token, ""), { ok: true });
   }
-  const blockedToken = protection.issueChallenge("192.0.2.1");
+  const blockedToken = await protection.issueChallenge("192.0.2.1");
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", blockedToken, ""), {
     ok: false, reason: "rate_limited", retryAfterSeconds: 10,
   });
-  const otherIpToken = protection.issueChallenge("192.0.2.2");
+  const otherIpToken = await protection.issueChallenge("192.0.2.2");
   assert.deepEqual(await protection.checkSubmission("192.0.2.2", otherIpToken, ""), { ok: true });
   now += 10_000;
-  const afterWindowToken = protection.issueChallenge("192.0.2.1");
+  const afterWindowToken = await protection.issueChallenge("192.0.2.1");
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", afterWindowToken, ""), { ok: true });
 });
 
@@ -344,9 +371,11 @@ test("shares public shop order limits across server instances and restarts", asy
   let now = 1_000;
   let nextToken = 0;
   const sharedStore = new MemoryOrderLimitStore();
+  const sharedChallengeStore = new MemoryChallengeStore();
   const createServer = () => new PublicShopProtection({
     now: () => now,
     tokenFactory: () => `token-${++nextToken}`,
+    challengeStore: sharedChallengeStore,
     orderLimitStore: sharedStore,
     orderLimit: 2,
     orderWindowMs: 10_000,
@@ -355,19 +384,43 @@ test("shares public shop order limits across server instances and restarts", asy
 
   const firstServer = createServer();
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const token = firstServer.issueChallenge("192.0.2.10");
+    const token = await firstServer.issueChallenge("192.0.2.10");
     assert.deepEqual(await firstServer.checkSubmission("192.0.2.10", token, ""), { ok: true });
   }
 
   // A new instance represents another server or a restarted process.
   const restartedServer = createServer();
-  const token = restartedServer.issueChallenge("192.0.2.10");
+  const token = await restartedServer.issueChallenge("192.0.2.10");
   assert.deepEqual(await restartedServer.checkSubmission("192.0.2.10", token, ""), {
     ok: false, reason: "rate_limited", retryAfterSeconds: 10,
   });
   now += 10_000;
-  const afterExpiry = restartedServer.issueChallenge("192.0.2.10");
+  const afterExpiry = await restartedServer.issueChallenge("192.0.2.10");
   assert.deepEqual(await restartedServer.checkSubmission("192.0.2.10", afterExpiry, ""), { ok: true });
+});
+
+test("verifies a challenge issued on another server and consumes it only once", async () => {
+  let now = 1_000;
+  let nextToken = 0;
+  const challengeStore = new MemoryChallengeStore();
+  const orderLimitStore = new MemoryOrderLimitStore();
+  const createServer = () => new PublicShopProtection({
+    now: () => now,
+    tokenFactory: () => `cross-server-token-${++nextToken}`,
+    challengeStore,
+    orderLimitStore,
+    minimumFormAgeMs: 0,
+  });
+  const issuingServer = createServer();
+  const submittingServer = createServer();
+  const token = await issuingServer.issueChallenge("192.0.2.11");
+
+  const results = await Promise.all([
+    submittingServer.checkSubmission("192.0.2.11", token, ""),
+    issuingServer.checkSubmission("192.0.2.11", token, ""),
+  ]);
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  assert.equal(results.filter((result) => !result.ok && result.reason === "bot_check").length, 1);
 });
 
 test("enforces a shared order limit for simultaneous submissions", async () => {
@@ -376,13 +429,14 @@ test("enforces a shared order limit for simultaneous submissions", async () => {
   const servers = Array.from({ length: 4 }, () => new PublicShopProtection({
     now: () => 1_000,
     tokenFactory: () => `token-${++nextToken}`,
+    challengeStore: new MemoryChallengeStore(),
     orderLimitStore: sharedStore,
     orderLimit: 3,
     orderWindowMs: 10_000,
     minimumFormAgeMs: 0,
   }));
-  const submissions = servers.flatMap((server) => Array.from({ length: 3 }, () => {
-    const token = server.issueChallenge("192.0.2.20");
+  const submissions = servers.flatMap((server) => Array.from({ length: 3 }, async () => {
+    const token = await server.issueChallenge("192.0.2.20");
     return server.checkSubmission("192.0.2.20", token, "");
   }));
 
@@ -397,24 +451,25 @@ test("rejects filled honeypots, missing, reused, premature, expired, and cross-I
   const protection = new PublicShopProtection({
     now: () => now,
     tokenFactory: () => `token-${++nextToken}`,
+    challengeStore: new MemoryChallengeStore(),
     orderLimitStore: new MemoryOrderLimitStore(),
     minimumFormAgeMs: 1_500,
     challengeLifetimeMs: 5_000,
   });
 
-  const earlyToken = protection.issueChallenge("192.0.2.1");
+  const earlyToken = await protection.issueChallenge("192.0.2.1");
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", earlyToken, ""), { ok: false, reason: "bot_check" });
   now += 1_500;
-  const filledFieldToken = protection.issueChallenge("192.0.2.1");
+  const filledFieldToken = await protection.issueChallenge("192.0.2.1");
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", filledFieldToken, "https://spam.example"), { ok: false, reason: "bot_check" });
-  const crossIpToken = protection.issueChallenge("192.0.2.1");
+  const crossIpToken = await protection.issueChallenge("192.0.2.1");
   assert.deepEqual(await protection.checkSubmission("192.0.2.2", crossIpToken, ""), { ok: false, reason: "bot_check" });
   assert.deepEqual(await protection.checkSubmission("192.0.2.3", undefined, ""), { ok: false, reason: "bot_check" });
-  const reusableToken = protection.issueChallenge("192.0.2.1");
+  const reusableToken = await protection.issueChallenge("192.0.2.1");
   now += 1_500;
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: true });
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", reusableToken, ""), { ok: false, reason: "bot_check" });
-  const expiredToken = protection.issueChallenge("192.0.2.1");
+  const expiredToken = await protection.issueChallenge("192.0.2.1");
   now += 5_001;
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", expiredToken, ""), { ok: false, reason: "bot_check" });
 });

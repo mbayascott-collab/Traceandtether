@@ -265,7 +265,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const available = Math.max(0, balance.onHand - balance.reserved);
       if (available > 0) catalog.push(product);
     }
-    res.json({ products: catalog, challenge: publicShopProtection.issueChallenge(_req.ip || _req.socket.remoteAddress || "") });
+    res.json({ products: catalog, challenge: await publicShopProtection.issueChallenge(_req.ip || _req.socket.remoteAddress || "") });
   });
 
   app.post("/api/shop/orders", async (req, res) => {

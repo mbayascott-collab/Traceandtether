@@ -6,7 +6,16 @@ const CHALLENGE_LIFETIME_MS = 30 * 60 * 1_000;
 const MINIMUM_FORM_AGE_MS = 1_500;
 const MAX_CHALLENGES = 10_000;
 
-type Challenge = { ip: string; issuedAt: number };
+type Challenge = { ipHash: string; issuedAt: number };
+
+export type ChallengeStore = {
+  issue(
+    tokenHash: string,
+    challenge: Challenge,
+    options: { now: number; lifetimeMs: number; maxChallenges: number },
+  ): Promise<void>;
+  consume(tokenHash: string): Promise<Challenge | undefined>;
+};
 
 export type OrderLimitStore = {
   recordAttempt(
@@ -18,6 +27,7 @@ export type OrderLimitStore = {
 type ProtectionOptions = {
   now?: () => number;
   tokenFactory?: () => string;
+  challengeStore?: ChallengeStore;
   orderLimitStore?: OrderLimitStore;
   orderLimit?: number;
   orderWindowMs?: number;
@@ -25,6 +35,50 @@ type ProtectionOptions = {
   minimumFormAgeMs?: number;
   maxChallenges?: number;
 };
+
+class PostgresChallengeStore implements ChallengeStore {
+  private lastCleanupAt = 0;
+
+  async issue(
+    tokenHash: string,
+    challenge: Challenge,
+    { now, lifetimeMs, maxChallenges }: { now: number; lifetimeMs: number; maxChallenges: number },
+  ) {
+    const { pool } = await import("./db");
+    await pool.query(
+      `INSERT INTO public_shop_challenges (token_hash, ip_hash, issued_at)
+       VALUES ($1, $2, $3)`,
+      [tokenHash, challenge.ipHash, challenge.issuedAt],
+    );
+    if (now - this.lastCleanupAt >= 60_000) {
+      await pool.query(
+        "DELETE FROM public_shop_challenges WHERE issued_at < $1",
+        [now - lifetimeMs],
+      );
+      await pool.query(
+        `DELETE FROM public_shop_challenges
+         WHERE token_hash IN (
+           SELECT token_hash FROM public_shop_challenges
+           ORDER BY id DESC OFFSET $1
+         )`,
+        [maxChallenges],
+      );
+      this.lastCleanupAt = now;
+    }
+  }
+
+  async consume(tokenHash: string): Promise<Challenge | undefined> {
+    const { pool } = await import("./db");
+    const result = await pool.query<{ ip_hash: string; issued_at: string }>(
+      `DELETE FROM public_shop_challenges WHERE token_hash = $1
+       RETURNING ip_hash, issued_at`,
+      [tokenHash],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return { ipHash: row.ip_hash, issuedAt: Number(row.issued_at) };
+  }
+}
 
 class PostgresOrderLimitStore implements OrderLimitStore {
   private lastCleanupAt = 0;
@@ -79,17 +133,18 @@ export type PublicShopCheck =
 export class PublicShopProtection {
   private readonly now: () => number;
   private readonly tokenFactory: () => string;
+  private readonly challengeStore: ChallengeStore;
   private readonly orderLimitStore: OrderLimitStore;
   private readonly orderLimit: number;
   private readonly orderWindowMs: number;
   private readonly challengeLifetimeMs: number;
   private readonly minimumFormAgeMs: number;
   private readonly maxChallenges: number;
-  private readonly challenges = new Map<string, Challenge>();
 
   constructor(options: ProtectionOptions = {}) {
     this.now = options.now ?? Date.now;
     this.tokenFactory = options.tokenFactory ?? randomUUID;
+    this.challengeStore = options.challengeStore ?? new PostgresChallengeStore();
     this.orderLimitStore = options.orderLimitStore ?? new PostgresOrderLimitStore();
     this.orderLimit = options.orderLimit ?? ORDER_LIMIT;
     this.orderWindowMs = options.orderWindowMs ?? ORDER_WINDOW_MS;
@@ -98,22 +153,21 @@ export class PublicShopProtection {
     this.maxChallenges = options.maxChallenges ?? MAX_CHALLENGES;
   }
 
-  issueChallenge(ip: string): string {
+  async issueChallenge(ip: string): Promise<string> {
     const now = this.now();
-    this.pruneExpired(now);
-    while (this.challenges.size >= this.maxChallenges) {
-      const oldest = this.challenges.keys().next().value;
-      if (oldest === undefined) break;
-      this.challenges.delete(oldest);
-    }
     const token = this.tokenFactory();
-    this.challenges.set(token, { ip, issuedAt: now });
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const ipHash = createHash("sha256").update(ip).digest("hex");
+    await this.challengeStore.issue(tokenHash, { ipHash, issuedAt: now }, {
+      now,
+      lifetimeMs: this.challengeLifetimeMs,
+      maxChallenges: this.maxChallenges,
+    });
     return token;
   }
 
   async checkSubmission(ip: string, token: unknown, honeypot: unknown): Promise<PublicShopCheck> {
     const now = this.now();
-    this.pruneExpired(now);
 
     const ipHash = createHash("sha256").update(ip).digest("hex");
     const bucket = await this.orderLimitStore.recordAttempt(ipHash, {
@@ -129,25 +183,21 @@ export class PublicShopProtection {
       };
     }
 
-    const challenge = typeof token === "string" ? this.challenges.get(token) : undefined;
-    if (typeof token === "string") this.challenges.delete(token);
+    const tokenHash = typeof token === "string"
+      ? createHash("sha256").update(token).digest("hex")
+      : undefined;
+    const challenge = tokenHash ? await this.challengeStore.consume(tokenHash) : undefined;
     if (
       typeof honeypot !== "string"
       || honeypot.trim() !== ""
       || !challenge
-      || challenge.ip !== ip
+      || challenge.ipHash !== ipHash
       || now - challenge.issuedAt < this.minimumFormAgeMs
       || now - challenge.issuedAt > this.challengeLifetimeMs
     ) {
       return { ok: false, reason: "bot_check" };
     }
     return { ok: true };
-  }
-
-  private pruneExpired(now: number) {
-    for (const [token, challenge] of this.challenges) {
-      if (now - challenge.issuedAt > this.challengeLifetimeMs) this.challenges.delete(token);
-    }
   }
 }
 
