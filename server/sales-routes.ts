@@ -7,7 +7,7 @@ import {
 } from "./product-validation";
 import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
-  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
@@ -18,6 +18,10 @@ import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
 import { chooseSalesStockLocation } from "./sales-stock-allocation";
 import { sendCustomerQuoteEmail } from "./customer-quote-email";
+import {
+  customerQuoteDeliveryEventSchema, hasValidDeliveryWebhookToken,
+  isValidCustomerQuoteDeliveryEventTime, shouldApplyCustomerQuoteDeliveryEvent,
+} from "./customer-quote-delivery-events";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -179,6 +183,59 @@ async function recordDelivery(tx: any, orderId: number,
 }
 
 export function registerSalesRoutes(app: Express, owner: RequestHandler) {
+  app.post("/api/webhooks/customer-quote-email", async (req, res) => {
+    if (!hasValidDeliveryWebhookToken(req.get("authorization"), process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET)) {
+      return res.status(process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET ? 401 : 503)
+        .json({ error: process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET ? "Invalid webhook authorization." : "Email delivery updates are not configured." });
+    }
+    const parsed = customerQuoteDeliveryEventSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Invalid email delivery event.");
+    const event = parsed.data;
+    const eventAt = new Date(event.occurredAt);
+    if (!isValidCustomerQuoteDeliveryEventTime(event)) return bad(res, "The email delivery event time is invalid or too far in the future.");
+
+    const result = await db.transaction(async (tx) => {
+      const [quote] = await tx.select().from(customerQuotes)
+        .where(eq(customerQuotes.emailProviderMessageId, event.messageId)).for("update").limit(1);
+      if (!quote) return { error: "No current quote email matches this message reference.", status: 404 };
+
+      const [received] = await tx.insert(customerQuoteEmailEvents).values({
+        provider: event.provider,
+        providerEventId: event.eventId,
+        customerQuoteId: quote.id,
+        providerMessageId: event.messageId,
+        outcome: event.status,
+        occurredAt: eventAt,
+      }).onConflictDoNothing().returning({ id: customerQuoteEmailEvents.id });
+      if (!received) return { duplicate: true };
+
+      if (!shouldApplyCustomerQuoteDeliveryEvent({
+        currentMessageId: quote.emailProviderMessageId,
+        lastEventAt: quote.emailDeliveryEventAt,
+        event,
+      })) return { stale: true };
+
+      const emailSendError = event.status === "delivered"
+        ? null
+        : event.error || (event.status === "bounced" ? "The recipient's email address bounced." : "Email delivery failed.");
+      const [updated] = await tx.update(customerQuotes).set({
+        emailSendStatus: event.status,
+        emailDeliveryEventAt: eventAt,
+        emailSendError,
+        updatedAt: new Date(),
+      }).where(eq(customerQuotes.id, quote.id)).returning();
+      if (!updated) throw new Error("The quote delivery result could not be saved.");
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: updated.id, recordLabel: updated.quoteNumber,
+        actor: { clerkUserId: null, email: "Email delivery provider" }, action: "updated",
+        changedFields: ["emailSendStatus", "emailDeliveryEventAt", "emailSendError"],
+      });
+      return { applied: true };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json(result);
+  });
+
   app.get("/api/shop/products", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const rows = await db.select({
@@ -536,7 +593,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const attemptedAt = new Date();
       const [claimed] = await tx.update(customerQuotes).set({
         emailSendStatus: "sending", emailAttemptedAt: attemptedAt, emailSentAt: null,
-        emailSendError: null, updatedAt: attemptedAt,
+        emailSendError: null, emailProviderMessageId: null, emailDeliveryEventAt: null, updatedAt: attemptedAt,
       }).where(eq(customerQuotes.id, quote.id)).returning();
       return {
         quote: claimed,
@@ -556,6 +613,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         emailSendStatus: outcome.ok ? "sent" : "failed",
         emailSentAt: sentAt,
         emailSendError: outcome.ok ? null : outcome.error,
+        emailProviderMessageId: outcome.ok ? outcome.messageId : null,
         updatedAt: new Date(),
       }).where(and(eq(customerQuotes.id, id), eq(customerQuotes.emailSendStatus, "sending"))).returning();
       if (!updated) throw new Error("The quote email result could not be saved.");

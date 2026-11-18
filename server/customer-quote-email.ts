@@ -78,7 +78,7 @@ function providerMessage(body: unknown): string | null {
 export async function sendCustomerQuoteEmail(
   content: CustomerQuoteEmailContent,
   gmail: GmailProxy = new ReplitConnectors(),
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; messageId: string } | { ok: false; error: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   timeout.unref?.();
@@ -88,7 +88,24 @@ export async function sendCustomerQuoteEmail(
       body: { raw: buildCustomerQuoteEmail(content) },
       signal: controller.signal,
     });
-    if (response.ok) return { ok: true };
+    if (response.ok) {
+      let messageId: unknown;
+      try {
+        const result: unknown = await response.json();
+        if (result && typeof result === "object" && "id" in result) {
+          messageId = (result as { id?: unknown }).id;
+        }
+      } catch {
+        messageId = null;
+      }
+      if (typeof messageId === "string" && messageId.trim() && messageId.trim().length <= 255) {
+        return { ok: true, messageId: messageId.trim() };
+      }
+      return {
+        ok: false,
+        error: "Gmail accepted the email but did not return a message reference. Check Gmail Sent before retrying.",
+      };
+    }
 
     const responseText = await response.text().catch(() => "");
     let details: string | null = null;

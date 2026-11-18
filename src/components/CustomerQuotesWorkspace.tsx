@@ -37,6 +37,21 @@ export default function CustomerQuotesWorkspace() {
     return () => { alive = false; };
   }, [reload]);
 
+  useEffect(() => {
+    let alive = true;
+    const refreshQuotes = () => {
+      if (document.visibilityState === "hidden") return;
+      fetchCustomerQuotes().then((latest) => { if (alive) setQuotes(latest); }).catch(() => {});
+    };
+    const interval = window.setInterval(refreshQuotes, 30_000);
+    window.addEventListener("focus", refreshQuotes);
+    return () => {
+      alive = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshQuotes);
+    };
+  }, []);
+
   function editQuote(quote: CustomerQuote) {
     setEditing(quote);
     setLines(quote.lines.map((line) => ({ productId: String(line.productId), quantity: String(line.quantity), unitPriceZmw: line.unitPriceZmw })));
@@ -85,7 +100,7 @@ export default function CustomerQuotesWorkspace() {
     if (staleSending && !window.confirm(
       `The previous attempt may have reached ${quote.customerEmail}. Check Gmail Sent first. If it is not there, retry ${quote.quoteNumber}?`,
     )) return;
-    if (quote.emailSendStatus === "sent" && !window.confirm(
+    if (["sent", "delivered", "bounced"].includes(quote.emailSendStatus) && !window.confirm(
       `${quote.quoteNumber} was already emailed to ${quote.customerEmail}. Send it again?`,
     )) return;
     setError(""); setNotice("");
@@ -144,13 +159,17 @@ export default function CustomerQuotesWorkspace() {
           ? `Sending${quote.emailAttemptedAt ? ` · started ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}`
           : quote.emailSendStatus === "sent"
           ? `Sent${quote.customerEmail ? ` to ${quote.customerEmail}` : ""}${quote.emailSentAt ? ` · ${new Date(quote.emailSentAt).toLocaleString("en-ZM")}` : ""}`
-          : quote.emailSendStatus === "failed"
-            ? `Failed${quote.emailAttemptedAt ? ` · ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
-            : "Not sent"}
+          : quote.emailSendStatus === "delivered"
+            ? `Delivered${quote.emailDeliveryEventAt ? ` · ${new Date(quote.emailDeliveryEventAt).toLocaleString("en-ZM")}` : ""}`
+            : quote.emailSendStatus === "bounced"
+              ? `Bounced${quote.emailDeliveryEventAt ? ` · ${new Date(quote.emailDeliveryEventAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
+              : quote.emailSendStatus === "failed"
+                ? `Failed${quote.emailDeliveryEventAt ? ` · ${new Date(quote.emailDeliveryEventAt).toLocaleString("en-ZM")}` : quote.emailAttemptedAt ? ` · ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
+                : "Not sent"}
       </td><td>
         {(quote.status === "draft" || quote.status === "sent") && <button className="button button-secondary button-small" type="button" disabled={quote.emailSendStatus === "sending"} onClick={() => editQuote(quote)}>Edit</button>}
         <button className="button button-secondary button-small" type="button" disabled={!quote.customerEmail || (quote.emailSendStatus === "sending" && !isStaleEmailAttempt(quote)) || sendingQuotes.has(quote.id)} title={!quote.customerEmail ? "Add a saved customer email before sending." : undefined} onClick={() => sendQuote(quote)}>
-          {sendingQuotes.has(quote.id) ? "Sending…" : quote.emailSendStatus === "sending" ? "Check Gmail & retry" : quote.emailSendStatus === "sent" ? "Email again" : "Email quote"}
+          {sendingQuotes.has(quote.id) ? "Sending…" : quote.emailSendStatus === "sending" ? "Check Gmail & retry" : ["sent", "delivered", "bounced"].includes(quote.emailSendStatus) ? "Email again" : "Email quote"}
         </button>
         {!quote.customerEmail && <span className="report-footnote">Add a saved customer email first.</span>}
         {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>{isQuoteExpired(quote) ? "Review expiry & convert" : "Convert to order"}</button>}

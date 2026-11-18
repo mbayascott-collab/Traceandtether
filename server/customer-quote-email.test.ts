@@ -46,10 +46,10 @@ test("sends the encoded message using Gmail and reports provider errors", async 
       assert.equal(connector, "google-mail");
       assert.equal(path, "/gmail/v1/users/me/messages/send");
       requestBody = options?.body;
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ id: "gmail-message-1" }), { status: 200 });
     },
   });
-  assert.deepEqual(accepted, { ok: true });
+  assert.deepEqual(accepted, { ok: true, messageId: "gmail-message-1" });
   assert.equal(typeof requestBody === "object" && requestBody !== null && "raw" in requestBody, true);
 
   const rejected = await sendCustomerQuoteEmail(quote, {

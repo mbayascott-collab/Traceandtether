@@ -457,6 +457,8 @@ export const customerQuotes = pgTable(
     emailAttemptedAt: timestamp("email_attempted_at", { withTimezone: true }),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
     emailSendError: text("email_send_error"),
+    emailProviderMessageId: varchar("email_provider_message_id", { length: 255 }),
+    emailDeliveryEventAt: timestamp("email_delivery_event_at", { withTimezone: true }),
     salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -464,10 +466,30 @@ export const customerQuotes = pgTable(
   (table) => [
     uniqueIndex("customer_quotes_number_unique").on(table.quoteNumber),
     uniqueIndex("customer_quotes_sales_order_unique").on(table.salesOrderId),
+    uniqueIndex("customer_quotes_email_provider_message_unique").on(table.emailProviderMessageId),
     index("customer_quotes_customer_idx").on(table.customerId),
     index("customer_quotes_status_idx").on(table.status),
-    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sending', 'sent', 'failed')`),
+    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sending', 'sent', 'delivered', 'bounced', 'failed')`),
     check("customer_quotes_conversion_state", sql`(${table.status} = 'converted') = (${table.salesOrderId} is not null)`),
+  ],
+);
+
+export const customerQuoteEmailEvents = pgTable(
+  "customer_quote_email_events",
+  {
+    id: serial("id").primaryKey(),
+    provider: varchar("provider", { length: 32 }).notNull(),
+    providerEventId: varchar("provider_event_id", { length: 255 }).notNull(),
+    customerQuoteId: integer("customer_quote_id").notNull().references(() => customerQuotes.id, { onDelete: "cascade" }),
+    providerMessageId: varchar("provider_message_id", { length: 255 }).notNull(),
+    outcome: varchar("outcome", { length: 16 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("customer_quote_email_events_provider_event_unique").on(table.provider, table.providerEventId),
+    index("customer_quote_email_events_quote_idx").on(table.customerQuoteId),
+    check("customer_quote_email_events_outcome", sql`${table.outcome} in ('delivered', 'bounced', 'failed')`),
   ],
 );
 
