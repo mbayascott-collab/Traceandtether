@@ -33,10 +33,11 @@ export interface LandedCostOrder extends PurchaseOrder {
 }
 export interface InventoryItem {
   id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number;
-  stockValueZmw: string; averageUnitCostZmw: string;
+  stockValueZmw: string; averageUnitCostZmw: string; locations: { id: number; name: string; onHand: number; reserved: number; available: number }[];
 }
-export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; createdAt: string; }
-export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; createdAt: string; }
+export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; createdAt: string; }
+export interface InventoryLocation { id: number; name: string; active: boolean; }
+export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; locationName: string | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
 export interface Customer { id: number; name: string; contactPerson: string | null; contactPersonPhone: string | null; email: string | null; phone: string | null; address: string | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine { id: number; productId: number; productName: string; sku: string; quantity: number; deliveredQuantity: number; remainingQuantity: number; unitPriceZmw: string; lineTotalZmw: string; }
@@ -354,16 +355,28 @@ export async function fetchInventory(): Promise<InventoryItem[]> {
 export async function fetchInventoryMovements(): Promise<InventoryMovement[]> {
   return (await request<{ movements: InventoryMovement[] }>("/api/inventory/movements")).movements;
 }
+export async function fetchInventoryLocations(): Promise<InventoryLocation[]> {
+  return (await request<{ locations: InventoryLocation[] }>("/api/inventory/locations")).locations;
+}
+export async function createInventoryLocation(name: string): Promise<void> {
+  await request("/api/inventory/locations", { method: "POST", body: JSON.stringify({ name }) });
+}
+export async function transferInventory(input: { productId: number; fromLocationId: number; toLocationId: number; quantity: number; reason: string; reference: string | null }): Promise<void> {
+  await request("/api/inventory/transfers", { method: "POST", body: JSON.stringify(input) });
+}
+export async function recordInventoryEvent(input: { kind: "stock_return" | "stock_damage"; productId: number; locationId: number; quantity: number; reason: string; reference: string | null }): Promise<void> {
+  await request("/api/inventory/events", { method: "POST", body: JSON.stringify(input) });
+}
 export async function fetchInventoryReceipts(): Promise<InventoryReceipt[]> {
   return (await request<{ receipts: InventoryReceipt[] }>("/api/inventory/receipts")).receipts;
 }
-export async function postInventoryReceipt(shipmentLineId: number): Promise<void> {
-  await request(`/api/inventory/receipts/${shipmentLineId}/post`, { method: "POST" });
+export async function postInventoryReceipt(shipmentLineId: number, locationId: number): Promise<void> {
+  await request(`/api/inventory/receipts/${shipmentLineId}/post`, { method: "POST", body: JSON.stringify({ locationId }) });
 }
 export async function fetchReservations(): Promise<InventoryReservation[]> {
   return (await request<{ reservations: InventoryReservation[] }>("/api/inventory/reservations")).reservations;
 }
-export async function createReservation(input: { productId: number; quantity: number; reference: string | null; reason: string }): Promise<void> {
+export async function createReservation(input: { productId: number; locationId: number; quantity: number; reference: string | null; reason: string }): Promise<void> {
   await request("/api/inventory/reservations", { method: "POST", body: JSON.stringify(input) });
 }
 export async function releaseReservation(id: number): Promise<void> {
@@ -372,11 +385,11 @@ export async function releaseReservation(id: number): Promise<void> {
 export async function fulfillReservation(id: number): Promise<void> {
   await request(`/api/inventory/reservations/${id}/fulfill`, { method: "POST" });
 }
-export async function createInventoryAdjustment(input: { productId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
+export async function createInventoryAdjustment(input: { productId: number; locationId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
   await request("/api/inventory/adjustments", { method: "POST", body: JSON.stringify(input) });
 }
 export async function createOpeningStock(input: {
-  productId: number; quantity: number; unitCostZmw: string; effectiveAt: string; memo: string; reference: string | null;
+  productId: number; locationId: number; quantity: number; unitCostZmw: string; effectiveAt: string; memo: string; reference: string | null;
 }): Promise<void> {
   await request("/api/inventory/opening-stock", { method: "POST", body: JSON.stringify(input) });
 }

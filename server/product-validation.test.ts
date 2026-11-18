@@ -152,6 +152,8 @@ test("validates shipment and expense inputs", () => {
 
 test("validates reservation quantities and non-zero reasoned stock adjustments", () => {
   assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, quantity: 2, reference: null, reason: "Customer order" }).success, true);
+  assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, locationId: 3, quantity: 2, reference: null, reason: "Customer order" }).success, true);
+  assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, locationId: 0, quantity: 2, reference: null, reason: "Customer order" }).success, false);
   assert.equal(inventoryReservationInputSchema.safeParse({ productId: 1, quantity: 0, reference: null, reason: "Hold" }).success, false);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: -2, reference: null, reason: "Cycle count correction" }).success, true);
   assert.equal(inventoryAdjustmentInputSchema.safeParse({ productId: 1, quantityDelta: 0, reference: null, reason: "No change" }).success, false);
@@ -160,6 +162,8 @@ test("validates reservation quantities and non-zero reasoned stock adjustments",
 
 test("validates opening stock quantity and positive ZMW average cost", () => {
   const opening = { productId: 1, quantity: 4, unitCostZmw: "25.50", reference: "First count" };
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, locationId: 2 }).success, true);
+  assert.equal(openingStockInputSchema.safeParse({ ...opening, locationId: 0 }).success, false);
   assert.equal(openingStockInputSchema.safeParse(opening).success, true);
   assert.equal(openingStockInputSchema.safeParse({
     ...opening, effectiveAt: "2026-11-18", memo: "Counted stock on hand",

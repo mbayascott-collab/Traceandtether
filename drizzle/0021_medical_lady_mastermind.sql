@@ -1,0 +1,3 @@
+ALTER TABLE "inventory_reservations" ADD COLUMN "location_id" integer;--> statement-breakpoint
+ALTER TABLE "inventory_reservations" ADD CONSTRAINT "inventory_reservations_location_id_inventory_locations_id_fk" FOREIGN KEY ("location_id") REFERENCES "public"."inventory_locations"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+UPDATE "inventory_reservations" SET "location_id" = (SELECT "id" FROM "inventory_locations" WHERE lower("name") = 'main' LIMIT 1) WHERE "location_id" IS NULL;

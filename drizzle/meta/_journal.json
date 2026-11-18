@@ -141,6 +141,20 @@
       "when": 1794900091531,
       "tag": "0019_sturdy_justin_hammer",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794989079868,
+      "tag": "0020_minor_bloodstorm",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794989183234,
+      "tag": "0021_medical_lady_mastermind",
+      "breakpoints": true
     }
   ]
 }

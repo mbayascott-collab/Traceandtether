@@ -23,8 +23,19 @@ export const supplierQuoteStatus = pgEnum("supplier_quote_status", ["received", 
 export const purchaseOrderStatus = pgEnum("purchase_order_status", ["ordered", "partially_received", "received", "cancelled"]);
 export const shipmentStatus = pgEnum("shipment_status", ["in_transit", "partially_received", "received", "cancelled"]);
 export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"]);
-export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment", "opening_stock"]);
+export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment", "opening_stock", "stock_return", "stock_damage", "stock_transfer_in", "stock_transfer_out"]);
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
+export const inventoryLocations = pgTable(
+  "inventory_locations",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 120 }).notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("inventory_locations_name_lower_unique").on(sql`lower(${table.name})`)],
+);
 export const customerStatus = pgEnum("customer_status", ["active", "inactive"]);
 export const salesOrderStatus = pgEnum("sales_order_status", ["draft", "confirmed", "partially_fulfilled", "fulfilled", "cancelled"]);
 export const customerQuoteStatus = pgEnum("customer_quote_status", ["draft", "sent", "accepted", "rejected", "converted"]);
@@ -427,6 +438,7 @@ export const inventoryReservations = pgTable(
   {
     id: serial("id").primaryKey(),
     productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    locationId: integer("location_id").references(() => inventoryLocations.id, { onDelete: "restrict" }),
     salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     quantity: integer("quantity").notNull(),
     status: inventoryReservationStatus("status").notNull().default("active"),
@@ -448,6 +460,7 @@ export const inventoryMovements = pgTable(
   {
     id: serial("id").primaryKey(),
     productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+    locationId: integer("location_id").references(() => inventoryLocations.id, { onDelete: "restrict" }),
     kind: inventoryMovementKind("kind").notNull(),
     quantityDelta: integer("quantity_delta").notNull(),
     reason: varchar("reason", { length: 500 }).notNull(),

@@ -213,6 +213,7 @@ export const importExpenseInputSchema = z.object({
 
 export const inventoryReservationInputSchema = z.object({
   productId: positiveInteger,
+  locationId: positiveInteger.optional(),
   quantity: positiveInteger,
   reference: nullableText(120),
   reason: z.string().trim().min(1).max(500),
@@ -220,6 +221,7 @@ export const inventoryReservationInputSchema = z.object({
 
 export const inventoryAdjustmentInputSchema = z.object({
   productId: positiveInteger,
+  locationId: positiveInteger.optional(),
   quantityDelta: z.coerce.number().int().min(-1_000_000).max(1_000_000).refine((value) => value !== 0),
   reference: nullableText(120),
   reason: z.string().trim().min(1).max(500),
@@ -227,6 +229,7 @@ export const inventoryAdjustmentInputSchema = z.object({
 
 export const openingStockInputSchema = z.object({
   productId: positiveInteger,
+  locationId: positiveInteger.optional(),
   quantity: positiveInteger,
   unitCostZmw: z.string().trim().regex(/^\d{1,10}(?:\.\d{1,2})?$/, "Enter a unit cost in ZMW with up to two decimals.")
     .refine((value) => toMinorUnits(value)! > 0n, "Unit cost must be greater than ZMW 0.00."),

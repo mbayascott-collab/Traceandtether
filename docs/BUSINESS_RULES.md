@@ -26,9 +26,11 @@
 ## Scope boundaries
 
 - Stock-on-hand is derived from append-only opening-stock, receipt, adjustment, and reservation-fulfillment movements. Reservations reduce available stock but do not change on-hand stock until fulfilled.
+- Every stock movement is assigned to a named location. New records use the Main location by default; transfers create matched outgoing and incoming movements and do not change total inventory value.
+- Damaged stock is written off as an expense; usable returns add stock back at the current weighted-average cost. Reservations are location-specific and reduce availability only at their recorded location.
 - Sales orders snapshot explicit ZMW unit prices. Confirming an order reserves available stock; fulfillment records the stock-out movement. Unpaid sales are recorded as receivables and unpaid purchases/import costs as payables.
 - Automated journal entries are immutable, balanced, and linked to their source event. Opening stock adds the entered average ZMW cost to inventory and credits owner equity; it is not sales income. Inventory receipts add ZMW purchase costs and pre-receipt allocated import costs to inventory; cost of sales uses weighted-average inventory book value. Import expenses entered after partial or full stock posting may leave an amount in landed-cost clearing for review.
-- Opening stock quantity and value can be entered once per product. Opening cash, receivables, payables, payment settlement, tax, refunds, bank reconciliation, and accountant-reviewed financial statements are not implemented.
+- Opening stock quantity and value can be entered once per product at each location. Sales orders reserve from Main; transfer stock there before confirming orders when it is held elsewhere. Opening cash, receivables, payables, payment settlement, tax, refunds, bank reconciliation, and accountant-reviewed financial statements are not implemented.
 - Public shop order requests are saved as draft sales orders after server-side price and stock checks. They do not reserve stock or collect payment; an owner must confirm stock, delivery, and payment before treating the order as accepted. Public catalog responses include only active, priced, available products and customer-facing fields.
 - Use manual order requests until Shopify is affordable; Shopify can be integrated later as the storefront and checkout system without exposing the private supplier and cost records.
 - It does not estimate tax/customs rates or automatically select suppliers.

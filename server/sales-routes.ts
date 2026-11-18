@@ -5,7 +5,7 @@ import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customerQuoteLines, customerQuotes, customers, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders,
+  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
@@ -18,11 +18,16 @@ function cents(value: string) {
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
 }
 function money(value: bigint) { return `${value / 100n}.${String(value % 100n).padStart(2, "0")}`; }
-async function stockBalance(tx: any, productId: number) {
-  const [m] = await tx.select({ value: sum(inventoryMovements.quantityDelta) }).from(inventoryMovements).where(eq(inventoryMovements.productId, productId));
+async function stockBalance(tx: any, productId: number, locationId?: number) {
+  const [location] = locationId ? [{ id: locationId }] : await tx.select({ id: inventoryLocations.id }).from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
+  const conditions = location ? and(eq(inventoryMovements.productId, productId), eq(inventoryMovements.locationId, location.id)) : eq(inventoryMovements.productId, productId);
+  const reservationConditions = location
+    ? and(eq(inventoryReservations.productId, productId), eq(inventoryReservations.status, "active"), eq(inventoryReservations.locationId, location.id))
+    : and(eq(inventoryReservations.productId, productId), eq(inventoryReservations.status, "active"));
+  const [m] = await tx.select({ value: sum(inventoryMovements.quantityDelta) }).from(inventoryMovements).where(conditions);
   const [r] = await tx.select({ value: sum(inventoryReservations.quantity) }).from(inventoryReservations)
-    .where(and(eq(inventoryReservations.productId, productId), eq(inventoryReservations.status, "active")));
-  return { onHand: Number(m?.value ?? 0), reserved: Number(r?.value ?? 0) };
+    .where(reservationConditions);
+  return { onHand: Number(m?.value ?? 0), reserved: Number(r?.value ?? 0), locationId: location?.id ?? null };
 }
 
 async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }) {
@@ -89,7 +94,7 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
       );
     }
     await tx.insert(inventoryMovements).values({
-      productId: line.productId, kind: "reservation_fulfillment", quantityDelta: -lineInput.quantity,
+      productId: line.productId, locationId: hold.locationId, kind: "reservation_fulfillment", quantityDelta: -lineInput.quantity,
       reason: `Delivered on ${delivery.deliveryNumber}`, reference: delivery.deliveryNumber,
       sourceKey: `sales-delivery-${delivery.id}-product-${line.productId}`, reservationId: hold.id,
     });
@@ -438,16 +443,18 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       if (order.status !== "draft") return { error: "Only draft orders can be confirmed.", status: 409 };
       const [customer] = await tx.select({ status: customers.status }).from(customers).where(eq(customers.id, order.customerId)).limit(1);
       if (!customer || customer.status !== "active") return { error: "The customer is inactive and this order cannot be confirmed.", status: 409 };
+      const [mainLocation] = await tx.select({ id: inventoryLocations.id }).from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
+      if (!mainLocation) return { error: "The main stock location is not configured.", status: 409 };
       const lines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, id)).orderBy(asc(salesOrderLines.productId));
       for (const line of lines) {
         const [product] = await tx.select({ id: products.id, status: products.status }).from(products).where(eq(products.id, line.productId)).for("update");
         if (!product || product.status !== "active") return { error: `Product ${line.productId} is no longer active.`, status: 409 };
-        const balance = await stockBalance(tx, line.productId);
+        const balance = await stockBalance(tx, line.productId, mainLocation.id);
         const available = balance.onHand - balance.reserved;
         if (available < line.quantity) return { error: `${available} units available for product ${line.productId}; ${line.quantity} requested.`, status: 409 };
       }
       await tx.insert(inventoryReservations).values(lines.map((line) => ({
-        productId: line.productId, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
+        productId: line.productId, locationId: mainLocation.id, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
         reason: `Sales order ${order.orderNumber}`, status: "active" as const,
       })));
       const [saved] = await tx.update(salesOrders).set({ status: "confirmed", confirmedAt: new Date(), updatedAt: new Date() }).where(eq(salesOrders.id, id)).returning();
