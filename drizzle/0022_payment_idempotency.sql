@@ -1,0 +1,2 @@
+ALTER TABLE "business_payments" ADD COLUMN "idempotency_key" varchar(80) DEFAULT gen_random_uuid()::text NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "business_payments_idempotency_key_unique" ON "business_payments" USING btree ("idempotency_key");

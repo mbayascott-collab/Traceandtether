@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { BusinessPayment, PaymentDirection, PaymentOverview } from "../lib/api";
 
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -11,6 +11,7 @@ export default function PaymentsWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
+  const pendingAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const options = direction === "customer_receipt" ? data.invoices : data.bills;
   const pendingBalances = [
     ...data.invoices.map((item) => ({ ...item, balanceType: "Customer owes us" })),
@@ -34,18 +35,24 @@ export default function PaymentsWorkspace() {
     const formElement = event.currentTarget;
     setBusy(true); setError(""); setNotice("");
     const form = new FormData(formElement);
+    const paymentDetails = {
+      direction, orderId: Number(form.get("orderId")), amountZmw: String(form.get("amountZmw")),
+      paymentDate: String(form.get("paymentDate")), method: String(form.get("method")),
+      reference: String(form.get("reference") || ""), notes: String(form.get("notes") || ""),
+    };
+    const fingerprint = JSON.stringify(paymentDetails);
+    if (pendingAttempt.current?.fingerprint !== fingerprint) {
+      pendingAttempt.current = { fingerprint, key: crypto.randomUUID() };
+    }
     try {
       const response = await fetch("/api/payments", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          direction, orderId: Number(form.get("orderId")), amountZmw: String(form.get("amountZmw")),
-          paymentDate: String(form.get("paymentDate")), method: String(form.get("method")),
-          reference: String(form.get("reference") || ""), notes: String(form.get("notes") || ""),
-        }),
+        body: JSON.stringify({ ...paymentDetails, idempotencyKey: pendingAttempt.current.key }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not save the payment.");
       setNotice(`${result.payment.paymentNumber} saved.`);
+      pendingAttempt.current = null;
       formElement.reset();
       setReload((value) => value + 1);
     } catch (cause) {
@@ -72,7 +79,7 @@ export default function PaymentsWorkspace() {
             </option>)}
           </select>
         </label>
-        <label>Amount received (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
+        <label>Amount {direction === "customer_receipt" ? "received" : "paid"} (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
         <label>Date<input name="paymentDate" type="date" defaultValue={today()} required /></label>
         <label>How was it paid?<select name="method" defaultValue="cash" required>
           <option value="cash">Cash</option><option value="bank_transfer">Bank transfer</option>
@@ -83,7 +90,7 @@ export default function PaymentsWorkspace() {
         <button className="button button-primary" disabled={busy || !options.length}>{busy ? "Saving…" : "Save payment"}</button>
       </form>
       {!options.length && <p className="report-footnote">No outstanding balances are available for this payment type.</p>}
-      <p className="report-footnote">Payments are recorded in ZMW. Supplier payments are matched to received purchase-order stock.</p>
+      <p className="report-footnote">Payments are recorded in ZMW. Supplier balances include received goods and recorded import costs.</p>
     </div>
     <div className="panel data-table-wrap">
       <h2>Pending payments</h2>

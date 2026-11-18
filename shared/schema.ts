@@ -561,6 +561,7 @@ export const businessPayments = pgTable(
   {
     id: serial("id").primaryKey(),
     paymentNumber: varchar("payment_number", { length: 40 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 80 }).notNull().default(sql`gen_random_uuid()::text`),
     direction: paymentDirection("direction").notNull(),
     salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "restrict" }),
@@ -573,6 +574,7 @@ export const businessPayments = pgTable(
   },
   (table) => [
     uniqueIndex("business_payments_number_unique").on(table.paymentNumber),
+    uniqueIndex("business_payments_idempotency_key_unique").on(table.idempotencyKey),
     index("business_payments_sales_order_idx").on(table.salesOrderId),
     index("business_payments_purchase_order_idx").on(table.purchaseOrderId),
     index("business_payments_date_idx").on(table.paymentDate),

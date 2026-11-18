@@ -3,6 +3,7 @@ import { toMinorUnits } from "../shared/money";
 
 export const paymentInputSchema = z.object({
   direction: z.enum(["customer_receipt", "supplier_payment"]),
+  idempotencyKey: z.string().uuid(),
   orderId: z.preprocess((value) => typeof value === "string" ? Number(value) : value, z.number().int().positive()),
   amountZmw: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/, "Enter an amount with up to two decimal places.")
     .refine((value) => (toMinorUnits(value) ?? 0n) > 0n, "Payment must be greater than ZMW 0.00."),
