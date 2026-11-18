@@ -14,6 +14,7 @@ import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 import { cents, formatCents, landedCostAdjustmentPreview, postJournal, type PostingLine } from "./accounting-posting";
+import { purchaseOrderReceiptStatus, shipmentReceiptStatus, validateShipmentReceipt } from "./shipment-receiving";
 
 const invalid = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const apiError = (error: unknown) => typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
@@ -180,28 +181,29 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       .where(inArray(purchaseOrderLines.id, currentLines.map((line) => line.purchaseOrderLineId)));
     const orderIds = [...new Set(currentOrderLines.map((line) => line.purchaseOrderId))];
     const allOrderLines = await db.select().from(purchaseOrderLines).where(inArray(purchaseOrderLines.purchaseOrderId, orderIds));
+    const linkedOrders = await db.select({ id: purchaseOrders.id, status: purchaseOrders.status }).from(purchaseOrders)
+      .where(inArray(purchaseOrders.id, orderIds));
     const receipts = await db.select({ shipmentId: shipmentLines.shipmentId, lineId: shipmentLines.purchaseOrderLineId, quantity: shipmentLines.quantityReceived })
       .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
       .where(ne(shipments.status, "cancelled"));
     const next = new Map(parsed.data.lines.map((line) => [line.shipmentLineId, line.quantityReceived]));
-    for (const line of currentLines) {
-      const value = next.get(line.id)!;
-      if (value > line.quantityShipped) return invalid(res, "Received quantity cannot exceed the quantity shipped.");
-      if (value < line.quantityStocked) return invalid(res, "Received quantity cannot be reduced below the quantity already posted to stock.");
-      const otherReceived = receipts.filter((row) => row.lineId === line.purchaseOrderLineId && row.shipmentId !== id)
-        .reduce((sumValue, row) => sumValue + row.quantity, 0);
-      const ordered = allOrderLines.find((row) => row.id === line.purchaseOrderLineId)?.quantityOrdered ?? 0;
-      const sameShipmentOtherLines = currentLines.filter((row) => row.id !== line.id && row.purchaseOrderLineId === line.purchaseOrderLineId)
-        .reduce((sumValue, row) => sumValue + (next.get(row.id) ?? row.quantityReceived), 0);
-      if (otherReceived + sameShipmentOtherLines + value > ordered) return invalid(res, "Total received quantity cannot exceed the quantity ordered.");
-    }
+    const otherReceivedByLine = new Map<number, number>();
+    receipts.filter((row) => row.shipmentId !== id).forEach((row) => {
+      otherReceivedByLine.set(row.lineId, (otherReceivedByLine.get(row.lineId) ?? 0) + row.quantity);
+    });
+    const validationError = validateShipmentReceipt({
+      shipmentLines: currentLines,
+      requestedQuantities: next,
+      purchaseOrderLines: currentOrderLines,
+      otherReceivedByLine,
+      purchaseOrderStatuses: new Map(linkedOrders.map((order) => [order.id, order.status])),
+    });
+    if (validationError) return invalid(res, validationError);
     const updated = await db.transaction(async (tx) => {
       for (const line of currentLines) {
         await tx.update(shipmentLines).set({ quantityReceived: next.get(line.id)! }).where(eq(shipmentLines.id, line.id));
       }
-      const receivedForShipment = parsed.data.lines.reduce((sumValue, line) => sumValue + line.quantityReceived, 0);
-      const shippedForShipment = currentLines.reduce((sumValue, line) => sumValue + line.quantityShipped, 0);
-      const status = receivedForShipment === shippedForShipment ? "received" : receivedForShipment > 0 ? "partially_received" : "in_transit";
+      const status = shipmentReceiptStatus(parsed.data.lines, currentLines);
       const [saved] = await tx.update(shipments).set({
         status, receivedAt: status === "received" ? new Date().toISOString().slice(0, 10) : null, updatedAt: new Date(),
       }).where(eq(shipments.id, id)).returning();
@@ -218,9 +220,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
           .where(and(inArray(shipmentLines.purchaseOrderLineId, lineIds), ne(shipments.status, "cancelled")));
         const receivedByLine = new Map<number, number>();
         receivedRows.forEach((row) => receivedByLine.set(row.lineId, (receivedByLine.get(row.lineId) ?? 0) + row.quantity));
-        const totalReceived = orderLines.reduce((total, line) => total + (receivedByLine.get(line.id) ?? 0), 0);
-        const totalOrdered = orderLines.reduce((total, line) => total + line.quantityOrdered, 0);
-        const orderStatus = totalReceived === totalOrdered ? "received" : totalReceived > 0 ? "partially_received" : "ordered";
+        const orderStatus = purchaseOrderReceiptStatus(orderLines, receivedByLine);
         const [updatedOrder] = await tx.update(purchaseOrders).set({ status: orderStatus, updatedAt: new Date() })
           .where(eq(purchaseOrders.id, orderId)).returning();
         if (updatedOrder) await recordBusinessAudit(tx, {

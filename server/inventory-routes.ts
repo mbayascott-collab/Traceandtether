@@ -14,7 +14,7 @@ import {
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import {
-  accountBalance, buildOpeningStockLines, cents, ensureAccountingAccounts, formatCents,
+  accountBalance, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
   journalLinesAreBalanced, postJournal, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -182,29 +182,25 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         .from(shipmentLines).where(eq(shipmentLines.purchaseOrderLineId, orderLine.id));
       const priorQty = Number(stockedBefore?.quantity ?? 0);
       const allocatedLine = allocated.lines.find((row) => row.lineId === orderLine.id);
-      const allocatedExpenseCents = cents(allocatedLine?.allocatedExpensesZmw ?? "0.00");
-      const roundDiv = (numerator: bigint, denominator: bigint) => (numerator + denominator / 2n) / denominator;
-      const allocatedThrough = (stockedQty: number) => roundDiv(allocatedExpenseCents * BigInt(stockedQty), BigInt(orderLine.quantityOrdered));
-      const landedIncrement = allocatedThrough(priorQty + quantity) - allocatedThrough(priorQty);
-      const [fxWhole, fxFraction = ""] = order.exchangeRateToZmw.split(".");
-      const fxRate = BigInt(fxWhole) * 100_000_000n + BigInt(fxFraction.padEnd(8, "0").slice(0, 8));
-      const purchaseUnitCents = roundDiv(cents(orderLine.unitPrice) * fxRate, 100_000_000n);
-      const goodsCost = purchaseUnitCents * BigInt(quantity);
-      const inventoryCost = goodsCost + landedIncrement;
+      const receiptPosting = calculatePurchaseReceiptPosting({
+        productId: productLine.productId,
+        quantity,
+        unitPrice: orderLine.unitPrice,
+        exchangeRateToZmw: order.exchangeRateToZmw,
+        quantityOrdered: orderLine.quantityOrdered,
+        quantityPreviouslyStocked: priorQty,
+        allocatedExpensesZmw: allocatedLine?.allocatedExpensesZmw ?? "0.00",
+      });
       const [movement] = await tx.insert(inventoryMovements).values({
         productId: productLine.productId, locationId, kind: "stock_receipt", quantityDelta: quantity,
         reason: `Received shipment ${shipment.shipmentReference || `#${shipment.id}`}`,
         reference: shipment.trackingNumber, sourceKey: `shipment-line-${line.id}-to-${line.quantityReceived}`,
       }).returning();
-      if (inventoryCost > 0n) {
+      if (receiptPosting.inventoryCost > 0n) {
         await postJournal(tx, {
           sourceKey: `inventory-movement-${movement.id}`, sourceType: "stock_receipt", sourceId: movement.id,
           memo: `Stock receipt for ${order.orderNumber}`, entryDate: shipment.receivedAt ?? undefined,
-          lines: [
-            { accountKey: "inventory", productId: productLine.productId, debitZmw: formatCents(inventoryCost), description: "Received inventory" },
-            ...(goodsCost > 0n ? [{ accountKey: "accounts_payable", creditZmw: formatCents(goodsCost), description: "Supplier goods cost" }] : []),
-            ...(landedIncrement > 0n ? [{ accountKey: "landed_cost_clearing", creditZmw: formatCents(landedIncrement), description: "Allocated import costs" }] : []),
-          ],
+          lines: receiptPosting.lines,
         });
       }
       await tx.update(shipmentLines).set({ quantityStocked: line.quantityReceived }).where(eq(shipmentLines.id, line.id));

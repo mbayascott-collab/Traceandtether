@@ -52,6 +52,36 @@ export function formatCents(value: bigint): string {
   return `${negative ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`;
 }
 
+export function calculatePurchaseReceiptPosting(input: {
+  productId: number;
+  quantity: number;
+  unitPrice: string;
+  exchangeRateToZmw: string;
+  quantityOrdered: number;
+  quantityPreviouslyStocked: number;
+  allocatedExpensesZmw: string;
+}) {
+  const roundDiv = (numerator: bigint, denominator: bigint) => (numerator + denominator / 2n) / denominator;
+  const [fxWhole, fxFraction = ""] = input.exchangeRateToZmw.split(".");
+  const fxRate = BigInt(fxWhole) * 100_000_000n + BigInt(fxFraction.padEnd(8, "0").slice(0, 8));
+  const purchaseUnitCents = roundDiv(cents(input.unitPrice) * fxRate, 100_000_000n);
+  const goodsCost = purchaseUnitCents * BigInt(input.quantity);
+  const allocatedExpenseCents = cents(input.allocatedExpensesZmw);
+  const allocatedThrough = (stockedQuantity: number) => roundDiv(
+    allocatedExpenseCents * BigInt(stockedQuantity),
+    BigInt(input.quantityOrdered),
+  );
+  const landedCost = allocatedThrough(input.quantityPreviouslyStocked + input.quantity)
+    - allocatedThrough(input.quantityPreviouslyStocked);
+  const inventoryCost = goodsCost + landedCost;
+  const lines: PostingLine[] = [
+    { accountKey: "inventory", productId: input.productId, debitZmw: formatCents(inventoryCost), description: "Received inventory" },
+    ...(goodsCost > 0n ? [{ accountKey: "accounts_payable", creditZmw: formatCents(goodsCost), description: "Supplier goods cost" }] : []),
+    ...(landedCost > 0n ? [{ accountKey: "landed_cost_clearing", creditZmw: formatCents(landedCost), description: "Allocated import costs" }] : []),
+  ];
+  return { goodsCost, landedCost, inventoryCost, lines };
+}
+
 export function buildDeliveryCostTotals(
   deliveries: { deliveryId: number; orderId: number; deliveryDate: string; productId: number }[],
   costLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
