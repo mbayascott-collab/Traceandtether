@@ -107,3 +107,42 @@ test("report export rows exactly reflect the displayed report rows", () => {
     row.code, row.name, row.type, row.amountZmw,
   ]));
 });
+
+test("cash, bank, and mobile-money balances remain separate in reports and exports", () => {
+  const fundAccounts: AccountingReportAccount[] = [
+    { id: 1, code: "1000", name: "Cash and bank (previously combined)", type: "asset" },
+    { id: 2, code: "1010", name: "Cash on hand", type: "asset" },
+    { id: 3, code: "1020", name: "Bank account", type: "asset" },
+    { id: 4, code: "1030", name: "Mobile money", type: "asset" },
+    { id: 5, code: "3000", name: "Owner equity", type: "equity" },
+  ];
+  const fundLines: AccountingReportLine[] = [
+    { accountId: 1, entryDate: "2026-01-01", debitZmw: "250.00", creditZmw: "0.00" },
+    { accountId: 2, entryDate: "2026-01-01", debitZmw: "30.00", creditZmw: "0.00" },
+    { accountId: 3, entryDate: "2026-01-01", debitZmw: "50.00", creditZmw: "0.00" },
+    { accountId: 4, entryDate: "2026-01-01", debitZmw: "20.00", creditZmw: "0.00" },
+    { accountId: 5, entryDate: "2026-01-01", debitZmw: "0.00", creditZmw: "350.00" },
+  ];
+  const reports = calculateAccountingReports(fundAccounts, fundLines, "2026-01-01", "2026-12-31");
+  const trialByCode = new Map(reports.trialBalance.map((row) => [row.code, row]));
+  const sheetByCode = new Map(reports.balanceSheet.map((row) => [row.code, row]));
+
+  assert.deepEqual(
+    ["1010", "1020", "1030"].map((code) => trialByCode.get(code)?.balanceZmw),
+    ["30.00", "50.00", "20.00"],
+  );
+  assert.deepEqual(
+    ["1010", "1020", "1030"].map((code) => sheetByCode.get(code)?.amountZmw),
+    ["30.00", "50.00", "20.00"],
+  );
+  assert.equal(trialByCode.get("1000")?.balanceZmw, "250.00");
+  assert.equal(sheetByCode.get("1000")?.amountZmw, "250.00");
+
+  const exports = accountingReportExportRows(reports);
+  const exportedBalances = new Map(exports.balanceSheet.slice(1).map(([code, , , amount]) => [code, amount]));
+  assert.deepEqual(
+    ["1010", "1020", "1030"].map((code) => exportedBalances.get(code)),
+    ["30.00", "50.00", "20.00"],
+  );
+  assert.equal(exportedBalances.get("1000"), "250.00");
+});
