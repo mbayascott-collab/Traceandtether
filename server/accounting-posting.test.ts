@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
-  operatingExpenseAccountKey, splitLandedCostCorrection, weightedAverageUnitCostCents,
+  buildOwnerFundLines, operatingExpenseAccountKey, ownerFundAccountKey, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
@@ -119,4 +119,21 @@ test("maps ordinary expense categories to the correct report accounts", () => {
   assert.equal(operatingExpenseAccountKey("office_supplies"), "office_supplies_expense");
   assert.equal(operatingExpenseAccountKey("utilities"), "utilities_expense");
   assert.equal(operatingExpenseAccountKey("other"), "other_operating_expense");
+});
+
+test("posts owner funding, loans, and withdrawals to their source accounts with balanced lines", () => {
+  const cases = [
+    { kind: "owner_contribution", method: "cash", accountKey: "owner_equity", cashKey: "cash_on_hand", isWithdrawal: false },
+    { kind: "business_loan", method: "bank_transfer", accountKey: "business_loans_payable", cashKey: "bank_account", isWithdrawal: false },
+    { kind: "owner_withdrawal", method: "mobile_money", accountKey: "owner_withdrawals", cashKey: "mobile_money", isWithdrawal: true },
+  ] as const;
+  for (const { kind, method, accountKey, cashKey, isWithdrawal } of cases) {
+    assert.equal(ownerFundAccountKey(kind), accountKey);
+    const lines = buildOwnerFundLines(kind, method, "25.50", "Test account");
+    assert.equal(journalLinesAreBalanced(lines), true);
+    assert.deepEqual(lines.map((line) => line.accountKey), isWithdrawal ? [accountKey, cashKey] : [cashKey, accountKey]);
+    assert.deepEqual(lines.map((line) => [line.debitZmw ?? "0.00", line.creditZmw ?? "0.00"]), isWithdrawal
+      ? [["25.50", "0.00"], ["0.00", "25.50"]]
+      : [["25.50", "0.00"], ["0.00", "25.50"]]);
+  }
 });

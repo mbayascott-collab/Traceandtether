@@ -10,9 +10,14 @@ type ExpenseEntry = {
   id: number; category: string; description: string; amountZmw: string; expenseDate: string;
   method: string; reference: string | null; notes: string | null;
 };
+type OwnerFundTransaction = {
+  id: number; kind: string; amountZmw: string; transactionDate: string;
+  method: string; reference: string | null; accountName: string;
+};
 type ReportData = {
   entries: JournalEntry[];
   expenses: ExpenseEntry[];
+  ownerTransactions: OwnerFundTransaction[];
   openingBalances: { posted: boolean; entryDate: string | null };
   trialBalance: TrialRow[];
   incomeStatement: ReportRow[];
@@ -68,12 +73,12 @@ export default function AccountingWorkspace() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Cash-in could not be recorded.");
+      if (!response.ok) throw new Error(result.error || "Owner transaction could not be recorded.");
       form.reset();
-      setNotice("Cash-in recorded and added to the journal.");
+      setNotice("Owner transaction recorded and added to the journal.");
       setRange((current) => ({ ...current }));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Cash-in could not be recorded.");
+      setError(reason instanceof Error ? reason.message : "Owner transaction could not be recorded.");
     }
   }
 
@@ -136,16 +141,16 @@ export default function AccountingWorkspace() {
     <section className="page-heading"><div><p className="eyebrow">Finance · ZMW</p><h1>Accounting</h1><p>Review and export the records posted from business activity.</p></div></section>
     {error && <div className="alert alert-error" role="alert">{error}</div>}
     {notice && <div className="alert alert-success" role="status">{notice}</div>}
-    <form className="panel form-grid" style={{ padding: 16, marginBottom: 16 }} onSubmit={recordCashIn}>
-      <h2>Record owner funds or withdrawal</h2>
-      <label>What kind of money is this?<select name="kind" defaultValue="owner_contribution">
-        <option value="owner_contribution">Owner contribution</option>
-        <option value="business_loan">Business loan to repay</option>
-        <option value="owner_withdrawal">Owner withdrawal</option>
-      </select></label>
-      <label>Amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
+    <form className="panel form-grid" style={{ gridTemplateColumns: "1fr", padding: 16, marginBottom: 16 }} onSubmit={recordCashIn}>
+      <h2>Record owner funds, withdrawal, or loan</h2>
       <label>Date<input name="receivedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
-      <label>Account used<select name="method" defaultValue="cash">
+      <label>Amount (ZMW)<input name="amountZmw" type="number" min="0.01" step="0.01" required /></label>
+      <label>Account<select name="kind" defaultValue="owner_contribution">
+        <option value="owner_contribution">Owner equity · contribution</option>
+        <option value="business_loan">Business loans payable</option>
+        <option value="owner_withdrawal">Owner withdrawals</option>
+      </select></label>
+      <label>Method<select name="method" defaultValue="cash">
         <option value="cash">Cash</option><option value="bank_transfer">Bank account</option>
         <option value="mobile_money">Mobile money</option><option value="other">Other</option>
       </select></label>
@@ -153,11 +158,25 @@ export default function AccountingWorkspace() {
       <label>Notes<textarea name="notes" maxLength={500} /></label>
       <button className="button button-primary">Save transaction</button>
     </form>
+    <section className="panel" style={{ marginBottom: 16 }}>
+      <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{data?.ownerTransactions.length ?? 0} records</span></div>
+      <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Method</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
+        {(data?.ownerTransactions ?? []).map((transaction) => <tr key={transaction.id}>
+          <td>{transaction.transactionDate}</td>
+          <td>{transaction.kind.replaceAll("_", " ")}</td>
+          <td>{transaction.accountName}</td>
+          <td>{transaction.method.replaceAll("_", " ")}</td>
+          <td>{transaction.reference || "—"}</td>
+          <td>{money(transaction.amountZmw)}</td>
+        </tr>)}
+        {!data?.ownerTransactions.length && <tr><td colSpan={6}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
+      </tbody></table></div>
+    </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
       <h2>Record a business expense</h2>
       <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={recordExpense}>
         <label>Date<input name="expenseDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
-        <label>Expense type<select name="category" defaultValue="rent" required>
+        <label>Expense account<select name="category" defaultValue="rent" required>
           <option value="rent">Rent</option>
           <option value="office_supplies">Office supplies</option>
           <option value="utilities">Utilities</option>

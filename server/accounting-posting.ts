@@ -354,6 +354,38 @@ export function operatingExpenseAccountKey(category: string) {
   return accountByCategory[category] ?? accountByCategory.other;
 }
 
+export function ownerFundAccountKey(kind: "owner_contribution" | "business_loan" | "owner_withdrawal") {
+  switch (kind) {
+    case "owner_contribution": return "owner_equity";
+    case "business_loan": return "business_loans_payable";
+    case "owner_withdrawal": return "owner_withdrawals";
+  }
+}
+
+export function buildOwnerFundLines(
+  kind: "owner_contribution" | "business_loan" | "owner_withdrawal",
+  method: "cash" | "bank_transfer" | "mobile_money" | "other",
+  amountZmw: string,
+  accountName: string,
+  notes?: string,
+): PostingLine[] {
+  const cashAccountKey = cashAccountKeyForMethod(method);
+  const fundAccountKey = ownerFundAccountKey(kind);
+  const isWithdrawal = kind === "owner_withdrawal";
+  return isWithdrawal
+    ? [
+      { accountKey: fundAccountKey, debitZmw: amountZmw, description: "Owner funds withdrawn" },
+      { accountKey: cashAccountKey, creditZmw: amountZmw, description: `Paid from ${accountName}${notes ? ` · ${notes.slice(0, 190)}` : ""}` },
+    ]
+    : [
+      { accountKey: cashAccountKey, debitZmw: amountZmw, description: `Received into ${accountName}${notes ? ` · ${notes.slice(0, 190)}` : ""}` },
+      {
+        accountKey: fundAccountKey, creditZmw: amountZmw,
+        description: kind === "owner_contribution" ? "Owner funds added" : "Loan principal received",
+      },
+    ];
+}
+
 export function buildOpeningBalanceLines(input: {
   cashOnHandZmw: string;
   bankZmw: string;

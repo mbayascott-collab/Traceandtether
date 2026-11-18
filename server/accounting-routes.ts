@@ -2,12 +2,12 @@ import { and, desc, eq, gte, lte } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { accountingAccounts, businessExpenses, journalEntries, journalLines } from "../shared/schema";
+import { accountingAccounts, businessExpenses, journalEntries, journalLines, ownerFundTransactions } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import {
   buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts,
-  journalLinesAreBalanced, operatingExpenseAccountKey, postJournal,
+  buildOwnerFundLines, journalLinesAreBalanced, operatingExpenseAccountKey, ownerFundAccountKey, postJournal,
 } from "./accounting-posting";
 
 const dateQuery = z.string().refine((value) => {
@@ -182,52 +182,44 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       res.status(400).json({ error: "Enter an amount greater than zero." });
       return;
     }
-    const sourceKey = `funding-${randomUUID()}`;
-    await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const accountMap = await ensureAccountingAccounts(tx);
       const cashAccountKey = cashAccountKeyForMethod(input.method);
       const cashAccount = accountMap.get(cashAccountKey);
-      const isWithdrawal = input.kind === "owner_withdrawal";
-      const offsetAccountKey = input.kind === "owner_contribution" ? "owner_equity" : "business_loans_payable";
-      const offsetAccount = accountMap.get(isWithdrawal ? "owner_withdrawals" : offsetAccountKey);
-      if (!cashAccount || !offsetAccount) throw new Error("Required accounting accounts are unavailable.");
-      const lines = isWithdrawal
-        ? [
-            { accountKey: "owner_withdrawals", debitZmw: input.amountZmw },
-            { accountKey: cashAccountKey, creditZmw: input.amountZmw },
-          ]
-        : [
-            { accountKey: cashAccountKey, debitZmw: input.amountZmw },
-            { accountKey: offsetAccountKey, creditZmw: input.amountZmw },
-          ];
+      const fundAccountKey = ownerFundAccountKey(input.kind);
+      const fundAccount = accountMap.get(fundAccountKey);
+      if (!cashAccount || !fundAccount) throw new Error("Required accounting accounts are unavailable.");
+      const [transaction] = await tx.insert(ownerFundTransactions).values({
+        kind: input.kind,
+        accountId: fundAccount.id,
+        amountZmw: input.amountZmw,
+        transactionDate: input.receivedAt,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "owner_fund_transaction", entityId: transaction.id,
+        recordLabel: input.reference || input.kind,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["kind", "amountZmw", "transactionDate", "accountId", "method", "reference", "notes"],
+      });
+      const lines = buildOwnerFundLines(input.kind, input.method, input.amountZmw, cashAccount.name, input.notes);
       if (!journalLinesAreBalanced(lines)) throw new Error("Owner transaction journal is not balanced.");
       const memo = input.kind === "owner_contribution"
         ? "Owner contribution"
         : input.kind === "business_loan" ? "Business loan received" : "Owner withdrawal";
-      const [entry] = await tx.insert(journalEntries).values({
-        entryNumber: `JE-${input.receivedAt.slice(0, 4)}-${randomUUID().slice(0, 8).toUpperCase()}`,
-        sourceKey, sourceType: input.kind, sourceId: null,
+      const journal = await postJournal(tx, {
+        sourceKey: `owner-fund-${transaction.id}`,
+        sourceType: input.kind,
+        sourceId: transaction.id,
         entryDate: input.receivedAt,
         memo: `${memo}${input.reference ? ` · ${input.reference}` : ""}`,
-      }).returning();
-      await recordBusinessAudit(tx, {
-        entityType: "journal_entry", entityId: entry.id, recordLabel: entry.entryNumber,
-        actor: res.locals.actor, action: "created", changedFields: ["entryDate", "memo", "fundingType", "amount", "method", "reference", "notes"],
+        lines,
       });
-      await tx.insert(journalLines).values(lines.map((line) => {
-        const account = accountMap.get(line.accountKey)!;
-        return {
-          journalEntryId: entry.id,
-          accountId: account.id,
-          debitZmw: line.debitZmw ?? "0.00",
-          creditZmw: line.creditZmw ?? "0.00",
-          description: line.accountKey === cashAccountKey
-            ? `${isWithdrawal ? "Paid from" : "Received into"} ${cashAccount.name}${input.notes ? ` · ${input.notes.slice(0, 190)}` : ""}`
-            : isWithdrawal ? "Owner funds withdrawn" : input.kind === "owner_contribution" ? "Owner funds added" : "Loan principal received",
-        };
-      }));
+      return { transaction, journal };
     });
-    res.status(201).json({ message: "Cash-in recorded." });
+    res.status(201).json(result);
   });
 
   app.get("/api/accounting", owner, async (req, res) => {
@@ -250,6 +242,18 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       const expenses = await tx.select().from(businessExpenses)
         .where(and(gte(businessExpenses.expenseDate, from), lte(businessExpenses.expenseDate, to)))
         .orderBy(desc(businessExpenses.expenseDate), desc(businessExpenses.id));
+      const ownerTransactions = await tx.select({
+        id: ownerFundTransactions.id,
+        kind: ownerFundTransactions.kind,
+        amountZmw: ownerFundTransactions.amountZmw,
+        transactionDate: ownerFundTransactions.transactionDate,
+        method: ownerFundTransactions.method,
+        reference: ownerFundTransactions.reference,
+        accountName: accountingAccounts.name,
+      }).from(ownerFundTransactions)
+        .innerJoin(accountingAccounts, eq(ownerFundTransactions.accountId, accountingAccounts.id))
+        .where(and(gte(ownerFundTransactions.transactionDate, from), lte(ownerFundTransactions.transactionDate, to)))
+        .orderBy(desc(ownerFundTransactions.transactionDate), desc(ownerFundTransactions.id));
       const records = await tx.select({
         entry: journalEntries,
         line: journalLines,
@@ -321,6 +325,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         accounts,
         openingBalances: { posted: Boolean(openingBalanceEntry), entryDate: openingBalanceEntry?.entryDate ?? null },
         expenses,
+        ownerTransactions,
         entries: [...entryMap.values()],
         trialBalance,
         incomeStatement,

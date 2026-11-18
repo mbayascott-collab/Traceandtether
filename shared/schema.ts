@@ -687,6 +687,29 @@ export const businessExpenses = pgTable(
   ],
 );
 
+export const ownerFundTransactions = pgTable(
+  "owner_fund_transactions",
+  {
+    id: serial("id").primaryKey(),
+    kind: varchar("kind", { length: 40 }).notNull(),
+    accountId: integer("account_id").notNull().references(() => accountingAccounts.id, { onDelete: "restrict" }),
+    amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
+    transactionDate: date("transaction_date").notNull(),
+    method: paymentMethod("method").notNull(),
+    reference: varchar("reference", { length: 120 }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("owner_fund_transactions_date_idx").on(table.transactionDate),
+    check("owner_fund_transactions_positive_amount", sql`${table.amountZmw} > 0`),
+    check(
+      "owner_fund_transactions_kind",
+      sql`${table.kind} in ('owner_contribution', 'business_loan', 'owner_withdrawal')`,
+    ),
+  ],
+);
+
 export const marketingCampaigns = pgTable(
   "marketing_campaigns",
   {
