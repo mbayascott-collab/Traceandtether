@@ -107,6 +107,79 @@ export function buildDeliveryCostTotals(
   return { productCostByOrder, ordersMissingCost };
 }
 
+/**
+ * Allocate each product's posted landed-cost COGS adjustment across its
+ * deliveries in proportion to their original recorded delivery costs. The
+ * product-level journal has no order link, so this pooled allocation keeps
+ * the source accounting entry intact while assigning every cent exactly once.
+ */
+export function allocateLandedCostAdjustmentsByOrder(
+  deliveries: { deliveryId: number; orderId: number; productId: number }[],
+  deliveryCostLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
+  adjustmentLines: { productId: number | null; debitZmw: string; creditZmw: string }[],
+) {
+  const deliveryByKey = new Map<string, { deliveryId: number; orderId: number; productId: number }>();
+  for (const delivery of deliveries) {
+    deliveryByKey.set(`${delivery.deliveryId}:${delivery.productId}`, delivery);
+  }
+
+  const weightsByProduct = new Map<number, Map<string, bigint>>();
+  for (const line of deliveryCostLines) {
+    if (line.productId === null) continue;
+    const key = `${line.deliveryId}:${line.productId}`;
+    if (!deliveryByKey.has(key)) continue;
+    const productWeights = weightsByProduct.get(line.productId) ?? new Map<string, bigint>();
+    productWeights.set(key, (productWeights.get(key) ?? 0n) + cents(line.debitZmw));
+    weightsByProduct.set(line.productId, productWeights);
+  }
+
+  const adjustmentsByProduct = new Map<number, bigint>();
+  for (const line of adjustmentLines) {
+    if (line.productId === null) continue;
+    adjustmentsByProduct.set(
+      line.productId,
+      (adjustmentsByProduct.get(line.productId) ?? 0n) + cents(line.debitZmw) - cents(line.creditZmw),
+    );
+  }
+
+  const adjustmentByOrder = new Map<number, bigint>();
+  for (const [productId, adjustment] of adjustmentsByProduct) {
+    if (adjustment === 0n) continue;
+    const weights = weightsByProduct.get(productId);
+    if (!weights) continue;
+    const eligible = [...weights.entries()].filter(([, weight]) => weight > 0n);
+    const totalWeight = eligible.reduce((total, [, weight]) => total + weight, 0n);
+    if (totalWeight <= 0n) continue;
+
+    const amount = adjustment < 0n ? -adjustment : adjustment;
+    const allocations = eligible.map(([key, weight]) => {
+      const numerator = amount * weight;
+      const delivery = deliveryByKey.get(key)!;
+      return {
+        orderId: delivery.orderId,
+        deliveryId: delivery.deliveryId,
+        amount: numerator / totalWeight,
+        remainder: numerator % totalWeight,
+      };
+    });
+    let remaining = amount - allocations.reduce((total, allocation) => total + allocation.amount, 0n);
+    allocations.sort((a, b) => {
+      if (a.remainder !== b.remainder) return a.remainder > b.remainder ? -1 : 1;
+      return a.deliveryId - b.deliveryId;
+    });
+    for (const allocation of allocations) {
+      const extraCent = remaining > 0n ? 1n : 0n;
+      const signedAmount = (adjustment < 0n ? -1n : 1n) * (allocation.amount + extraCent);
+      adjustmentByOrder.set(
+        allocation.orderId,
+        (adjustmentByOrder.get(allocation.orderId) ?? 0n) + signedAmount,
+      );
+      remaining -= extraCent;
+    }
+  }
+  return adjustmentByOrder;
+}
+
 export function weightedAverageUnitCostCents(inventoryValueCents: bigint, onHand: number): bigint {
   if (!Number.isSafeInteger(onHand) || onHand <= 0) return 0n;
   return (inventoryValueCents + BigInt(Math.floor(onHand / 2))) / BigInt(onHand);

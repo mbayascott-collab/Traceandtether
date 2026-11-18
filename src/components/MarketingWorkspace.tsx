@@ -9,8 +9,8 @@ type CustomerGroup = { id: number; name: string; rules: CustomerGroupRules; memb
 type CustomerGroupMember = { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; lifetimeSalesZmw: string; lastOrderDate: string | null };
 type MarketingReport = {
   period: { from: string | null; to: string | null };
-  totals: { spendZmw: string; attributedRevenueZmw: string; productCostZmw: string; netContributionZmw: string | null; missingCostOrders: number; attributedOrders: number; campaignLinkOrders: number; ordersWithoutCampaignLinks: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
-  campaigns: { id: number; name: string; status: string; orderCount: number; attributedRevenueZmw: string; productCostZmw: string; spendZmw: string; missingCostOrders: string[]; netContributionZmw: string | null; revenueToSpend: string | null }[];
+  totals: { spendZmw: string; attributedRevenueZmw: string; productCostZmw: string; landedCostAdjustmentZmw: string; netContributionZmw: string | null; missingCostOrders: number; attributedOrders: number; campaignLinkOrders: number; ordersWithoutCampaignLinks: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
+  campaigns: { id: number; name: string; status: string; orderCount: number; attributedRevenueZmw: string; productCostZmw: string; landedCostAdjustmentZmw: string; spendZmw: string; missingCostOrders: string[]; netContributionZmw: string | null; revenueToSpend: string | null }[];
   ordersMissingProductCost: { orderNumber: string; campaignName: string }[];
   segments: { key: string; name: string; customerCount: number; fulfilledOrders: number; salesZmw: string; customers: { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; salesZmw: string }[] }[];
 };
@@ -301,6 +301,7 @@ export default function MarketingWorkspace() {
             <div><span>Marketing spend</span><strong>{money(report.totals.spendZmw)}</strong></div>
             <div><span>Attributed sales</span><strong>{money(report.totals.attributedRevenueZmw)}</strong></div>
             <div><span>Recorded product cost</span><strong>{money(report.totals.productCostZmw)}</strong></div>
+            <div><span>Late landed-cost adjustments</span><strong>{money(report.totals.landedCostAdjustmentZmw)}</strong></div>
             <div><span>Net contribution</span><strong>{report.totals.netContributionZmw === null ? "Incomplete" : money(report.totals.netContributionZmw)}</strong></div>
             <div><span>Orders missing product cost</span><strong>{report.totals.missingCostOrders}</strong></div>
             <div><span>Attributed orders</span><strong>{report.totals.attributedOrders}</strong></div>
@@ -309,7 +310,7 @@ export default function MarketingWorkspace() {
             <div><span>Sales per ZMW spent</span><strong>{report.totals.revenueToSpend ?? "—"}</strong></div>
           </div>
           <div className="marketing-report-grid">
-            <div className="table-wrap"><table><thead><tr><th>Campaign</th><th>Orders</th><th>Sales</th><th>Product cost</th><th>Spend</th><th>Net contribution</th><th>Missing cost orders</th><th>Sales / spend</th></tr></thead><tbody>{report.campaigns.map((c) => <tr key={c.id}><td>{c.name} · {c.status}</td><td>{c.orderCount}</td><td>{money(c.attributedRevenueZmw)}</td><td>{money(c.productCostZmw)}</td><td>{money(c.spendZmw)}</td><td>{c.netContributionZmw === null ? "Incomplete" : money(c.netContributionZmw)}</td><td>{c.missingCostOrders.length}</td><td>{c.revenueToSpend ?? "—"}</td></tr>)}{report.campaigns.length === 0 && <tr><td colSpan={8}>No campaigns in the report yet.</td></tr>}</tbody></table></div>
+            <div className="table-wrap"><table><thead><tr><th>Campaign</th><th>Orders</th><th>Sales</th><th>Product cost</th><th>Late adjustments</th><th>Spend</th><th>Net contribution</th><th>Missing cost orders</th><th>Sales / spend</th></tr></thead><tbody>{report.campaigns.map((c) => <tr key={c.id}><td>{c.name} · {c.status}</td><td>{c.orderCount}</td><td>{money(c.attributedRevenueZmw)}</td><td>{money(c.productCostZmw)}</td><td>{money(c.landedCostAdjustmentZmw)}</td><td>{money(c.spendZmw)}</td><td>{c.netContributionZmw === null ? "Incomplete" : money(c.netContributionZmw)}</td><td>{c.missingCostOrders.length}</td><td>{c.revenueToSpend ?? "—"}</td></tr>)}{report.campaigns.length === 0 && <tr><td colSpan={9}>No campaigns in the report yet.</td></tr>}</tbody></table></div>
             <div className="table-wrap"><table><thead><tr><th>Customer group</th><th>Customers</th><th>Orders</th><th>Lifetime sales</th></tr></thead><tbody>{report.segments.map((segment) => <tr key={segment.key}><td>{segment.name}</td><td>{segment.customerCount}</td><td>{segment.fulfilledOrders}</td><td>{money(segment.salesZmw)}</td></tr>)}</tbody></table></div>
           </div>
           {report.ordersMissingProductCost.length > 0 && <div className="marketing-report-warning" role="alert">
@@ -320,7 +321,7 @@ export default function MarketingWorkspace() {
             <label>Show customer group<select value={selectedSegment} onChange={(e) => setSelectedSegment(e.target.value)}>{report.segments.map((segment) => <option key={segment.key} value={segment.key}>{segment.name} ({segment.customerCount})</option>)}</select></label>
             <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th></tr></thead><tbody>{(report.segments.find((segment) => segment.key === selectedSegment)?.customers ?? []).map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.salesZmw)}</td></tr>)}</tbody></table></div>
           </div>
-          <p className="marketing-report-note">Campaign-link orders are attributed automatically; orders without a campaign link may still be assigned manually. Product cost includes recorded delivery costs; net contribution is withheld when any attributed order is missing product cost. Total marketing spend includes general expenses not assigned to a campaign. Unattributed fulfilled sales: {money(report.totals.unattributedRevenueZmw)} across {report.totals.unattributedOrders} orders. Link orders to a campaign on the Sales orders page to include them in campaign results.</p>
+          <p className="marketing-report-note">Campaign-link orders are attributed automatically; orders without a campaign link may still be assigned manually. Product cost includes recorded delivery costs and late landed-cost amounts posted to cost of goods sold. Because those corrections are recorded by product, each is spread across that product’s deliveries in proportion to their original recorded delivery costs, with every cent allocated once; the correction stays separately identified above. Net contribution is withheld when any attributed order is missing product cost. Total marketing spend includes general expenses not assigned to a campaign. Unattributed fulfilled sales: {money(report.totals.unattributedRevenueZmw)} across {report.totals.unattributedOrders} orders. Link orders to a campaign on the Sales orders page to include them in campaign results.</p>
         </>}
       </section>
     </>

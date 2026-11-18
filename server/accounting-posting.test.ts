@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
 import { journalEntries } from "../shared/schema";
 import {
-  allocateInventoryValueByLocationCents, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -46,6 +46,39 @@ test("sums delivery costs in exact cents and flags deliveries without recorded c
   assert.equal(result.productCostByOrder.get(1), 1_235n);
   assert.deepEqual([...result.ordersMissingCost], [1]);
   assert.equal(result.productCostByOrder.has(2), false);
+});
+
+test("allocates product landed-cost adjustments once across deliveries by recorded cost", () => {
+  const allocated = allocateLandedCostAdjustmentsByOrder(
+    [
+      { deliveryId: 10, orderId: 1, productId: 4 },
+      { deliveryId: 11, orderId: 2, productId: 4 },
+      { deliveryId: 12, orderId: 2, productId: 4 },
+      { deliveryId: 13, orderId: 3, productId: 5 },
+    ],
+    [
+      { deliveryId: 10, productId: 4, debitZmw: "1.00" },
+      { deliveryId: 11, productId: 4, debitZmw: "2.00" },
+      { deliveryId: 12, productId: 4, debitZmw: "0.00" },
+      { deliveryId: 13, productId: 5, debitZmw: "9.00" },
+    ],
+    [
+      { productId: 4, debitZmw: "1.00", creditZmw: "0.00" },
+      { productId: 5, debitZmw: "0.50", creditZmw: "0.00" },
+      { productId: null, debitZmw: "100.00", creditZmw: "0.00" },
+    ],
+  );
+  assert.deepEqual([...allocated].sort(([a], [b]) => a - b), [[1, 33n], [2, 67n], [3, 50n]]);
+  assert.equal([...allocated.values()].reduce((total, value) => total + value, 0n), 150n);
+});
+
+test("does not invent a delivery allocation when product COGS has no delivery-cost basis", () => {
+  const allocated = allocateLandedCostAdjustmentsByOrder(
+    [{ deliveryId: 10, orderId: 1, productId: 4 }],
+    [{ deliveryId: 10, productId: 4, debitZmw: "0.00" }],
+    [{ productId: 4, debitZmw: "25.00", creditZmw: "0.00" }],
+  );
+  assert.equal(allocated.size, 0);
 });
 
 test("accepts only positive balanced journal lines", () => {
