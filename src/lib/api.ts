@@ -30,6 +30,17 @@ export interface ImportExpense {
 export interface LandedCostOrder extends PurchaseOrder {
   allocations: { expenseId: number; lineId: number; amountZmw: string }[];
   lines: (PurchaseOrderLine & { allocatedExpensesZmw: string; purchaseUnitCostZmw: string; landedUnitCostZmw: string })[];
+  adjustmentPreview: {
+    clearingBalanceZmw: string;
+    adjustmentAvailableZmw: string;
+    unpostedClearingZmw: string;
+    canPost: boolean;
+    hasNegativeLine: boolean;
+    lines: {
+      lineId: number; productId: number; productName: string; stockedQuantity: number; onHand: number;
+      averageUnitCostZmw: string; adjustmentZmw: string; inventoryZmw: string; cogsZmw: string;
+    }[];
+  } | null;
 }
 export interface InventoryItem {
   id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number;
@@ -348,6 +359,22 @@ export async function createImportExpense(input: {
 }
 export async function fetchLandedCosts(): Promise<LandedCostOrder[]> {
   return (await request<{ orders: LandedCostOrder[] }>("/api/landed-costs")).orders;
+}
+export async function postLandedCostAdjustment(
+  purchaseOrderId: number,
+  preview: NonNullable<LandedCostOrder["adjustmentPreview"]>,
+  note: string,
+): Promise<void> {
+  await request(`/api/landed-costs/${purchaseOrderId}/adjust`, {
+    method: "POST",
+    body: JSON.stringify({
+      reviewedAmountZmw: preview.adjustmentAvailableZmw,
+      reviewedLines: preview.lines.map(({ lineId, adjustmentZmw, inventoryZmw, cogsZmw }) => ({
+        lineId, adjustmentZmw, inventoryZmw, cogsZmw,
+      })),
+      note,
+    }),
+  });
 }
 export async function fetchInventory(): Promise<InventoryItem[]> {
   return (await request<{ inventory: InventoryItem[] }>("/api/inventory")).inventory;

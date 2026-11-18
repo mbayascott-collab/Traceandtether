@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
-  operatingExpenseAccountKey, weightedAverageUnitCostCents,
+  operatingExpenseAccountKey, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
@@ -74,6 +74,19 @@ test("rounds the current weighted-average cost in exact ZMW cents", () => {
   assert.equal(weightedAverageUnitCostCents(100n, 3), 33n);
   assert.equal(weightedAverageUnitCostCents(101n, 2), 51n);
   assert.equal(weightedAverageUnitCostCents(100n, 0), 0n);
+});
+
+test("splits late import costs by the weighted-average value still represented in stock", () => {
+  const split = splitLandedCostCorrection({
+    amountCents: 2_000n, inventoryValueCents: 6_000n, onHand: 6, totalReceiptQuantity: 10,
+  });
+  assert.deepEqual(split, { averageUnitCostCents: 1_000n, inventoryCents: 1_200n, cogsCents: 800n });
+  assert.equal(splitLandedCostCorrection({
+    amountCents: 2_000n, inventoryValueCents: 0n, onHand: 0, totalReceiptQuantity: 10,
+  }).cogsCents, 2_000n);
+  assert.equal(splitLandedCostCorrection({
+    amountCents: 2_000n, inventoryValueCents: 12_000n, onHand: 10, totalReceiptQuantity: 10,
+  }).inventoryCents, 2_000n);
 });
 
 test("maps each payment method to its own balance account", () => {

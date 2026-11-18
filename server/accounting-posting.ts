@@ -1,6 +1,10 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { accountingAccounts, journalEntries, journalLines } from "../shared/schema";
+import { allocateLandedCosts } from "../shared/landed-cost";
+import {
+  accountingAccounts, importExpenses, inventoryMovements, journalEntries, journalLines,
+  products, purchaseOrderLines, purchaseOrders, shipmentLines,
+} from "../shared/schema";
 
 export const accounts = [
   { code: "1000", name: "Cash and bank (previously combined)", type: "asset" as const, systemKey: "cash_bank" },
@@ -50,6 +54,228 @@ export function formatCents(value: bigint): string {
 export function weightedAverageUnitCostCents(inventoryValueCents: bigint, onHand: number): bigint {
   if (!Number.isSafeInteger(onHand) || onHand <= 0) return 0n;
   return (inventoryValueCents + BigInt(Math.floor(onHand / 2))) / BigInt(onHand);
+}
+
+function roundedDivide(numerator: bigint, denominator: bigint) {
+  return (numerator + denominator / 2n) / denominator;
+}
+
+function exchangeToZmwCents(amount: string, rate: string) {
+  const [whole, fraction = ""] = rate.split(".");
+  const rateUnits = BigInt(whole) * 100_000_000n + BigInt(fraction.padEnd(8, "0").slice(0, 8));
+  return roundedDivide(cents(amount) * rateUnits, 100_000_000n);
+}
+
+export type LandedCostAdjustmentLine = {
+  lineId: number;
+  productId: number;
+  productName: string;
+  stockedQuantity: number;
+  onHand: number;
+  averageUnitCostZmw: string;
+  adjustmentZmw: string;
+  inventoryZmw: string;
+  cogsZmw: string;
+};
+
+export type LandedCostAdjustmentPreview = {
+  clearingBalanceZmw: string;
+  adjustmentAvailableZmw: string;
+  unpostedClearingZmw: string;
+  canPost: boolean;
+  hasNegativeLine: boolean;
+  lines: LandedCostAdjustmentLine[];
+};
+
+/**
+ * Estimate the share of a product's pooled, weighted-average inventory value
+ * that remains on hand relative to all posted receipt units.
+ */
+export function splitLandedCostCorrection(input: {
+  amountCents: bigint;
+  inventoryValueCents: bigint;
+  onHand: number;
+  totalReceiptQuantity: number;
+}) {
+  const averageUnitCost = weightedAverageUnitCostCents(input.inventoryValueCents, input.onHand);
+  const receiptValue = averageUnitCost * BigInt(Math.max(0, input.totalReceiptQuantity));
+  const availableInventoryValue = input.onHand > 0 && input.inventoryValueCents > 0n
+    ? input.inventoryValueCents < receiptValue ? input.inventoryValueCents : receiptValue
+    : 0n;
+  const inventoryCents = receiptValue > 0n
+    ? roundedDivide(input.amountCents * availableInventoryValue, receiptValue)
+    : 0n;
+  return {
+    averageUnitCostCents: averageUnitCost,
+    inventoryCents: inventoryCents < input.amountCents ? inventoryCents : input.amountCents,
+    cogsCents: input.amountCents - (inventoryCents < input.amountCents ? inventoryCents : input.amountCents),
+  };
+}
+
+/**
+ * Build a live preview from source expenses, posted receipts, existing journal
+ * entries, and current weighted-average stock values. Call inside a transaction
+ * when the preview will be posted so that the related rows can be locked first.
+ */
+export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: number): Promise<LandedCostAdjustmentPreview | null> {
+  const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, purchaseOrderId)).limit(1);
+  if (!order) return null;
+  const [orderLines, expenses] = await Promise.all([
+    tx.select({ line: purchaseOrderLines, productName: products.name })
+      .from(purchaseOrderLines)
+      .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId)),
+    tx.select().from(importExpenses).where(eq(importExpenses.purchaseOrderId, purchaseOrderId)),
+  ]);
+  const rows = orderLines.map((row: any) => ({ ...row.line, productName: row.productName }));
+  const allocation = allocateLandedCosts(
+    rows.map((line: any) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
+    expenses.map((expense: any) => ({
+      expenseId: expense.id, amount: expense.amount,
+      exchangeRateToZmw: expense.exchangeRateToZmw, basis: expense.basis,
+    })),
+    order.exchangeRateToZmw,
+  );
+  const allocationByLine = new Map<number, bigint>(
+    allocation.lines.map((line) => [line.lineId, cents(line.allocatedExpensesZmw)]),
+  );
+
+  const accountsByKey = await ensureAccountingAccounts(tx);
+  const clearingAccount = accountsByKey.get("landed_cost_clearing");
+  const inventoryAccount = accountsByKey.get("inventory");
+  const cogsAccount = accountsByKey.get("cost_of_goods_sold");
+  if (!clearingAccount || !inventoryAccount || !cogsAccount) throw new Error("Landed-cost accounting accounts are unavailable.");
+
+  const lineIds = rows.map((line: any) => line.id);
+  const productIds: number[] = [...new Set<number>(rows.map((line: any) => Number(line.productId)))];
+  const receipts = lineIds.length
+    ? await tx.select({
+      id: shipmentLines.id, purchaseOrderLineId: shipmentLines.purchaseOrderLineId,
+      quantity: shipmentLines.quantityStocked,
+    }).from(shipmentLines)
+      .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
+      .where(inArray(purchaseOrderLines.id, lineIds))
+    : [];
+  const stockedByLine = new Map<number, number>();
+  const shipmentLineToOrderLine = new Map<number, number>();
+  receipts.forEach((receipt: any) => {
+    stockedByLine.set(receipt.purchaseOrderLineId, (stockedByLine.get(receipt.purchaseOrderLineId) ?? 0) + receipt.quantity);
+    shipmentLineToOrderLine.set(receipt.id, receipt.purchaseOrderLineId);
+  });
+
+  const actualClearingByProduct = new Map<number, bigint>();
+  const actualReceiptClearing = await tx.select({
+    sourceKey: inventoryMovements.sourceKey,
+    productId: inventoryMovements.productId,
+    creditZmw: journalLines.creditZmw,
+  }).from(journalEntries)
+    .innerJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+    .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+    .where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalLines.accountId, clearingAccount.id),
+      gt(journalLines.creditZmw, "0"),
+    ));
+  for (const row of actualReceiptClearing) {
+    const shipmentLineId = Number(row.sourceKey?.match(/^shipment-line-(\d+)-to-\d+$/)?.[1]);
+    if (!Number.isSafeInteger(shipmentLineId) || !shipmentLineToOrderLine.has(shipmentLineId)) continue;
+    const line = rows.find((candidate: any) => candidate.id === shipmentLineToOrderLine.get(shipmentLineId));
+    if (!line) continue;
+    actualClearingByProduct.set(line.productId, (actualClearingByProduct.get(line.productId) ?? 0n) + cents(row.creditZmw));
+  }
+
+  const priorAdjustmentRows = await tx.select({
+    systemKey: accountingAccounts.systemKey, productId: journalLines.productId,
+    debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+  }).from(journalEntries)
+    .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+    .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+    .where(and(
+      eq(journalEntries.sourceType, "landed_cost_adjustment"),
+      eq(journalEntries.sourceId, purchaseOrderId),
+    ));
+  let priorClearingCredits = 0n;
+  const priorAdjustmentByProduct = new Map<number, bigint>();
+  priorAdjustmentRows.forEach((row: any) => {
+    if (row.systemKey === "landed_cost_clearing") priorClearingCredits += cents(row.creditZmw);
+    if (row.productId !== null && ["inventory", "cost_of_goods_sold"].includes(row.systemKey) && cents(row.debitZmw) > 0n) {
+      priorAdjustmentByProduct.set(row.productId, (priorAdjustmentByProduct.get(row.productId) ?? 0n) + cents(row.debitZmw));
+    }
+  });
+
+  const inventoryLines = productIds.length
+    ? await tx.select({
+      productId: journalLines.productId, debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+    }).from(journalLines).where(and(eq(journalLines.accountId, inventoryAccount.id), inArray(journalLines.productId, productIds)))
+    : [];
+  const inventoryValueByProduct = new Map<number, bigint>();
+  inventoryLines.forEach((row: any) => {
+    if (row.productId !== null) inventoryValueByProduct.set(
+      row.productId,
+      (inventoryValueByProduct.get(row.productId) ?? 0n) + cents(row.debitZmw) - cents(row.creditZmw),
+    );
+  });
+  const movementRows = productIds.length
+    ? await tx.select({
+      productId: inventoryMovements.productId, quantityDelta: inventoryMovements.quantityDelta,
+      kind: inventoryMovements.kind,
+    }).from(inventoryMovements).where(inArray(inventoryMovements.productId, productIds))
+    : [];
+  const onHandByProduct = new Map<number, number>();
+  const receiptQuantityByProduct = new Map<number, number>();
+  movementRows.forEach((row: any) => {
+    onHandByProduct.set(row.productId, (onHandByProduct.get(row.productId) ?? 0) + row.quantityDelta);
+    if (row.kind === "stock_receipt") receiptQuantityByProduct.set(
+      row.productId, (receiptQuantityByProduct.get(row.productId) ?? 0) + row.quantityDelta,
+    );
+  });
+
+  const corrections = rows.map((line: any) => {
+    const stockedQuantity = stockedByLine.get(line.id) ?? 0;
+    const expectedPosted = line.quantityOrdered > 0
+      ? roundedDivide((allocationByLine.get(line.id) ?? 0n) * BigInt(stockedQuantity), BigInt(line.quantityOrdered))
+      : 0n;
+    const adjustmentCents = expectedPosted
+      - (actualClearingByProduct.get(line.productId) ?? 0n)
+      - (priorAdjustmentByProduct.get(line.productId) ?? 0n);
+    const onHand = onHandByProduct.get(line.productId) ?? 0;
+    const inventoryValue = inventoryValueByProduct.get(line.productId) ?? 0n;
+    const split = splitLandedCostCorrection({
+      amountCents: adjustmentCents > 0n ? adjustmentCents : 0n,
+      inventoryValueCents: inventoryValue,
+      onHand,
+      totalReceiptQuantity: receiptQuantityByProduct.get(line.productId) ?? 0,
+    });
+    return {
+      lineId: line.id, productId: line.productId, productName: line.productName,
+      stockedQuantity, onHand, averageUnitCostZmw: formatCents(split.averageUnitCostCents),
+      adjustmentCents, inventoryCents: split.inventoryCents, cogsCents: split.cogsCents,
+    };
+  });
+  const hasNegativeLine = corrections.some((line: any) => line.adjustmentCents < 0n);
+  const adjustmentCents = corrections.reduce((total: bigint, line: any) =>
+    total + (line.adjustmentCents > 0n ? line.adjustmentCents : 0n), 0n);
+  const totalExpenseCents = expenses.reduce((total: bigint, expense: any) =>
+    total + exchangeToZmwCents(expense.amount, expense.exchangeRateToZmw), 0n);
+  const receiptClearingCents = [...actualClearingByProduct.values()].reduce((total, value) => total + value, 0n);
+  const clearingBalanceCents = totalExpenseCents - receiptClearingCents - priorClearingCredits;
+  const unpostedCents = clearingBalanceCents - adjustmentCents;
+
+  return {
+    clearingBalanceZmw: formatCents(clearingBalanceCents),
+    adjustmentAvailableZmw: formatCents(adjustmentCents),
+    unpostedClearingZmw: formatCents(unpostedCents),
+    canPost: adjustmentCents > 0n && !hasNegativeLine,
+    hasNegativeLine,
+    lines: corrections.map((line: any) => ({
+      lineId: line.lineId, productId: line.productId, productName: line.productName,
+      stockedQuantity: line.stockedQuantity, onHand: line.onHand,
+      averageUnitCostZmw: line.averageUnitCostZmw,
+      adjustmentZmw: formatCents(line.adjustmentCents),
+      inventoryZmw: formatCents(line.inventoryCents),
+      cogsZmw: formatCents(line.cogsCents),
+    })),
+  };
 }
 
 export function journalLinesAreBalanced(lines: PostingLine[]) {

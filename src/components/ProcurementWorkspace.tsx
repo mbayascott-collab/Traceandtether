@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   createImportExpense, createPurchaseOrder, createShipment, fetchImportExpenses, fetchLandedCosts,
+  postLandedCostAdjustment,
   fetchProducts, fetchPurchaseOrders, fetchShipments, fetchSuppliers, receiveShipment,
   type ImportExpense, type LandedCostOrder, type PurchaseOrder, type Product, type Shipment, type Supplier,
 } from "../lib/api";
@@ -25,6 +26,8 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   const [shipmentLineDrafts, setShipmentLineDrafts] = useState<ShipmentLineDraft[]>([{ purchaseOrderLineId: "", quantityShipped: "1" }]);
   const [shipmentOrderIds, setShipmentOrderIds] = useState<string[]>([]);
   const [shipmentOrderToAdd, setShipmentOrderToAdd] = useState("");
+  const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({});
+  const [adjustingOrderId, setAdjustingOrderId] = useState<number | null>(null);
   const heading = mode === "orders" ? "Purchase orders" : mode === "shipments" ? "Shipments" : mode === "expenses" ? "Import expenses" : "Landed costs";
 
   useEffect(() => {
@@ -40,6 +43,23 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
     const form = event.currentTarget;
     try { await action(new FormData(form)); setNotice("Saved."); setReload((n) => n + 1); form.reset(); setShipmentOrderIds([]); setShipmentOrderToAdd(""); setShipmentLineDrafts([{ purchaseOrderLineId: "", quantityShipped: "1" }]); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not save this record."); }
+  }
+
+  async function postReviewedAdjustment(order: LandedCostOrder) {
+    const preview = order.adjustmentPreview;
+    const note = reviewNotes[order.id]?.trim();
+    if (!preview?.canPost || !note) return;
+    setError(""); setNotice(""); setAdjustingOrderId(order.id);
+    try {
+      await postLandedCostAdjustment(order.id, preview, note);
+      setNotice(`Reviewed adjustment posted for ${order.orderNumber}.`);
+      setReviewNotes((current) => ({ ...current, [order.id]: "" }));
+      setReload((n) => n + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not post the reviewed adjustment.");
+    } finally {
+      setAdjustingOrderId(null);
+    }
   }
 
   const activeOrders = orders.filter((order) => order.status !== "cancelled" && order.status !== "received");
@@ -123,8 +143,30 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
       <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Expense</th><th>Recorded amount</th><th>FX to ZMW</th><th>Basis</th><th>Date</th></tr></thead><tbody>{expenses.map((x) => <tr key={x.id}><td>{orders.find((o) => o.id === x.purchaseOrderId)?.orderNumber}</td><td>{x.category} · {x.description}</td><td>{money(x.amount, x.currency)}</td><td>{x.exchangeRateToZmw}</td><td>{x.basis}</td><td>{x.incurredAt}</td></tr>)}</tbody></table></div>
     </>}
     {mode === "landed" && <>
-      <div className="notice-strip">Each expense is converted using its recorded rate and allocated exactly across order lines. Product catalogue estimates are not overwritten.</div>
-      {costs.map((o) => <div className="panel data-table-wrap" key={o.id}><h2>{o.orderNumber} · {o.supplierName}</h2><p>Purchase FX: 1 {o.currency} = {o.exchangeRateToZmw} ZMW</p><table><thead><tr><th>Product</th><th>Qty</th><th>Unit buy (ZMW)</th><th>Allocated expenses (ZMW)</th><th>Landed/unit (ZMW)</th></tr></thead><tbody>{o.lines.map((l) => <tr key={l.id}><td>{l.productName} · {l.sku}</td><td>{l.quantityOrdered}</td><td>{money(l.purchaseUnitCostZmw)}</td><td>{money(l.allocatedExpensesZmw)}</td><td>{money(l.landedUnitCostZmw)}</td></tr>)}</tbody></table></div>)}
+      <div className="notice-strip">Expenses use their recorded exchange rates. The adjustment preview keeps costs for stock not yet posted in clearing, and estimates the inventory share using each product’s current weighted-average value. Sold stock is assigned to cost of goods sold.</div>
+      {costs.map((o) => <div className="panel data-table-wrap" key={o.id}>
+        <h2>{o.orderNumber} · {o.supplierName}</h2>
+        <p>Purchase FX: 1 {o.currency} = {o.exchangeRateToZmw} ZMW</p>
+        <table><thead><tr><th>Product</th><th>Qty</th><th>Unit buy (ZMW)</th><th>Allocated expenses (ZMW)</th><th>Landed/unit (ZMW)</th></tr></thead><tbody>{o.lines.map((l) => <tr key={l.id}><td>{l.productName} · {l.sku}</td><td>{l.quantityOrdered}</td><td>{money(l.purchaseUnitCostZmw)}</td><td>{money(l.allocatedExpensesZmw)}</td><td>{money(l.landedUnitCostZmw)}</td></tr>)}</tbody></table>
+        {o.adjustmentPreview && <>
+          <h3>Outstanding clearing and reviewed adjustment</h3>
+          <p>Clearing balance: <strong>{money(o.adjustmentPreview.clearingBalanceZmw)}</strong> · Ready for posted stock: <strong>{money(o.adjustmentPreview.adjustmentAvailableZmw)}</strong> · Still awaiting stock posting: <strong>{money(o.adjustmentPreview.unpostedClearingZmw)}</strong></p>
+          <div className="data-table-wrap"><table><thead><tr><th>Product</th><th>Posted qty</th><th>On hand</th><th>Weighted-average unit value</th><th>Correction</th><th>Inventory</th><th>Cost of goods sold</th></tr></thead><tbody>
+            {o.adjustmentPreview.lines.map((line) => <tr key={line.lineId}>
+              <td>{line.productName} · {o.lines.find((item) => item.id === line.lineId)?.sku}</td>
+              <td>{line.stockedQuantity}</td><td>{line.onHand}</td><td>{money(line.averageUnitCostZmw)}</td>
+              <td>{money(line.adjustmentZmw)}</td><td>{money(line.inventoryZmw)}</td><td>{money(line.cogsZmw)}</td>
+            </tr>)}
+          </tbody></table></div>
+          {o.adjustmentPreview.hasNegativeLine && <div className="notice-strip" role="alert">This order has a product-level difference that needs accounting review. No adjustment can be posted from this preview.</div>}
+          {o.adjustmentPreview.canPost && <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void postReviewedAdjustment(o); }}>
+            <label>Review note<input required maxLength={240} value={reviewNotes[o.id] ?? ""} onChange={(event) => setReviewNotes((current) => ({ ...current, [o.id]: event.target.value }))} placeholder="Why this late cost is being cleared" /></label>
+            <button className="button button-primary" disabled={adjustingOrderId !== null || !reviewNotes[o.id]?.trim()}>
+              {adjustingOrderId === o.id ? "Posting…" : `Post reviewed adjustment · ${money(o.adjustmentPreview.adjustmentAvailableZmw)}`}
+            </button>
+          </form>}
+        </>}
+      </div>)}
     </>}
   </section>;
 }

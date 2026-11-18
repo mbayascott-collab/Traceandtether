@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, ne, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import {
   importExpenses, products, purchaseOrderLines, purchaseOrders, shipmentLines, shipmentPurchaseOrders, shipments, suppliers,
@@ -10,7 +11,7 @@ import {
   shipmentInputSchema, shipmentReceiptSchema,
 } from "./product-validation";
 import { db } from "./db";
-import { postJournal } from "./accounting-posting";
+import { cents, formatCents, landedCostAdjustmentPreview, postJournal, type PostingLine } from "./accounting-posting";
 
 const invalid = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const apiError = (error: unknown) => typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
@@ -216,10 +217,10 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/import-expenses", owner, async (req, res) => {
     const parsed = importExpenseInputSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.issues[0]?.message ?? "Check expense details.");
-    const [order] = await db.select({ status: purchaseOrders.status }).from(purchaseOrders)
-      .where(eq(purchaseOrders.id, parsed.data.purchaseOrderId)).limit(1);
-    if (!order || order.status === "cancelled") return invalid(res, "Choose an open purchase order.");
-    const expense = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
+      const [order] = await tx.select({ status: purchaseOrders.status }).from(purchaseOrders)
+        .where(eq(purchaseOrders.id, parsed.data.purchaseOrderId)).for("update").limit(1);
+      if (!order || order.status === "cancelled") return { error: "Choose an open purchase order.", status: 400 };
       const [created] = await tx.insert(importExpenses).values({
         ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
       }).returning();
@@ -237,9 +238,10 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
           { accountKey: "accounts_payable", creditZmw: expenseZmw, description: created.description },
         ],
       });
-      return created;
+      return { expense: created };
     });
-    res.status(201).json({ expense });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.status(201).json({ expense: result.expense });
   });
 
   app.get("/api/landed-costs", owner, async (req, res) => {
@@ -251,7 +253,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     const lines = await db.select({ line: purchaseOrderLines, productName: products.name, sku: products.sku })
       .from(purchaseOrderLines).innerJoin(products, eq(purchaseOrderLines.productId, products.id));
     const expenses = await db.select().from(importExpenses);
-    res.json({ orders: orders.map(({ order, supplierName }) => {
+    res.json({ orders: await Promise.all(orders.map(async ({ order, supplierName }) => {
       const orderLines = lines.filter(({ line }) => line.purchaseOrderId === order.id);
       const allocated = allocateLandedCosts(
         orderLines.map(({ line }) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
@@ -259,9 +261,97 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
           .map((expense) => ({ expenseId: expense.id, amount: expense.amount, exchangeRateToZmw: expense.exchangeRateToZmw, basis: expense.basis })),
         order.exchangeRateToZmw,
       );
-      return { ...order, supplierName, lines: orderLines.map(({ line, productName, sku }) => ({
+      const adjustmentPreview = await landedCostAdjustmentPreview(db, order.id);
+      return { ...order, supplierName, adjustmentPreview, lines: orderLines.map(({ line, productName, sku }) => ({
         ...line, productName, sku, ...allocated.lines.find((result) => result.lineId === line.id),
       })), allocations: allocated.allocations };
-    }) });
+    })) });
+  });
+
+  app.post("/api/landed-costs/:purchaseOrderId/adjust", owner, async (req, res) => {
+    const purchaseOrderId = Number(req.params.purchaseOrderId);
+    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) return invalid(res, "Invalid purchase order.");
+    const parsed = z.object({
+      reviewedAmountZmw: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+      reviewedLines: z.array(z.object({
+        lineId: z.number().int().positive(),
+        adjustmentZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+        inventoryZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+        cogsZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+      }).strict()).max(100),
+      note: z.string().trim().min(3).max(240),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) return invalid(res, "Review the adjustment amount and enter a note of at least 3 characters.");
+
+    const result = await db.transaction(async (tx) => {
+      const [order] = await tx.select().from(purchaseOrders)
+        .where(eq(purchaseOrders.id, purchaseOrderId)).for("update").limit(1);
+      if (!order) return { error: "Purchase order not found.", status: 404 };
+      const orderProductRows = await tx.select({ productId: purchaseOrderLines.productId })
+        .from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
+        .orderBy(asc(purchaseOrderLines.productId));
+      const productIds = [...new Set(orderProductRows.map((row) => row.productId))];
+      if (productIds.length) {
+        await tx.select({ id: products.id }).from(products)
+          .where(inArray(products.id, productIds)).orderBy(asc(products.id)).for("update");
+      }
+      const preview = await landedCostAdjustmentPreview(tx, purchaseOrderId);
+      if (!preview) return { error: "Purchase order not found.", status: 404 };
+      if (!preview.canPost) {
+        return {
+          error: preview.hasNegativeLine
+            ? "The order has a product-level clearing difference that needs accounting review before adjustment."
+            : "There are no posted import costs ready to adjust.",
+          status: 409,
+        };
+      }
+      if (cents(parsed.data.reviewedAmountZmw) !== cents(preview.adjustmentAvailableZmw)) {
+        return { error: "The clearing balance changed after review. Refresh the preview and review the new amount.", status: 409 };
+      }
+      const reviewedLines = new Map(parsed.data.reviewedLines.map((line) => [line.lineId, line]));
+      if (reviewedLines.size !== preview.lines.length || preview.lines.some((line) => {
+        const reviewed = reviewedLines.get(line.lineId);
+        return !reviewed
+          || cents(reviewed.adjustmentZmw) !== cents(line.adjustmentZmw)
+          || cents(reviewed.inventoryZmw) !== cents(line.inventoryZmw)
+          || cents(reviewed.cogsZmw) !== cents(line.cogsZmw);
+      })) {
+        return { error: "The inventory split changed after review. Refresh the preview and review the new amounts.", status: 409 };
+      }
+
+      const lines: PostingLine[] = preview.lines.flatMap((line): PostingLine[] => {
+        const amount = cents(line.adjustmentZmw);
+        if (amount <= 0n) return [];
+        const journalLines = [];
+        const inventoryAmount = cents(line.inventoryZmw);
+        const cogsAmount = cents(line.cogsZmw);
+        if (inventoryAmount > 0n) journalLines.push({
+          accountKey: "inventory", productId: line.productId,
+          debitZmw: formatCents(inventoryAmount),
+          description: `Late import cost added to ${line.productName} stock`,
+        });
+        if (cogsAmount > 0n) journalLines.push({
+          accountKey: "cost_of_goods_sold", productId: line.productId,
+          debitZmw: formatCents(cogsAmount),
+          description: `Late import cost for sold ${line.productName}`,
+        });
+        return journalLines;
+      });
+      lines.push({
+        accountKey: "landed_cost_clearing",
+        creditZmw: preview.adjustmentAvailableZmw,
+        description: `Clear posted import costs for ${order.orderNumber}`,
+      });
+      const journalEntry = await postJournal(tx, {
+        sourceKey: `landed-cost-adjustment-${purchaseOrderId}-${randomUUID()}`,
+        sourceType: "landed_cost_adjustment",
+        sourceId: purchaseOrderId,
+        memo: `Reviewed import-cost adjustment for ${order.orderNumber}: ${parsed.data.note}`,
+        lines,
+      });
+      return { journalEntry, preview };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.status(201).json(result);
   });
 }
