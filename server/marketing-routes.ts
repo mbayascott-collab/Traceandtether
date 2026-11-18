@@ -5,7 +5,7 @@ import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
-import { matchesCustomerGroup } from "../shared/marketing-customer-groups";
+import { customerGroupContactsCsv, matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import { buildDeliveryCostTotals, cents, formatCents, postJournal } from "./accounting-posting";
 
@@ -219,13 +219,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       canViewMembers: res.locals.actor?.role === "owner",
     });
   });
-  app.get("/api/marketing/customer-groups/:id/members", owner, ownerOnly, async (req, res) => {
-    const id = Number(req.params.id);
-    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
-    const [group] = await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
-    if (!group) return res.status(404).json({ error: "Customer group not found." });
+  async function getCustomerGroupMembers(group: typeof marketingCustomerGroups.$inferSelect) {
     const { customers: allCustomers, history } = await loadCustomerHistory();
-    const members = allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
+    return allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
       fulfilledOrders: history.get(customer.id)?.fulfilledOrders ?? 0,
       lifetimeSalesZmw: formatCents(history.get(customer.id)?.lifetimeSalesCents ?? 0n),
       lastOrderDate: history.get(customer.id)?.lastOrderDate ?? null,
@@ -241,7 +237,40 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         lastOrderDate: stats?.lastOrderDate ?? null,
       };
     });
+  }
+
+  async function findCustomerGroup(req: import("express").Request, res: import("express").Response) {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid customer group." });
+      return null;
+    }
+    const [group] = await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
+    if (!group) {
+      res.status(404).json({ error: "Customer group not found." });
+      return null;
+    }
+    return group;
+  }
+
+  app.get("/api/marketing/customer-groups/:id/members", owner, ownerOnly, async (req, res) => {
+    const group = await findCustomerGroup(req, res);
+    if (!group) return;
+    const members = await getCustomerGroupMembers(group);
     res.json({ group, members });
+  });
+  app.get("/api/marketing/customer-groups/:id/export.csv", owner, ownerOnly, async (req, res) => {
+    const group = await findCustomerGroup(req, res);
+    if (!group) return;
+    const members = await getCustomerGroupMembers(group);
+    const filename = `${group.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "customer-group"}-${group.id}.csv`;
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.send(customerGroupContactsCsv(members));
   });
   app.post("/api/marketing/customer-groups", owner, ownerOnly, async (req, res) => {
     const parsed = customerGroupSchema.safeParse(req.body);

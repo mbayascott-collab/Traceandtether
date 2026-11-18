@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Copy, Pencil, Plus, RefreshCw, X } from "lucide-react";
+import { Copy, Download, Pencil, Plus, RefreshCw, X } from "lucide-react";
 
 type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
@@ -273,6 +273,7 @@ export default function MarketingWorkspace() {
           {customerGroups.map((group) => <article className="marketing-row" key={group.id}>
             <div><strong>{group.name}</strong><span>{group.memberCount} customer{group.memberCount === 1 ? "" : "s"} match the saved rules</span></div>
             {canViewCustomerGroupMembers && <button className="button button-secondary button-small" onClick={() => void showCustomerGroupMembers(group.id)}>View members</button>}
+            {canManageCustomerGroups && <a className="button button-secondary button-small" href={`/api/marketing/customer-groups/${group.id}/export.csv`}><Download /> Download CSV</a>}
             {canManageCustomerGroups && <button className="icon-button" aria-label={`Edit ${group.name}`} onClick={() => editCustomerGroup(group)}><Pencil /></button>}
             {canManageCustomerGroups && <button className="icon-button" aria-label={`Remove ${group.name}`} onClick={() => void deleteCustomerGroup(group)}><X /></button>}
           </article>)}

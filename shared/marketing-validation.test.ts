@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "./marketing-validation";
-import { matchesCustomerGroup } from "./marketing-customer-groups";
+import { customerGroupContactsCsv, matchesCustomerGroup } from "./marketing-customer-groups";
 
 test("validates campaign names, statuses, budgets, and date order", () => {
   const campaign = { name: "Winter promotion", objective: "", channel: "Social", status: "draft", startsOn: "2026-11-01", endsOn: "2026-11-30", budgetZmw: "2500.00", notes: "" };
@@ -65,4 +65,18 @@ test("matches saved groups against order count, sales, and recency", () => {
   assert.equal(matchesCustomerGroup(neverOrderedRule, {
     fulfilledOrders: 0, lifetimeSalesZmw: "0.00", lastOrderDate: null,
   }, "2026-11-18"), true);
+});
+
+test("exports only contact columns and neutralizes spreadsheet formulas", () => {
+  const csv = customerGroupContactsCsv([
+    { name: '=HYPERLINK("https://example.com","Open")', email: "person@example.com", phone: "+123,456" },
+    { name: 'A "quoted" name', email: null, phone: "  @SUM(A1:A2)" },
+  ]);
+  const expectedRows = [
+    `"Name","Email","Phone"`,
+    `"'=HYPERLINK(""https://example.com"",""Open"")","person@example.com","'+123,456"`,
+    `"A ""quoted"" name","","'  @SUM(A1:A2)"`,
+  ];
+  assert.equal(csv, `\uFEFF${expectedRows.join("\r\n")}\r\n`);
+  assert.doesNotMatch(csv, /fulfilledOrders|lifetimeSales|lastOrderDate/);
 });

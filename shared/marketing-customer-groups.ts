@@ -28,3 +28,19 @@ export function matchesCustomerGroup(
   }
   return true;
 }
+
+function csvCell(value: string | null) {
+  const text = value ?? "";
+  const safe = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+export function customerGroupContactsCsv(
+  members: Array<{ name: string; email: string | null; phone: string | null }>,
+) {
+  const rows = [
+    ["Name", "Email", "Phone"],
+    ...members.map(({ name, email, phone }) => [name, email, phone]),
+  ];
+  return `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
