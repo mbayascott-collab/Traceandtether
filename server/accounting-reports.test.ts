@@ -93,6 +93,35 @@ test("year-end reports use the requested period and balance through its end date
   assert.equal(liabilitiesAndEquity, 1770);
 });
 
+test("income and expenses include both report boundary dates but exclude adjacent dates", () => {
+  const boundaryBooks: FixtureLine[] = [
+    ...journal("2026-01-31", [
+      ["cash", "debit", "100.00"], ["sales", "credit", "100.00"],
+      ["rent", "debit", "10.00"], ["cash", "credit", "10.00"],
+    ]),
+    ...journal("2026-02-01", [
+      ["cash", "debit", "20.00"], ["sales", "credit", "20.00"],
+      ["rent", "debit", "2.00"], ["cash", "credit", "2.00"],
+    ]),
+    ...journal("2026-03-31", [
+      ["cash", "debit", "30.00"], ["sales", "credit", "30.00"],
+      ["rent", "debit", "3.00"], ["cash", "credit", "3.00"],
+    ]),
+    ...journal("2026-04-01", [
+      ["cash", "debit", "200.00"], ["sales", "credit", "200.00"],
+      ["rent", "debit", "20.00"], ["cash", "credit", "20.00"],
+    ]),
+  ];
+  const reports = calculateAccountingReports(accounts, boundaryBooks, "2026-02-01", "2026-03-31");
+
+  assert.deepEqual(
+    [reports.totals.incomeZmw, reports.totals.expensesZmw, reports.totals.netIncomeZmw],
+    ["50.00", "5.00", "45.00"],
+  );
+  assert.equal(reports.incomeStatement.find((row) => row.code === "4100")?.amountZmw, "50.00");
+  assert.equal(reports.incomeStatement.find((row) => row.code === "6300")?.amountZmw, "5.00");
+});
+
 test("year-end reports keep accumulated losses negative while the balance sheet balances", () => {
   const lossYear: FixtureLine[] = [
     ...journal("2025-12-31", [
