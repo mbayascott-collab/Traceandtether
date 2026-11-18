@@ -13,6 +13,14 @@ const companyName = "Trace and Tether Craft Studio Limited";
 const companyAddress = "164 Mpundu Street, Chelston Extension, Lusaka, Zambia";
 const companyEmail = "traceandtether@gmail.com";
 const companyPhone = "+260-0977-101-967";
+function suggestedStockLocation(line: SalesOrder["lines"][number]) {
+  return [...line.stockLocations]
+    .filter((location) => location.available >= line.quantity)
+    .sort((left, right) => {
+      const mainPriority = Number(right.name.toLowerCase() === "main") - Number(left.name.toLowerCase() === "main");
+      return mainPriority || left.name.localeCompare(right.name);
+    })[0] ?? null;
+}
 export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
@@ -28,6 +36,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [notice, setNotice] = useState("");
   const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
+  const [stockLocationChoices, setStockLocationChoices] = useState<Record<string, number | "auto">>({});
   const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
   const [deliveryFormOrder, setDeliveryFormOrder] = useState<SalesOrder | null>(null);
   const [deliveryRequestKey, setDeliveryRequestKey] = useState("");
@@ -133,6 +142,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     if (!window.confirm(`Delete ${orderType} ${order.orderNumber}? This cannot be undone.${detail}`)) return;
     void run(() => deleteSalesOrder(order.id), "Order deleted.");
   }
+  function confirmOrder(order: SalesOrder) {
+    const locations = order.lines.map((line) => {
+      const choice = stockLocationChoices[`${order.id}:${line.productId}`] ?? "auto";
+      return { productId: line.productId, locationId: choice === "auto" ? null : choice };
+    });
+    void run(() => updateSalesOrderStatus(order.id, "confirm", locations), "Order confirmed; stock reserved.", order.id);
+  }
   function documentDate(value: string) {
     return new Date(value).toLocaleDateString("en-ZM", { day: "numeric", month: "long", year: "numeric" });
   }
@@ -226,8 +242,27 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <button type="button" className="button button-secondary" onClick={() => setLines((old) => [...old, emptyLine()])}>Add product line</button>
         <label>Notes<input name="notes" /></label><button className="button button-primary">Save draft</button>
       </form>
-         <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
-          {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
+          <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Stock location</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{o.lines.map((line) => {
+            const choice = stockLocationChoices[`${o.id}:${line.productId}`] ?? "auto";
+            const suggested = suggestedStockLocation(line);
+            return <div key={line.id}>
+              <strong>{line.productName}: </strong>
+              {o.status === "draft" ? <select
+                aria-label={`Stock location for ${line.productName} on ${o.orderNumber}`}
+                value={choice === "auto" ? "auto" : String(choice)}
+                onChange={(event) => setStockLocationChoices((current) => ({
+                  ...current,
+                  [`${o.id}:${line.productId}`]: event.target.value === "auto" ? "auto" : Number(event.target.value),
+                }))}
+              >
+                <option value="auto">Auto{suggested ? ` · ${suggested.name} (${suggested.available} available)` : " · no location has enough stock"}</option>
+                {line.stockLocations.map((location) => <option key={location.id} value={location.id} disabled={location.available < line.quantity}>
+                  {location.name} · {location.available} available
+                </option>)}
+              </select> : <span>{line.stockLocationName || "Not reserved"}</span>}
+            </div>;
+          })}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
+          {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => confirmOrder(o)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
           {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => { setDeliveryRequestKey(window.crypto.randomUUID()); setDeliveryFormOrder(o); }}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
             {o.deliveries.map((delivery) => <span key={delivery.id} className="delivery-actions">
@@ -247,7 +282,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <input type="hidden" name="idempotencyKey" value={deliveryRequestKey} />
         <label>Delivery date<input type="date" name="deliveryDate" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
         {deliveryFormOrder.lines.filter((line) => line.remainingQuantity > 0).map((line) => <label key={line.id}>
-          {line.productName} · {line.sku} · {line.remainingQuantity} remaining
+          {line.productName} · {line.sku} · {line.remainingQuantity} remaining · Stock location: {line.stockLocationName || "Not recorded"}
           <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
         </label>)}
         <div className="modal-footer-actions"><button type="button" className="button button-secondary" disabled={deliverySubmitting} onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary" disabled={deliverySubmitting}>{deliverySubmitting ? "Saving…" : "Save delivery"}</button></div>

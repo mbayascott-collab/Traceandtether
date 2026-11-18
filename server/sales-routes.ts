@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, sum } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import {
-  customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema,
+  customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
   customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
@@ -14,6 +14,7 @@ import { publicShopAttemptSummary, recordPublicShopAttempt } from "./public-shop
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
+import { chooseSalesStockLocation } from "./sales-stock-allocation";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -315,7 +316,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows, receiptRows] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows, locations, movementBalances, reservationBalances, orderReservations] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -337,9 +338,35 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         proofFileName: salesDeliveryReceipts.proofFileName,
         proofMimeType: salesDeliveryReceipts.proofMimeType,
       }).from(salesDeliveryReceipts),
+      db.select({ id: inventoryLocations.id, name: inventoryLocations.name })
+        .from(inventoryLocations).where(eq(inventoryLocations.active, true)).orderBy(asc(inventoryLocations.name)),
+      db.select({
+        productId: inventoryMovements.productId, locationId: inventoryMovements.locationId,
+        quantity: sum(inventoryMovements.quantityDelta),
+      }).from(inventoryMovements).groupBy(inventoryMovements.productId, inventoryMovements.locationId),
+      db.select({
+        productId: inventoryReservations.productId, locationId: inventoryReservations.locationId,
+        quantity: sum(inventoryReservations.quantity),
+      }).from(inventoryReservations).where(eq(inventoryReservations.status, "active"))
+        .groupBy(inventoryReservations.productId, inventoryReservations.locationId),
+      db.select({
+        salesOrderId: inventoryReservations.salesOrderId, productId: inventoryReservations.productId,
+        locationId: inventoryReservations.locationId, locationName: inventoryLocations.name,
+      }).from(inventoryReservations)
+        .leftJoin(inventoryLocations, eq(inventoryReservations.locationId, inventoryLocations.id))
+        .where(isNotNull(inventoryReservations.salesOrderId)),
     ]);
     const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
     const receiptByDelivery = new Map(receiptRows.map((receipt) => [receipt.deliveryId, receipt]));
+    const onHandByProductLocation = new Map(movementBalances.map((row) => [
+      `${row.productId}:${row.locationId}`, Number(row.quantity ?? 0),
+    ]));
+    const reservedByProductLocation = new Map(reservationBalances.map((row) => [
+      `${row.productId}:${row.locationId}`, Number(row.quantity ?? 0),
+    ]));
+    const orderReservationByProduct = new Map(orderReservations.map((row) => [
+      `${row.salesOrderId}:${row.productId}`, row,
+    ]));
     res.json({ orders: orders.map(({ order, customerName }) => {
       const orderDeliveries = deliveryRows.filter(({ delivery }) => delivery.salesOrderId === order.id);
       const deliveredByLine = new Map<number, number>();
@@ -349,10 +376,19 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const items = lines.filter(({ line }) => line.salesOrderId === order.id)
         .map(({ line, productName, sku }) => {
           const deliveredQuantity = deliveredByLine.get(line.id) ?? (order.status === "fulfilled" ? line.quantity : 0);
+          const reservation = orderReservationByProduct.get(`${order.id}:${line.productId}`);
           return {
             ...line, productName, sku, deliveredQuantity,
             remainingQuantity: Math.max(0, line.quantity - deliveredQuantity),
             lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+            stockLocationId: reservation?.locationId ?? null,
+            stockLocationName: reservation?.locationName ?? null,
+            stockLocations: locations.map((location) => ({
+              ...location,
+              available: Math.max(0,
+                (onHandByProductLocation.get(`${line.productId}:${location.id}`) ?? 0)
+                - (reservedByProductLocation.get(`${line.productId}:${location.id}`) ?? 0)),
+            })),
           };
         });
       const attribution = attributionByOrder.get(order.id);
@@ -587,24 +623,39 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
   app.post("/api/sales-orders/:id/confirm", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
+    const confirmation = salesOrderConfirmationInputSchema.safeParse(req.body ?? {});
+    if (!confirmation.success) return bad(res, confirmation.error.issues[0]?.message ?? "Check the stock location choices.");
     const result = await db.transaction(async (tx) => {
       const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).for("update").limit(1);
       if (!order) return { error: "Sales order not found.", status: 404 };
       if (order.status !== "draft") return { error: "Only draft orders can be confirmed.", status: 409 };
       const [customer] = await tx.select({ status: customers.status }).from(customers).where(eq(customers.id, order.customerId)).limit(1);
       if (!customer || customer.status !== "active") return { error: "The customer is inactive and this order cannot be confirmed.", status: 409 };
-      const [mainLocation] = await tx.select({ id: inventoryLocations.id }).from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
-      if (!mainLocation) return { error: "The main stock location is not configured.", status: 409 };
       const lines = await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, id)).orderBy(asc(salesOrderLines.productId));
+      const requestedLocations = new Map(confirmation.data.locations.map(({ productId, locationId }) => [productId, locationId]));
+      if ([...requestedLocations.keys()].some((productId) => !lines.some((line) => line.productId === productId))) {
+        return { error: "A stock location choice does not match this order.", status: 400 };
+      }
+      const activeLocations = await tx.select({ id: inventoryLocations.id, name: inventoryLocations.name })
+        .from(inventoryLocations).where(eq(inventoryLocations.active, true)).orderBy(asc(inventoryLocations.name));
+      const locationByProduct = new Map<number, number>();
       for (const line of lines) {
         const [product] = await tx.select({ id: products.id, status: products.status }).from(products).where(eq(products.id, line.productId)).for("update");
         if (!product || product.status !== "active") return { error: `Product ${line.productId} is no longer active.`, status: 409 };
-        const balance = await stockBalance(tx, line.productId, mainLocation.id);
-        const available = balance.onHand - balance.reserved;
-        if (available < line.quantity) return { error: `${available} units available for product ${line.productId}; ${line.quantity} requested.`, status: 409 };
+        const stockLocations = await Promise.all(activeLocations.map(async (location) => {
+          const balance = await stockBalance(tx, line.productId, location.id);
+          return { ...location, available: balance.onHand - balance.reserved };
+        }));
+        const allocation = chooseSalesStockLocation(
+          stockLocations, line.quantity, requestedLocations.get(line.productId) ?? null,
+        );
+        if ("error" in allocation) {
+          return { error: `Product ${line.productId}: ${allocation.error}`, status: 409 };
+        }
+        locationByProduct.set(line.productId, allocation.location.id);
       }
       const reservations = await tx.insert(inventoryReservations).values(lines.map((line) => ({
-        productId: line.productId, locationId: mainLocation.id, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
+        productId: line.productId, locationId: locationByProduct.get(line.productId)!, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
         reason: `Sales order ${order.orderNumber}`, status: "active" as const,
       }))).returning();
       for (const reservation of reservations) await recordBusinessAudit(tx, {

@@ -286,6 +286,18 @@ export const salesOrderInputSchema = z.object({
   if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
 });
 
+export const salesOrderConfirmationInputSchema = z.object({
+  locations: z.array(z.object({
+    productId: positiveInteger,
+    locationId: positiveInteger.nullable(),
+  }).strict()).max(100).optional().default([]),
+}).strict().superRefine((input, context) => {
+  const productIds = input.locations.map((item) => item.productId);
+  if (new Set(productIds).size !== productIds.length) {
+    context.addIssue({ code: "custom", path: ["locations"], message: "Choose only one stock location per product." });
+  }
+});
+
 export const salesDeliveryInputSchema = z.object({
   idempotencyKey: z.string().uuid(),
   deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {

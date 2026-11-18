@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 import { PublicShopProtection, type OrderLimitStore } from "./public-shop-protection";
@@ -195,6 +195,19 @@ test("validates customer contacts and ZMW sales order lines", () => {
   assert.equal(salesOrderInputSchema.safeParse(order).success, true);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPriceZmw: "-2" }] }).success, false);
   assert.equal(salesOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
+});
+
+test("validates optional per-product stock locations when confirming an order", () => {
+  assert.deepEqual(salesOrderConfirmationInputSchema.parse({
+    locations: [{ productId: 2, locationId: 3 }, { productId: 4, locationId: null }],
+  }), { locations: [{ productId: 2, locationId: 3 }, { productId: 4, locationId: null }] });
+  assert.deepEqual(salesOrderConfirmationInputSchema.parse({}), { locations: [] });
+  assert.equal(salesOrderConfirmationInputSchema.safeParse({
+    locations: [{ productId: 2, locationId: 3 }, { productId: 2, locationId: 4 }],
+  }).success, false);
+  assert.equal(salesOrderConfirmationInputSchema.safeParse({
+    locations: [{ productId: 2, locationId: 0 }],
+  }).success, false);
 });
 
 test("validates delivery dates, positive quantities, and unique order lines", () => {
