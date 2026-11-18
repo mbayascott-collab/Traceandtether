@@ -477,6 +477,11 @@ export async function fetchSalesOrders(): Promise<SalesOrder[]> {
 export async function fetchPublicShopOrderAttemptSummary(): Promise<{ accepted: number; blocked: number }> {
   return (await request<{ summary: { accepted: number; blocked: number } }>("/api/shop/order-attempt-summary")).summary;
 }
+export type PublicShopAttemptDay = { day: string; accepted: number; blocked: number };
+export async function fetchPublicShopOrderAttemptDays(from: string, to: string): Promise<PublicShopAttemptDay[]> {
+  const params = new URLSearchParams({ from, to });
+  return (await request<{ days: PublicShopAttemptDay[] }>(`/api/shop/order-attempt-days?${params}`)).days;
+}
 export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
   return (await request<{ quotes: CustomerQuote[] }>("/api/customer-quotes")).quotes;
 }

@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
-  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
+  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
 type Mode = "customers" | "orders";
@@ -13,6 +13,12 @@ const companyName = "Trace and Tether Craft Studio Limited";
 const companyAddress = "164 Mpundu Street, Chelston Extension, Lusaka, Zambia";
 const companyEmail = "traceandtether@gmail.com";
 const companyPhone = "+260-0977-101-967";
+function publicShopDateOffset(daysAgo: number) {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+  return date.toISOString().slice(0, 10);
+}
 function suggestedStockLocation(line: SalesOrder["lines"][number]) {
   return [...line.stockLocations]
     .filter((location) => location.available >= line.quantity)
@@ -28,6 +34,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [inventoryLocations, setInventoryLocations] = useState<InventoryLocation[]>([]);
   const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
   const [shopAttemptSummary, setShopAttemptSummary] = useState<{ accepted: number; blocked: number } | null>(null);
+  const [shopAttemptFrom, setShopAttemptFrom] = useState(() => publicShopDateOffset(29));
+  const [shopAttemptTo, setShopAttemptTo] = useState(() => publicShopDateOffset(0));
+  const [shopAttemptDays, setShopAttemptDays] = useState<PublicShopAttemptDay[] | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
@@ -60,6 +69,18 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load sales records."); });
     return () => { alive = false; };
   }, [reload, mode]);
+  useEffect(() => {
+    if (mode !== "orders") return;
+    if (!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo) {
+      setShopAttemptDays(null);
+      return;
+    }
+    let alive = true;
+    fetchPublicShopOrderAttemptDays(shopAttemptFrom, shopAttemptTo)
+      .then((days) => { if (alive) setShopAttemptDays(days); })
+      .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load public shop request activity."); });
+    return () => { alive = false; };
+  }, [mode, shopAttemptFrom, shopAttemptTo, reload]);
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); const form = event.currentTarget; setError(""); setNotice("");
     try { await action(new FormData(form)); form.reset(); setLines([emptyLine()]); setEditingCustomer(null); setNotice("Saved."); setReload((n) => n + 1); }
@@ -212,6 +233,10 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     const value = query.trim().toLowerCase();
     return !value || customer.name.toLowerCase().includes(value) || customerCode(customer.id).toLowerCase().includes(value);
   }
+  const shopAttemptRangeTotals = (shopAttemptDays ?? []).reduce(
+    (totals, day) => ({ accepted: totals.accepted + day.accepted, blocked: totals.blocked + day.blocked }),
+    { accepted: 0, blocked: 0 },
+  );
   const filteredCustomers = customers.filter((customer) => matchesCustomer(customer, customerSearch));
   const title = mode === "customers" ? "Customers" : "Sales orders";
   return <section className="supplier-workspace">
@@ -302,7 +327,31 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           <article className="metric-card"><div className="metric-top"><span>Accepted requests</span></div><strong className="metric-value">{shopAttemptSummary?.accepted ?? "—"}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Blocked requests</span></div><strong className="metric-value">{shopAttemptSummary?.blocked ?? "—"}</strong></article>
         </div>
-        <p className="report-footnote">Only totals are saved. Rejected visitors’ contact details are not collected for this summary.</p>
+        <p className="report-footnote">Only aggregate totals are saved; visitor contact details and IP addresses are not stored in this report. Daily history starts with this tracking update, while lifetime totals include earlier requests.</p>
+        <h3>Daily request activity</h3>
+        <p className="report-footnote">Choose a date range to see accepted and blocked requests per day. Dates use UTC.</p>
+        <div className="form-grid">
+          <label>From date<input type="date" value={shopAttemptFrom} max={shopAttemptTo || undefined} onChange={(event) => setShopAttemptFrom(event.target.value)} /></label>
+          <label>Through date<input type="date" value={shopAttemptTo} min={shopAttemptFrom || undefined} onChange={(event) => setShopAttemptTo(event.target.value)} /></label>
+        </div>
+        {shopAttemptDays && <div className="metric-grid">
+          <article className="metric-card"><div className="metric-top"><span>Accepted in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.accepted}</strong></article>
+          <article className="metric-card"><div className="metric-top"><span>Blocked in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.blocked}</strong></article>
+        </div>}
+        {!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo
+          ? <p role="alert">Choose a valid range with the start date on or before the end date.</p>
+          : shopAttemptDays === null
+            ? <p className="report-footnote">Loading daily requests…</p>
+            : <div className="data-table-wrap">
+              <table>
+                <thead><tr><th>Date (UTC)</th><th>Accepted</th><th>Blocked</th></tr></thead>
+                <tbody>{shopAttemptDays.map((day) => <tr key={day.day}>
+                  <td>{new Date(`${day.day}T00:00:00.000Z`).toLocaleDateString("en-ZM", { timeZone: "UTC", dateStyle: "medium" })}</td>
+                  <td>{day.accepted}</td>
+                  <td>{day.blocked}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>}
       </section>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createSalesOrder({
         customerId: Number(d.get("customerId")), deliveryAddress: String(d.get("deliveryAddress") || "") || null, notes: String(d.get("notes") || "") || null,

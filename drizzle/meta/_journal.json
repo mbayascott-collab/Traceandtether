@@ -351,6 +351,13 @@
       "when": 1795033646603,
       "tag": "0049_public_shop_challenges",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1795033963235,
+      "tag": "0050_public_shop_daily_attempt_counts",
+      "breakpoints": true
     }
   ]
 }

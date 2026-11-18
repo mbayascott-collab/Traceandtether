@@ -1044,3 +1044,16 @@ export const publicShopOrderAttemptCounts = pgTable(
     check("public_shop_order_attempt_counts_blocked_nonnegative", sql`${table.blockedCount} >= 0`),
   ],
 );
+
+export const publicShopOrderAttemptDailyCounts = pgTable(
+  "public_shop_order_attempt_daily_counts",
+  {
+    day: date("day", { mode: "string" }).primaryKey(),
+    acceptedCount: integer("accepted_count").notNull().default(0),
+    blockedCount: integer("blocked_count").notNull().default(0),
+  },
+  (table) => [
+    check("public_shop_order_attempt_daily_counts_accepted_nonnegative", sql`${table.acceptedCount} >= 0`),
+    check("public_shop_order_attempt_daily_counts_blocked_nonnegative", sql`${table.blockedCount} >= 0`),
+  ],
+);

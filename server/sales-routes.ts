@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, sql, sum } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import {
@@ -7,12 +7,14 @@ import {
 } from "./product-validation";
 import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
-  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, publicShopOrderAttemptDailyCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, cents as accountingCents, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
-import { publicShopAttemptSummary, recordPublicShopAttempt } from "./public-shop-analytics";
+import {
+  completePublicShopAttemptDays, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
+} from "./public-shop-analytics";
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
@@ -354,6 +356,21 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       blockedCount: publicShopOrderAttemptCounts.blockedCount,
     }).from(publicShopOrderAttemptCounts).limit(1);
     res.json({ summary: publicShopAttemptSummary(counts) });
+  });
+
+  app.get("/api/shop/order-attempt-days", owner, async (req, res) => {
+    const { from, to } = req.query;
+    if (typeof from !== "string" || typeof to !== "string" || !isPublicShopAttemptDateRange(from, to)) {
+      return res.status(400).json({ error: "Choose a valid date range with the start date on or before the end date." });
+    }
+    const rows = await db.select({
+      day: publicShopOrderAttemptDailyCounts.day,
+      accepted: publicShopOrderAttemptDailyCounts.acceptedCount,
+      blocked: publicShopOrderAttemptDailyCounts.blockedCount,
+    }).from(publicShopOrderAttemptDailyCounts)
+      .where(and(gte(publicShopOrderAttemptDailyCounts.day, from), lte(publicShopOrderAttemptDailyCounts.day, to)))
+      .orderBy(asc(publicShopOrderAttemptDailyCounts.day));
+    res.json({ days: completePublicShopAttemptDays(from, to, rows) });
   });
 
   app.get("/api/customers", owner, async (_req, res) => {
