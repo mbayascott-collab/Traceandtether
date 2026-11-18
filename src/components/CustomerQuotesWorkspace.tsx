@@ -90,6 +90,7 @@ export default function CustomerQuotesWorkspace() {
       <label>Valid until<input name="validUntil" type="date" defaultValue={editing?.validUntil ?? ""} /></label>
       <label>Delivery address<input name="deliveryAddress" defaultValue={editing?.deliveryAddress ?? ""} /></label>
       <label>Status<select name="status" defaultValue={editing?.status ?? "draft"}><option value="draft">Draft</option><option value="sent">Sent outside the app</option><option value="accepted">Accepted</option><option value="rejected">Rejected</option></select></label>
+      {editing && <p className="report-footnote field-full">Email delivery is tracked separately from quote status. The email provider is not connected yet.</p>}
       {lines.map((line, i) => <div className="form-grid customer-quote-line" key={i}>
         <label>Product<select required value={line.productId} onChange={(e) => {
           const product = products.find((p) => p.id === Number(e.target.value));
@@ -102,11 +103,19 @@ export default function CustomerQuotesWorkspace() {
       <button type="button" className="button button-secondary" onClick={() => setLines((current) => [...current, blankLine()])}>Add product</button>
       <label className="field-full">Notes<textarea name="notes" rows={2} maxLength={5000} defaultValue={editing?.notes ?? ""} /></label>
       <div><button className="button button-primary">{editing ? "Save changes" : "Save quote"}</button>{editing && <button type="button" className="button button-secondary" onClick={clearForm}>Cancel edit</button>}</div>
-      <p className="report-footnote">The quote is saved in ZMW. Marking it sent does not send an email. Converting an accepted quote creates a draft order; stock is reserved only when you confirm that order.</p>
+      <p className="report-footnote">The quote is saved in ZMW. “Sent outside the app” does not send an email. Email sending is inactive until an email provider is connected. Converting an accepted quote creates a draft order; stock is reserved only when you confirm that order.</p>
     </form>
-    <div className="panel data-table-wrap"><table><thead><tr><th>Quote</th><th>Customer</th><th>Items</th><th>Total</th><th>Valid until</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-      {quotes.map((quote) => <tr key={quote.id}><td>{quote.quoteNumber}</td><td>{quote.customerName}</td><td>{quote.lines.map((line) => `${line.productName} × ${line.quantity}`).join(", ")}</td><td>{money(quote.totalZmw)}</td><td>{quote.validUntil || "—"}</td><td>{quote.status}</td><td>
+    <div className="panel data-table-wrap"><table><thead><tr><th>Quote</th><th>Customer</th><th>Saved email</th><th>Items</th><th>Total</th><th>Valid until</th><th>Status</th><th>Email result</th><th>Actions</th></tr></thead><tbody>
+      {quotes.map((quote) => <tr key={quote.id}><td>{quote.quoteNumber}</td><td>{quote.customerName}</td><td>{quote.customerEmail || "No saved email"}</td><td>{quote.lines.map((line) => `${line.productName} × ${line.quantity}`).join(", ")}</td><td>{money(quote.totalZmw)}</td><td>{quote.validUntil || "—"}</td><td>{quote.status}</td><td>
+        {quote.emailSendStatus === "sent"
+          ? `Sent${quote.emailSentAt ? ` · ${new Date(quote.emailSentAt).toLocaleString("en-ZM")}` : ""}`
+          : quote.emailSendStatus === "failed"
+            ? `Failed${quote.emailAttemptedAt ? ` · ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
+            : "Not sent"}
+      </td><td>
         {(quote.status === "draft" || quote.status === "sent") && <button className="button button-secondary button-small" onClick={() => editQuote(quote)}>Edit</button>}
+        <button className="button button-secondary button-small" type="button" disabled title={!quote.customerEmail ? "Add a saved customer email before sending." : "Connect an email provider to enable sending."}>Email quote</button>
+        <span className="report-footnote">{!quote.customerEmail ? "Add a saved customer email first." : "Email provider not connected."}</span>
         {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>Convert to order</button>}
         {quote.status !== "converted" && <button className="button button-danger button-small" onClick={() => removeQuote(quote)}>Delete</button>}
         {quote.status === "converted" && <span>{quote.salesOrderNumber || "Order created"}</span>}

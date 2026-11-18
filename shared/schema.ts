@@ -402,6 +402,10 @@ export const customerQuotes = pgTable(
     validUntil: date("valid_until"),
     deliveryAddress: text("delivery_address"),
     notes: text("notes"),
+    emailSendStatus: varchar("email_send_status", { length: 16 }).notNull().default("not_sent"),
+    emailAttemptedAt: timestamp("email_attempted_at", { withTimezone: true }),
+    emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
+    emailSendError: text("email_send_error"),
     salesOrderId: integer("sales_order_id").references(() => salesOrders.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -411,6 +415,7 @@ export const customerQuotes = pgTable(
     uniqueIndex("customer_quotes_sales_order_unique").on(table.salesOrderId),
     index("customer_quotes_customer_idx").on(table.customerId),
     index("customer_quotes_status_idx").on(table.status),
+    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sent', 'failed')`),
     check("customer_quotes_conversion_state", sql`(${table.status} = 'converted') = (${table.salesOrderId} is not null)`),
   ],
 );

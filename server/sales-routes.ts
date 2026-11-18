@@ -285,18 +285,18 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
   app.get("/api/customer-quotes", owner, async (_req, res) => {
     const [quotes, lines] = await Promise.all([
-      db.select({ quote: customerQuotes, customerName: customers.name, salesOrderNumber: salesOrders.orderNumber })
+      db.select({ quote: customerQuotes, customerName: customers.name, customerEmail: customers.email, salesOrderNumber: salesOrders.orderNumber })
         .from(customerQuotes).innerJoin(customers, eq(customerQuotes.customerId, customers.id))
         .leftJoin(salesOrders, eq(customerQuotes.salesOrderId, salesOrders.id)).orderBy(desc(customerQuotes.createdAt)),
       db.select({ line: customerQuoteLines, productName: products.name, sku: products.sku })
         .from(customerQuoteLines).innerJoin(products, eq(customerQuoteLines.productId, products.id)),
     ]);
-    res.json({ quotes: quotes.map(({ quote, customerName, salesOrderNumber }) => {
+    res.json({ quotes: quotes.map(({ quote, customerName, customerEmail, salesOrderNumber }) => {
       const quoteLines = lines.filter(({ line }) => line.customerQuoteId === quote.id).map(({ line, productName, sku }) => ({
         id: line.id, productId: line.productId, productName, sku, quantity: line.quantity,
         unitPriceZmw: line.unitPriceZmw, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
       }));
-      return { ...quote, customerName, salesOrderNumber, lines: quoteLines, totalZmw: money(quoteLines.reduce((sum, line) => sum + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
+      return { ...quote, customerName, customerEmail, salesOrderNumber, lines: quoteLines, totalZmw: money(quoteLines.reduce((sum, line) => sum + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
     }) });
   });
   app.post("/api/customer-quotes", owner, async (req, res) => {

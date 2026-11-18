@@ -176,6 +176,13 @@
       "when": 1794990889742,
       "tag": "0024_marketing_customer_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1794991856368,
+      "tag": "0025_customer_quote_email_tracking",
+      "breakpoints": true
     }
   ]
 }
