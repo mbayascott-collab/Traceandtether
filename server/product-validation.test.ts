@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, isDuplicateShipmentImportExpense, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, isDuplicateShipmentImportExpense, openingStockCorrectionInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 import { PublicShopProtection, type OrderLimitStore } from "./public-shop-protection";
@@ -219,6 +219,15 @@ test("validates opening stock quantity and positive ZMW average cost", () => {
   assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "0" }).success, false);
   assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "-1" }).success, false);
   assert.equal(openingStockInputSchema.safeParse({ ...opening, quantity: 1_000_000, unitCostZmw: "9999999999.99" }).success, false);
+});
+
+test("requires a reason and positive quantity and value for an opening-stock correction", () => {
+  const correction = { quantity: 5, unitCostZmw: "18.25", effectiveAt: "2026-11-18", reason: "Corrected count after recount", reference: "COUNT-2" };
+  assert.equal(openingStockCorrectionInputSchema.safeParse(correction).success, true);
+  assert.equal(openingStockCorrectionInputSchema.safeParse({ ...correction, quantity: 0 }).success, false);
+  assert.equal(openingStockCorrectionInputSchema.safeParse({ ...correction, unitCostZmw: "0" }).success, false);
+  assert.equal(openingStockCorrectionInputSchema.safeParse({ ...correction, reason: "  " }).success, false);
+  assert.equal(openingStockCorrectionInputSchema.safeParse({ ...correction, effectiveAt: "2026-02-30" }).success, false);
 });
 
 test("validates customer contacts and ZMW sales order lines", () => {

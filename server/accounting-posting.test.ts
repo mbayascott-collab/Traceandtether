@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
-import { journalEntries, paymentStatementLines } from "../shared/schema";
+import { inventoryMovements, journalEntries, paymentStatementLines } from "../shared/schema";
 import {
   allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
@@ -23,6 +23,14 @@ test("journal source keys are unique to prevent concurrent duplicate opening ent
   );
   assert.equal(sourceKeyIndex?.config.unique, true);
   assert.equal(sourceKeyIndex?.config.columns.length, 1);
+});
+
+test("opening-stock corrections are linked at most once per ledger movement", () => {
+  const correctionIndex = getTableConfig(inventoryMovements).indexes.find(
+    ({ config }) => config.name === "inventory_movements_correction_of_unique",
+  );
+  assert.equal(correctionIndex?.config.unique, true);
+  assert.equal((correctionIndex?.config.columns[0] as { name?: string } | undefined)?.name, "correction_of_movement_id");
 });
 
 test("a payment can be matched to only one statement line", () => {
@@ -168,6 +176,12 @@ test("opening stock debits product inventory and credits opening balance equity"
   assert.deepEqual(lines.map((line) => [line.accountKey, line.productId, line.debitZmw, line.creditZmw]), [
     ["inventory", 42, "102.00", undefined],
     ["opening_balance_equity", undefined, undefined, "102.00"],
+  ]);
+  const reversal = reversePostingLines(lines);
+  assert.equal(journalLinesAreBalanced(reversal), true);
+  assert.deepEqual(reversal.map((line) => [line.accountKey, line.productId, line.debitZmw, line.creditZmw]), [
+    ["inventory", 42, "0.00", "102.00"],
+    ["opening_balance_equity", null, "102.00", "0.00"],
   ]);
 });
 

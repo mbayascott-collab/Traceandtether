@@ -2,6 +2,7 @@ import {
   check,
   date,
   boolean,
+  type AnyPgColumn,
   customType,
   index,
   integer,
@@ -79,7 +80,7 @@ export const supplierQuoteStatus = pgEnum("supplier_quote_status", ["received", 
 export const purchaseOrderStatus = pgEnum("purchase_order_status", ["ordered", "partially_received", "received", "cancelled"]);
 export const shipmentStatus = pgEnum("shipment_status", ["in_transit", "partially_received", "received", "cancelled"]);
 export const allocationBasis = pgEnum("allocation_basis", ["value", "quantity"]);
-export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment", "opening_stock", "stock_return", "stock_damage", "stock_transfer_in", "stock_transfer_out"]);
+export const inventoryMovementKind = pgEnum("inventory_movement_kind", ["stock_receipt", "adjustment", "reservation_fulfillment", "opening_stock", "opening_stock_reversal", "stock_return", "stock_damage", "stock_transfer_in", "stock_transfer_out"]);
 export const inventoryReservationStatus = pgEnum("inventory_reservation_status", ["active", "released", "fulfilled"]);
 export const inventoryLocations = pgTable(
   "inventory_locations",
@@ -614,6 +615,7 @@ export const inventoryMovements = pgTable(
     id: serial("id").primaryKey(),
     productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
     locationId: integer("location_id").references(() => inventoryLocations.id, { onDelete: "restrict" }),
+    correctionOfMovementId: integer("correction_of_movement_id").references((): AnyPgColumn => inventoryMovements.id, { onDelete: "restrict" }),
     kind: inventoryMovementKind("kind").notNull(),
     quantityDelta: integer("quantity_delta").notNull(),
     reason: varchar("reason", { length: 500 }).notNull(),
@@ -629,6 +631,7 @@ export const inventoryMovements = pgTable(
   (table) => [
     index("inventory_movements_product_created_idx").on(table.productId, table.createdAt),
     index("inventory_movements_sales_delivery_line_idx").on(table.salesDeliveryLineId),
+    uniqueIndex("inventory_movements_correction_of_unique").on(table.correctionOfMovementId),
     uniqueIndex("inventory_movements_source_key_unique").on(table.sourceKey),
     check("inventory_movements_delta_nonzero", sql`${table.quantityDelta} <> 0`),
     check("inventory_movements_reason_nonempty", sql`length(trim(${table.reason})) > 0`),

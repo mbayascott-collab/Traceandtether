@@ -5,7 +5,7 @@ import type { Express, RequestHandler } from "express";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 import {
-  inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema,
+  inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockCorrectionInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
   inventoryLocations, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
@@ -16,7 +16,7 @@ import { recordBusinessAudit } from "./audit";
 import { inspectOpeningStockEvidence } from "./opening-stock-evidence";
 import {
   accountBalance, allocateInventoryValueByLocationCents, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
-  journalLinesAreBalanced, postJournal, weightedAverageUnitCostCents,
+  journalLinesAreBalanced, postJournal, reverseJournalEntry, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
@@ -125,6 +125,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/inventory/movements", owner, async (_req, res) => {
     const rows = await db.select({
       id: inventoryMovements.id, productId: inventoryMovements.productId, locationId: inventoryMovements.locationId,
+      correctionOfMovementId: inventoryMovements.correctionOfMovementId,
       kind: inventoryMovements.kind, quantityDelta: inventoryMovements.quantityDelta, reason: inventoryMovements.reason,
       reference: inventoryMovements.reference, sourceKey: inventoryMovements.sourceKey, reservationId: inventoryMovements.reservationId,
       salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
@@ -538,5 +539,96 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.status(201).json({ movement: result.movement });
+  });
+
+  app.post("/api/inventory/opening-stock/:id/correct", owner, async (req, res) => {
+    const id = getId(req.params.id);
+    if (!id) return bad(res, "Invalid opening-stock entry.");
+    const parsed = openingStockCorrectionInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the corrected count details.");
+
+    const result = await db.transaction(async (tx) => {
+      const [original] = await tx.select({
+        id: inventoryMovements.id,
+        productId: inventoryMovements.productId,
+        locationId: inventoryMovements.locationId,
+        quantityDelta: inventoryMovements.quantityDelta,
+        reason: inventoryMovements.reason,
+        reference: inventoryMovements.reference,
+        sourceKey: inventoryMovements.sourceKey,
+        kind: inventoryMovements.kind,
+      }).from(inventoryMovements).where(eq(inventoryMovements.id, id)).for("update").limit(1);
+      if (!original || original.kind !== "opening_stock" || original.quantityDelta <= 0 || !original.sourceKey) {
+        return { error: "This is not a correctable opening-stock entry.", status: 404 };
+      }
+      const [existingCorrection] = await tx.select({ id: inventoryMovements.id })
+        .from(inventoryMovements).where(eq(inventoryMovements.correctionOfMovementId, original.id)).limit(1);
+      if (existingCorrection) {
+        return { error: "This opening-stock entry has already been corrected. Correct its latest replacement instead.", status: 409 };
+      }
+
+      const [product] = await tx.select({ id: products.id, name: products.name })
+        .from(products).where(eq(products.id, original.productId)).for("update").limit(1);
+      if (!product) return { error: "Product not found.", status: 404 };
+      const current = await balance(tx, original.productId, original.locationId ?? undefined);
+      const correctedOnHand = current.onHand - original.quantityDelta + parsed.data.quantity;
+      if (correctedOnHand < current.reserved) {
+        return { error: "The corrected count would put stock below quantities already reserved.", status: 409 };
+      }
+
+      const effectiveAt = parsed.data.effectiveAt ?? new Date().toISOString().slice(0, 10);
+      const memo = `Opening stock correction for movement #${original.id}: ${parsed.data.reason}`.slice(0, 500);
+      const reversal = (await tx.insert(inventoryMovements).values({
+        productId: original.productId,
+        locationId: original.locationId,
+        correctionOfMovementId: original.id,
+        kind: "opening_stock_reversal",
+        quantityDelta: -original.quantityDelta,
+        reason: parsed.data.reason,
+        reference: parsed.data.reference ?? original.reference,
+        sourceKey: `opening-stock-reversal:${original.id}`,
+      }).returning({ id: inventoryMovements.id }))[0]!;
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: reversal.id,
+        recordLabel: `Opening stock reversal · ${product.name}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", "correctionOfMovementId"],
+      });
+      await reverseJournalEntry(tx, {
+        originalSourceKey: original.sourceKey,
+        sourceKey: `inventory-movement-${reversal.id}`,
+        sourceType: "opening_stock_reversal",
+        sourceId: reversal.id,
+        memo,
+        entryDate: effectiveAt,
+      });
+
+      const replacement = (await tx.insert(inventoryMovements).values({
+        productId: original.productId,
+        locationId: original.locationId,
+        correctionOfMovementId: reversal.id,
+        kind: "opening_stock",
+        quantityDelta: parsed.data.quantity,
+        reason: `Corrected opening count: ${parsed.data.reason}`.slice(0, 500),
+        reference: parsed.data.reference,
+        sourceKey: `opening-stock-correction:${reversal.id}`,
+      }).returning({ id: inventoryMovements.id }))[0]!;
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: replacement.id,
+        recordLabel: `Corrected opening stock · ${product.name}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", "correctionOfMovementId"],
+      });
+      const totalValue = cents(parsed.data.unitCostZmw) * BigInt(parsed.data.quantity);
+      const lines = buildOpeningStockLines(original.productId, formatCents(totalValue));
+      if (!journalLinesAreBalanced(lines)) throw new Error("Corrected opening stock journal is not balanced.");
+      await postJournal(tx, {
+        sourceKey: `opening-stock-correction:${reversal.id}`,
+        sourceType: "opening_stock", sourceId: replacement.id, memo, entryDate: effectiveAt, lines,
+      });
+      return { movement: replacement, reversal };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    return res.status(201).json(result);
   });
 }

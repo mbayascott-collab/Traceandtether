@@ -1,0 +1,4 @@
+ALTER TYPE "public"."inventory_movement_kind" ADD VALUE 'opening_stock_reversal' BEFORE 'stock_return';--> statement-breakpoint
+ALTER TABLE "inventory_movements" ADD COLUMN "correction_of_movement_id" integer;--> statement-breakpoint
+ALTER TABLE "inventory_movements" ADD CONSTRAINT "inventory_movements_correction_of_movement_id_inventory_movements_id_fk" FOREIGN KEY ("correction_of_movement_id") REFERENCES "public"."inventory_movements"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "inventory_movements_correction_of_unique" ON "inventory_movements" USING btree ("correction_of_movement_id");

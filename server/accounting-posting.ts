@@ -586,6 +586,44 @@ export function reversePostingLines(lines: PostingLine[]): PostingLine[] {
   }));
 }
 
+export async function reverseJournalEntry(tx: any, input: {
+  originalSourceKey: string;
+  sourceKey: string;
+  sourceType: string;
+  sourceId: number;
+  memo: string;
+  entryDate: string;
+}) {
+  const [original] = await tx.select({
+    id: journalEntries.id,
+  }).from(journalEntries).where(eq(journalEntries.sourceKey, input.originalSourceKey)).for("update").limit(1);
+  if (!original) throw new Error("The opening-stock journal entry could not be found.");
+
+  const originalLines = await tx.select({
+    accountKey: accountingAccounts.systemKey,
+    productId: journalLines.productId,
+    debitZmw: journalLines.debitZmw,
+    creditZmw: journalLines.creditZmw,
+    description: journalLines.description,
+  }).from(journalLines)
+    .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+    .where(eq(journalLines.journalEntryId, original.id));
+  if (!originalLines.length || originalLines.some((line: any) => !line.accountKey)) {
+    throw new Error("The opening-stock journal lines could not be reversed safely.");
+  }
+
+  return postJournal(tx, {
+    ...input,
+    lines: reversePostingLines(originalLines.map((line: any) => ({
+      accountKey: line.accountKey,
+      productId: line.productId,
+      debitZmw: line.debitZmw,
+      creditZmw: line.creditZmw,
+      description: line.description,
+    }))),
+  });
+}
+
 export async function ensureAccountingAccounts(tx: any) {
   await tx.insert(accountingAccounts).values(accounts).onConflictDoNothing();
   const rows = await tx.select().from(accountingAccounts);

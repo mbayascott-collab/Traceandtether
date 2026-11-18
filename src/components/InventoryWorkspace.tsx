@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Search } from "lucide-react";
 import {
-  createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
+  correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
   recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryMovement, type InventoryReceipt,
   type InventoryReservation,
@@ -29,6 +29,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [search, setSearch] = useState("");
   const [openingQuantity, setOpeningQuantity] = useState("");
   const [openingUnitCost, setOpeningUnitCost] = useState("");
+  const [correctingMovement, setCorrectingMovement] = useState<InventoryMovement | null>(null);
   const heading = mode === "overview" ? "Inventory" : mode === "receipts" ? "Stock receipts" : mode === "reservations" ? "Reservations" : "Stock adjustments";
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const filteredInventory = inventory.filter((product) =>
@@ -80,7 +81,6 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>
       </div>
       <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>By location · on hand / available / value</th><th>Average cost</th><th>Stock value</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.locations.map((l) => `${l.name}: ${l.onHand} / ${l.available} / ${money(l.stockValueZmw)}`).join(" · ") || "Main: 0"}</td><td>{money(p.averageUnitCostZmw)}</td><td>{money(p.stockValueZmw)}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={9}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
-      <MovementTable movements={movements} />
     </>}
     {mode === "receipts" && <div className="panel data-table-wrap"><p>Post received shipment quantities into stock. Posting is incremental and cannot be duplicated.</p><table><thead><tr><th>Order / shipment</th><th>Supplier</th><th>Product</th><th>Received</th><th>Already in stock</th><th>To post</th><th>Location</th><th /></tr></thead><tbody>{receipts.map((r) => <tr key={r.id}><td>{r.orderNumber} · {r.shipmentReference || "shipment"}</td><td>{r.supplierName}</td><td>{r.productName} · {r.sku}</td><td>{r.quantityReceived}</td><td>{r.quantityStocked}</td><td>{r.quantityToPost}</td><td><select aria-label={`Receiving location for ${r.productName}`} value={receiptLocations[r.id] ?? ""} onChange={(e) => setReceiptLocations((old) => ({ ...old, [r.id]: Number(e.target.value) }))}><option value="">Choose location</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></td><td><button className="button button-primary" disabled={!receiptLocations[r.id]} onClick={() => run(() => postInventoryReceipt(r.id, receiptLocations[r.id]))}>Post receipt</button></td></tr>)}{!receipts.length && <tr><td colSpan={8}>No received shipment quantities are waiting to be posted.</td></tr>}</tbody></table></div>}
     {mode === "reservations" && <>
@@ -158,11 +158,44 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <p className="report-footnote field-full">Optional: attach one PDF or photo, up to 5 MB. The file is saved with the opening entry and cannot be replaced or removed.</p>
         <button className="button button-primary">Record opening stock</button>
       </form>
-      <MovementTable movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock")} />
+      {correctingMovement && <form className="panel form-grid" onSubmit={(event) => submit(event, async (d) => {
+        await correctOpeningStock(correctingMovement.id, {
+          quantity: Number(d.get("quantity")),
+          unitCostZmw: String(d.get("unitCostZmw")),
+          effectiveAt: String(d.get("effectiveAt")),
+          reason: String(d.get("reason")).trim(),
+          reference: String(d.get("reference") || "") || null,
+        });
+        setCorrectingMovement(null);
+      })}>
+        <h2>Correct opening count · {correctingMovement.productName} at {correctingMovement.locationName || "Unassigned"}</h2>
+        <p className="report-footnote field-full">The original count will remain in history. The system will post a reasoned reversal and a linked replacement count. Existing reservations cannot be reduced below available stock.</p>
+        <label>Correct quantity<input name="quantity" type="number" min="1" max="1000000" step="1" defaultValue={correctingMovement.quantityDelta} required /></label>
+        <label>Correct average cost per unit (ZMW)<input name="unitCostZmw" type="number" min="0.01" step="0.01" required /></label>
+        <label>Correction date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+        <label>Reason for correction<input name="reason" minLength={3} maxLength={500} required /></label>
+        <label>Reference<input name="reference" maxLength={120} defaultValue={correctingMovement.reference ?? ""} /></label>
+        <button className="button button-primary">Reverse and replace count</button>
+        <button type="button" className="button button-secondary" onClick={() => setCorrectingMovement(null)}>Cancel</button>
+      </form>}
+      <MovementTable
+        movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock" || m.kind === "opening_stock_reversal")}
+        onCorrect={setCorrectingMovement}
+      />
     </>}
   </section>;
 }
 
-function MovementTable({ movements }: { movements: InventoryMovement[] }) {
-  return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{m.reference || "—"}</td><td>{m.evidenceFileName ? <a href={`/api/inventory/movements/${m.id}/opening-evidence`} target="_blank" rel="noreferrer">{m.evidenceFileName}</a> : "—"}</td></tr>)}{!movements.length && <tr><td colSpan={8}>No stock movements yet.</td></tr>}</tbody></table></div>;
+function MovementTable({ movements, onCorrect }: { movements: InventoryMovement[]; onCorrect: (movement: InventoryMovement) => void }) {
+  const correctedBy = new Map(movements.filter((movement) => movement.correctionOfMovementId !== null)
+    .map((movement) => [movement.correctionOfMovementId!, movement]));
+  return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => {
+    const child = correctedBy.get(m.id);
+    const correctionLink = m.kind === "opening_stock_reversal"
+      ? `Reverses #${m.correctionOfMovementId}`
+      : m.correctionOfMovementId !== null
+        ? `Replaces reversal #${m.correctionOfMovementId}`
+        : child ? `Corrected by #${child.id}` : "—";
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFileName ? <a href={`/api/inventory/movements/${m.id}/opening-evidence`} target="_blank" rel="noreferrer">{m.evidenceFileName}</a> : "—"}</td></tr>;
+  })}{!movements.length && <tr><td colSpan={9}>No stock movements yet.</td></tr>}</tbody></table></div>;
 }
