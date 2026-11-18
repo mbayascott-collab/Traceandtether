@@ -608,10 +608,12 @@ export const inventoryMovements = pgTable(
     evidenceMimeType: varchar("evidence_mime_type", { length: 80 }),
     evidenceData: bytea("evidence_data"),
     reservationId: integer("reservation_id").references(() => inventoryReservations.id, { onDelete: "restrict" }),
+    salesDeliveryLineId: integer("sales_delivery_line_id").references(() => salesDeliveryLines.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("inventory_movements_product_created_idx").on(table.productId, table.createdAt),
+    index("inventory_movements_sales_delivery_line_idx").on(table.salesDeliveryLineId),
     uniqueIndex("inventory_movements_source_key_unique").on(table.sourceKey),
     check("inventory_movements_delta_nonzero", sql`${table.quantityDelta} <> 0`),
     check("inventory_movements_reason_nonempty", sql`length(trim(${table.reason})) > 0`),

@@ -1,0 +1,3 @@
+ALTER TABLE "inventory_movements" ADD COLUMN "sales_delivery_line_id" integer;--> statement-breakpoint
+ALTER TABLE "inventory_movements" ADD CONSTRAINT "inventory_movements_sales_delivery_line_id_sales_delivery_lines_id_fk" FOREIGN KEY ("sales_delivery_line_id") REFERENCES "public"."sales_delivery_lines"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "inventory_movements_sales_delivery_line_idx" ON "inventory_movements" USING btree ("sales_delivery_line_id");

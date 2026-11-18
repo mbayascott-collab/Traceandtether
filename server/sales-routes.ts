@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, sum } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import {
@@ -7,10 +7,10 @@ import {
 } from "./product-validation";
 import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
-  customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
-import { accountBalance, formatCents, postJournal } from "./accounting-posting";
+import { accountBalance, cents as accountingCents, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
 import { publicShopAttemptSummary, recordPublicShopAttempt } from "./public-shop-analytics";
 import { recordBusinessAudit, type AuditActor } from "./audit";
@@ -30,6 +30,19 @@ function cents(value: string) {
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
 }
 function money(value: bigint) { return `${value / 100n}.${String(value % 100n).padStart(2, "0")}`; }
+function roundedDivide(numerator: bigint, denominator: bigint) {
+  return (numerator + denominator / 2n) / denominator;
+}
+const returnInputSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(80),
+  locationId: z.number().int().positive(),
+  quantity: z.number().int().positive().max(1_000_000),
+  returnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }, "Enter a valid return date."),
+  reason: z.string().trim().min(3).max(500),
+}).strict();
 async function stockBalance(tx: any, productId: number, locationId?: number) {
   const [location] = locationId ? [{ id: locationId }] : await tx.select({ id: inventoryLocations.id }).from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
   const conditions = location ? and(eq(inventoryMovements.productId, productId), eq(inventoryMovements.locationId, location.id)) : eq(inventoryMovements.productId, productId);
@@ -376,7 +389,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows, receiptRows, locations, movementBalances, reservationBalances, orderReservations] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows, locations, movementBalances, reservationBalances, orderReservations, returnRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -415,6 +428,17 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       }).from(inventoryReservations)
         .leftJoin(inventoryLocations, eq(inventoryReservations.locationId, inventoryLocations.id))
         .where(isNotNull(inventoryReservations.salesOrderId)),
+      db.select({
+        salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
+        quantity: inventoryMovements.quantityDelta,
+        reason: inventoryMovements.reason,
+        createdAt: inventoryMovements.createdAt,
+        locationName: inventoryLocations.name,
+      }).from(inventoryMovements)
+        .innerJoin(salesDeliveryLines, eq(inventoryMovements.salesDeliveryLineId, salesDeliveryLines.id))
+        .leftJoin(inventoryLocations, eq(inventoryMovements.locationId, inventoryLocations.id))
+        .where(eq(inventoryMovements.kind, "stock_return"))
+        .orderBy(desc(inventoryMovements.createdAt)),
     ]);
     const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
     const receiptByDelivery = new Map(receiptRows.map((receipt) => [receipt.deliveryId, receipt]));
@@ -427,6 +451,13 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const orderReservationByProduct = new Map(orderReservations.map((row) => [
       `${row.salesOrderId}:${row.productId}`, row,
     ]));
+    const returnsByDeliveryLine = new Map<number, typeof returnRows>();
+    for (const row of returnRows) {
+      if (row.salesDeliveryLineId === null) continue;
+      const lineReturns = returnsByDeliveryLine.get(row.salesDeliveryLineId) ?? [];
+      lineReturns.push(row);
+      returnsByDeliveryLine.set(row.salesDeliveryLineId, lineReturns);
+    }
     res.json({ orders: orders.map(({ order, customerName }) => {
       const orderDeliveries = deliveryRows.filter(({ delivery }) => delivery.salesOrderId === order.id);
       const deliveredByLine = new Map<number, number>();
@@ -455,7 +486,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const deliveriesById = new Map<number, {
         id: number; deliveryNumber: string; deliveryDate: string;
         receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null } | null;
-        lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string }[];
+        lines: { salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string; quantity: number; returnedQuantity: number; returns: { quantity: number; reason: string; createdAt: Date; locationName: string | null }[]; unitPriceZmw: string; lineTotalZmw: string }[];
         totalZmw: string;
       }>();
       for (const row of orderDeliveries) {
@@ -470,8 +501,16 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         };
         const lineTotal = cents(row.orderLine.unitPriceZmw) * BigInt(row.deliveryLine.quantity);
         delivery.lines.push({
+          salesDeliveryLineId: row.deliveryLine.id,
           salesOrderLineId: row.orderLine.id, productName: row.productName, sku: row.sku,
-          quantity: row.deliveryLine.quantity, unitPriceZmw: row.orderLine.unitPriceZmw,
+          quantity: row.deliveryLine.quantity,
+          returnedQuantity: (returnsByDeliveryLine.get(row.deliveryLine.id) ?? [])
+            .reduce((quantity, returned) => quantity + returned.quantity, 0),
+          returns: (returnsByDeliveryLine.get(row.deliveryLine.id) ?? []).map((returned) => ({
+            quantity: returned.quantity, reason: returned.reason, createdAt: returned.createdAt,
+            locationName: returned.locationName,
+          })),
+          unitPriceZmw: row.orderLine.unitPriceZmw,
           lineTotalZmw: money(lineTotal),
         });
         delivery.totalZmw = money(cents(delivery.totalZmw) + lineTotal);
@@ -484,6 +523,136 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)),
       };
     }) });
+  });
+  app.post("/api/sales-delivery-lines/:id/returns", owner, async (req, res) => {
+    const deliveryLineId = idOf(req.params.id);
+    if (!deliveryLineId) return bad(res, "Invalid delivered item.");
+    const parsed = returnInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the return details.");
+    const input = parsed.data;
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(0, hashtext(${"sales-return:" + input.idempotencyKey}))`);
+      const [deliveryLine] = await tx.select({
+        id: salesDeliveryLines.id, deliveryId: salesDeliveries.id,
+        deliveryNumber: salesDeliveries.deliveryNumber, deliveryDate: salesDeliveries.deliveryDate,
+        orderId: salesOrders.id, orderNumber: salesOrders.orderNumber,
+        salesOrderLineId: salesOrderLines.id, productId: salesOrderLines.productId,
+        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrders, eq(salesDeliveries.salesOrderId, salesOrders.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+        .where(eq(salesDeliveryLines.id, deliveryLineId)).limit(1);
+      if (!deliveryLine) return { error: "Delivered item not found.", status: 404 };
+      await tx.select({ id: salesOrders.id }).from(salesOrders)
+        .where(eq(salesOrders.id, deliveryLine.orderId)).for("update").limit(1);
+      const [product] = await tx.select({ id: products.id }).from(products)
+        .where(eq(products.id, deliveryLine.productId)).for("update").limit(1);
+      if (!product) return { error: "Product not found.", status: 404 };
+
+      const sourceKey = `sales-return-${input.idempotencyKey}`;
+      const [existing] = await tx.select().from(inventoryMovements)
+        .where(eq(inventoryMovements.sourceKey, sourceKey)).limit(1);
+      if (existing) {
+        const [existingJournal] = await tx.select({ entryDate: journalEntries.entryDate })
+          .from(journalEntries).where(eq(journalEntries.sourceKey, `${sourceKey}-revenue`)).limit(1);
+        const sameRequest = existing.salesDeliveryLineId === deliveryLine.id
+          && existing.locationId === input.locationId
+          && existing.quantityDelta === input.quantity
+          && existing.reason === input.reason
+          && existingJournal?.entryDate === input.returnDate;
+        if (!sameRequest) return { error: "This return save key was already used for different details.", status: 409 };
+        return { movement: existing, duplicate: true };
+      }
+
+      const [location] = await tx.select({ id: inventoryLocations.id, name: inventoryLocations.name })
+        .from(inventoryLocations).where(and(
+          eq(inventoryLocations.id, input.locationId), eq(inventoryLocations.active, true),
+        )).limit(1);
+      if (!location) return { error: "Choose an active stock location.", status: 400 };
+      const priorReturns = await tx.select({
+        id: inventoryMovements.id, quantity: inventoryMovements.quantityDelta,
+      }).from(inventoryMovements)
+        .where(and(
+          eq(inventoryMovements.salesDeliveryLineId, deliveryLine.id),
+          eq(inventoryMovements.kind, "stock_return"),
+        ));
+      const priorQuantity = priorReturns.reduce((total, row) => total + row.quantity, 0);
+      if (priorQuantity + input.quantity > deliveryLine.quantity) {
+        return {
+          error: `Only ${deliveryLine.quantity - priorQuantity} units from ${deliveryLine.deliveryNumber} remain available to return.`,
+          status: 409,
+        };
+      }
+
+      const [movement] = await tx.insert(inventoryMovements).values({
+        productId: product.id, locationId: location.id, kind: "stock_return", quantityDelta: input.quantity,
+        reason: input.reason, reference: deliveryLine.deliveryNumber, sourceKey,
+        salesDeliveryLineId: deliveryLine.id,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `Return from ${deliveryLine.deliveryNumber} · product #${product.id}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", "salesDeliveryLineId"],
+      });
+
+      const revenueReturn = accountingCents(deliveryLine.unitPriceZmw) * BigInt(input.quantity);
+      await postJournal(tx, {
+        sourceKey: `sales-return-${movement.id}-revenue`,
+        sourceType: "sales_return", sourceId: movement.id,
+        memo: `Return from ${deliveryLine.deliveryNumber} for ${deliveryLine.orderNumber}: ${input.reason}`,
+        entryDate: input.returnDate,
+        lines: [
+          { accountKey: "sales_revenue", debitZmw: formatCents(revenueReturn), description: "Returned sales" },
+          { accountKey: "accounts_receivable", creditZmw: formatCents(revenueReturn), description: "Customer balance reduced" },
+        ],
+      });
+
+      const [originalCost] = await tx.select({ value: sum(journalLines.debitZmw) })
+        .from(journalLines)
+        .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .where(and(
+          eq(journalEntries.sourceType, "sales_delivery_cogs"),
+          eq(journalEntries.sourceId, deliveryLine.deliveryId),
+          eq(journalLines.productId, product.id),
+          eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
+        ));
+      const originalCostCents = accountingCents(String(originalCost?.value ?? "0.00"));
+      const cumulativeQuantity = priorQuantity + input.quantity;
+      const targetCostReversal = originalCostCents > 0n
+        ? roundedDivide(originalCostCents * BigInt(cumulativeQuantity), BigInt(deliveryLine.quantity))
+        : 0n;
+      let priorCostReversed = 0n;
+      if (priorReturns.length) {
+        const [priorCost] = await tx.select({ value: sum(journalLines.creditZmw) })
+          .from(journalLines)
+          .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+          .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+          .where(and(
+            eq(journalEntries.sourceType, "sales_return_cogs"),
+            inArray(journalEntries.sourceId, priorReturns.map((row) => row.id)),
+            eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
+          ));
+        priorCostReversed = accountingCents(String(priorCost?.value ?? "0.00"));
+      }
+      const costReturn = targetCostReversal > priorCostReversed
+        ? targetCostReversal - priorCostReversed : 0n;
+      if (costReturn > 0n) await postJournal(tx, {
+        sourceKey: `sales-return-${movement.id}-cogs`,
+        sourceType: "sales_return_cogs", sourceId: movement.id,
+        memo: `Cost reversal for return from ${deliveryLine.deliveryNumber}`,
+        entryDate: input.returnDate,
+        lines: [
+          { accountKey: "inventory", productId: product.id, debitZmw: formatCents(costReturn), description: "Returned stock cost" },
+          { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: formatCents(costReturn), description: "Cost of returned goods" },
+        ],
+      });
+      return { movement, duplicate: false };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.status(result.duplicate ? 200 : 201).json(result);
   });
   app.get("/api/customer-quotes", owner, async (_req, res) => {
     const [quotes, lines] = await Promise.all([

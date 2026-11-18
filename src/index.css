@@ -696,6 +696,31 @@ textarea:focus-visible {
   border-radius: 9px;
 }
 
+.delivery-return-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.delivery-return-list > strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.delivery-return-list > div {
+  display: grid;
+  gap: 4px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.delivery-return-list small {
+  color: var(--muted);
+}
+
 .panel-heading {
   display: flex;
   align-items: center;

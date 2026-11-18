@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
-  type Customer, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
+  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
+  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
 type Mode = "customers" | "orders";
@@ -25,6 +25,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [inventoryLocations, setInventoryLocations] = useState<InventoryLocation[]>([]);
   const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
   const [shopAttemptSummary, setShopAttemptSummary] = useState<{ accepted: number; blocked: number } | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
@@ -44,13 +45,18 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [deliveryPrint, setDeliveryPrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
   const [receiptDelivery, setReceiptDelivery] = useState<{ order: SalesOrder; delivery: SalesDelivery } | null>(null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
+  const [returnForm, setReturnForm] = useState<{
+    order: SalesOrder; delivery: SalesDelivery; line: SalesDelivery["lines"][number]; idempotencyKey: string;
+  } | null>(null);
+  const [returnSubmitting, setReturnSubmitting] = useState(false);
   useEffect(() => {
     let alive = true;
     Promise.all([
       fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns(),
       mode === "orders" ? fetchPublicShopOrderAttemptSummary() : Promise.resolve(null),
+      mode === "orders" ? fetchInventoryLocations() : Promise.resolve([]),
     ])
-      .then(([c, o, p, m, summary]) => { if (alive) { setCustomers(c); setOrders(o); setProducts(p.products); setCampaigns(m); setShopAttemptSummary(summary); } })
+      .then(([c, o, p, m, summary, locations]) => { if (alive) { setCustomers(c); setOrders(o); setProducts(p.products); setCampaigns(m); setShopAttemptSummary(summary); setInventoryLocations(locations); } })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load sales records."); });
     return () => { alive = false; };
   }, [reload, mode]);
@@ -129,6 +135,28 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
     } finally {
       setReceiptSubmitting(false);
+    }
+  }
+  async function submitReturn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!returnForm || returnSubmitting) return;
+    const form = new FormData(event.currentTarget);
+    setError(""); setNotice(""); setReturnSubmitting(true);
+    try {
+      await recordSalesReturn(returnForm.line.salesDeliveryLineId, {
+        idempotencyKey: returnForm.idempotencyKey,
+        locationId: Number(form.get("locationId")),
+        quantity: Number(form.get("quantity")),
+        returnDate: String(form.get("returnDate")),
+        reason: String(form.get("reason") || "").trim(),
+      });
+      setReturnForm(null);
+      setNotice("Return recorded. Stock, customer balance, and accounting records have been updated.");
+      setReload((value) => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not record this customer return.");
+    } finally {
+      setReturnSubmitting(false);
     }
   }
   function localDateTime(value?: string | null) {
@@ -277,6 +305,19 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             {o.deliveries.map((delivery) => <button key={`invoice-${delivery.id}`} className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
               Invoice {delivery.deliveryNumber} / PDF
             </button>)}
+            {o.deliveries.map((delivery) => <div key={`returns-${delivery.id}`} className="delivery-return-list">
+              <strong>Returns · {delivery.deliveryNumber}</strong>
+              {delivery.lines.map((line) => <div key={line.salesDeliveryLineId}>
+                <span>{line.productName} · delivered {line.quantity} · returned {line.returnedQuantity}</span>
+                {line.returns.map((item, index) => <small key={`${line.salesDeliveryLineId}-${index}`}>
+                  {item.quantity} to {item.locationName || "stock"} · {item.reason}
+                </small>)}
+                {line.returnedQuantity < line.quantity && <button
+                  className="button button-secondary button-small"
+                  onClick={() => setReturnForm({ order: o, delivery, line, idempotencyKey: window.crypto.randomUUID() })}
+                >Record return</button>}
+              </div>)}
+            </div>)}
             {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery: null })}>Order invoice / PDF</button>}
            {o.status === "fulfilled" && !o.deliveries.length && <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery: null })}>Delivery note</button>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
@@ -312,6 +353,26 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <div className="modal-footer-actions">
           <button type="button" className="button button-secondary" disabled={receiptSubmitting} onClick={() => setReceiptDelivery(null)}>Cancel</button>
           <button className="button button-primary" disabled={receiptSubmitting}>{receiptSubmitting ? "Saving…" : "Save receipt"}</button>
+        </div>
+      </form>
+    </div>}
+    {mode === "orders" && returnForm && <div className="modal-backdrop" role="presentation">
+      <form className="modal form-grid delivery-entry-form" onSubmit={submitReturn}>
+        <h2>Return item · {returnForm.delivery.deliveryNumber}</h2>
+        <p>{returnForm.order.customerName} · {returnForm.order.orderNumber}</p>
+        <p><strong>{returnForm.line.productName} · {returnForm.line.sku}</strong></p>
+        <p>Delivered: {returnForm.line.quantity} · Already returned: {returnForm.line.returnedQuantity}</p>
+        <label>Return to location<select name="locationId" required defaultValue="">
+          <option value="">Choose location</option>
+          {inventoryLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+        </select></label>
+        <label>Quantity<input name="quantity" type="number" min="1" max={returnForm.line.quantity - returnForm.line.returnedQuantity} step="1" required defaultValue="1" /></label>
+        <label>Return date<input name="returnDate" type="date" required defaultValue={new Date().toISOString().slice(0, 10)} /></label>
+        <label>Reason<input name="reason" minLength={3} maxLength={500} required placeholder="For example, item returned unused" /></label>
+        <p className="report-footnote">This return will increase stock at the selected location, reduce the customer balance, and reverse the related inventory cost.</p>
+        <div className="modal-footer-actions">
+          <button type="button" className="button button-secondary" disabled={returnSubmitting} onClick={() => setReturnForm(null)}>Cancel</button>
+          <button className="button button-primary" disabled={returnSubmitting || !inventoryLocations.length}>{returnSubmitting ? "Saving…" : "Save return"}</button>
         </div>
       </form>
     </div>}

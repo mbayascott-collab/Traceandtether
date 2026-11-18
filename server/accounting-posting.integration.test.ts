@@ -336,6 +336,46 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.ok(linkedReceiptLines.every((line) => line.orderId === purchaseOrderId));
     assert.ok(receiptEntries.every((entry) => receiptMovements.some((movement) => movement.id === entry.sourceId)));
     assert.deepEqual(receiptEntries.map((entry) => entry.shipmentLineId).sort(), [null, shipmentLineId].sort());
+
+    const [deliveryLine] = await db.select().from(salesDeliveryLines)
+      .where(eq(salesDeliveryLines.deliveryId, deliveryId!));
+    const returnRequest = {
+      idempotencyKey: randomUUID(),
+      locationId,
+      quantity: 1,
+      returnDate: "2026-11-18",
+      reason: "Customer returned one unused unit",
+    };
+    const { movement: returnMovement } = await request(
+      `/api/sales-delivery-lines/${deliveryLine.id}/returns`, returnRequest, 201,
+    );
+    assert.equal(returnMovement.salesDeliveryLineId, deliveryLine.id);
+    assert.equal(returnMovement.quantityDelta, 1);
+    assert.equal(returnMovement.locationId, locationId);
+    const duplicateReturn = await request(
+      `/api/sales-delivery-lines/${deliveryLine.id}/returns`, returnRequest, 200,
+    );
+    assert.equal(duplicateReturn.movement.id, returnMovement.id);
+    await request(`/api/sales-delivery-lines/${deliveryLine.id}/returns`, {
+      ...returnRequest, idempotencyKey: randomUUID(), quantity: 2,
+    }, 409);
+    const { orders: [returnedOrder] } = await request("/api/sales-orders", undefined, 200);
+    const returnedLine = returnedOrder.deliveries
+      .find((item: any) => item.id === deliveryId)?.lines
+      .find((item: any) => item.salesDeliveryLineId === deliveryLine.id);
+    assert.equal(returnedLine.returnedQuantity, 1);
+    assert.equal(returnedLine.returns[0].quantity, 1);
+    const returnEntries = await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["sales_return", "sales_return_cogs"]),
+      eq(journalEntries.sourceId, returnMovement.id),
+    ));
+    assert.equal(returnEntries.length, 2);
+    for (const entry of returnEntries) {
+      const lines = await db.select({
+        debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+      }).from(journalLines).where(eq(journalLines.journalEntryId, entry.id));
+      assert.equal(journalLinesAreBalanced(lines.map((line) => ({ ...line, accountKey: "return-test" }))), true);
+    }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -362,6 +402,13 @@ test("database flow adjusts late import costs across partial receipts and sales"
             OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
               SELECT id FROM sales_deliveries WHERE sales_order_id = $3
             ))
+            OR (source_type IN ('sales_return', 'sales_return_cogs') AND source_id IN (
+              SELECT id FROM inventory_movements WHERE sales_delivery_line_id IN (
+                SELECT id FROM sales_delivery_lines WHERE delivery_id IN (
+                  SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+                )
+              )
+            ))
           )
         `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0]);
         await client.query(`
@@ -375,6 +422,13 @@ test("database flow adjusts late import costs across partial receipts and sales"
           OR (source_type = 'landed_cost_adjustment' AND source_id = $1)
           OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
             SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+          ))
+          OR (source_type IN ('sales_return', 'sales_return_cogs') AND source_id IN (
+            SELECT id FROM inventory_movements WHERE sales_delivery_line_id IN (
+              SELECT id FROM sales_delivery_lines WHERE delivery_id IN (
+                SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+              )
+            )
           ))
         `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);

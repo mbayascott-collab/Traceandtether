@@ -3,7 +3,7 @@ import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementImportBatches, paymentStatementLines,
+  accountingAccounts, businessPayments, customers, importExpenses, inventoryMovements, journalEntries, journalLines, paymentStatementImportBatches, paymentStatementLines,
   paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { effectivePaymentDueDate, paymentAging } from "../shared/payment-aging";
@@ -435,7 +435,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
 
   app.get("/api/payments", owner, async (_req, res) => {
     const accountMap = await ensureAccountingAccounts(db);
-    const [paymentRows, eligibleOrders, orderLines, deliveryRows, openPurchaseOrders] = await Promise.all([
+    const [paymentRows, eligibleOrders, orderLines, deliveryRows, openPurchaseOrders, returnRows] = await Promise.all([
       db.select({
         payment: businessPayments, salesOrderNumber: salesOrders.orderNumber, customerName: customers.name,
         purchaseOrderNumber: purchaseOrders.orderNumber, supplierName: suppliers.name,
@@ -463,6 +463,15 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       }).from(purchaseOrders)
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(ne(purchaseOrders.status, "cancelled")),
+      db.select({
+        orderId: salesDeliveries.salesOrderId,
+        quantity: inventoryMovements.quantityDelta,
+        unitPriceZmw: salesOrderLines.unitPriceZmw,
+      }).from(inventoryMovements)
+        .innerJoin(salesDeliveryLines, eq(inventoryMovements.salesDeliveryLineId, salesDeliveryLines.id))
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+        .where(eq(inventoryMovements.kind, "stock_return")),
     ]);
 
     const payments = await db.select().from(businessPayments);
@@ -481,11 +490,16 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     }
 
     const deliveredTotals = new Map<number, bigint>();
+    const returnedTotals = new Map<number, bigint>();
     const latestDeliveryDate = new Map<number, string>();
     for (const row of deliveryRows) {
       deliveredTotals.set(row.orderId, (deliveredTotals.get(row.orderId) ?? 0n) + cents(row.unitPriceZmw) * BigInt(row.quantity));
       const latest = latestDeliveryDate.get(row.orderId);
       if (!latest || row.deliveryDate > latest) latestDeliveryDate.set(row.orderId, row.deliveryDate);
+    }
+    for (const row of returnRows) {
+      returnedTotals.set(row.orderId,
+        (returnedTotals.get(row.orderId) ?? 0n) + cents(row.unitPriceZmw) * BigInt(row.quantity));
     }
     const ordersWithDelivery = new Set(deliveryRows.map((row) => row.orderId));
     const invoices = eligibleOrders.map(({ order, customerName, customerEmail, customerPaymentTermDays }) => {
@@ -495,12 +509,13 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
           ? orderLines.filter((line) => line.salesOrderId === order.id)
             .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
           : 0n;
-      const outstanding = total - (paidSales.get(order.id) ?? 0n);
+      const netTotal = total - (returnedTotals.get(order.id) ?? 0n);
+      const outstanding = netTotal - (paidSales.get(order.id) ?? 0n);
       const sourceDate = latestDeliveryDate.get(order.id) ?? order.orderDate;
       const dueDate = effectivePaymentDueDate(order.dueDate, sourceDate, customerPaymentTermDays);
       return {
         orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, customerEmail,
-        totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
+        totalZmw: formatCents(netTotal), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
         outstandingZmw: formatCents(outstanding), dueDate,
         lastReminder: latestReminderByOrder.has(order.id) ? (() => {
           const reminder = latestReminderByOrder.get(order.id)!;
@@ -731,9 +746,18 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
               .from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id))
             : [];
         const total = lines.reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
+        const returnedLines = await tx.select({
+          quantity: inventoryMovements.quantityDelta, unitPriceZmw: salesOrderLines.unitPriceZmw,
+        }).from(inventoryMovements)
+          .innerJoin(salesDeliveryLines, eq(inventoryMovements.salesDeliveryLineId, salesDeliveryLines.id))
+          .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+          .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+          .where(and(eq(salesDeliveries.salesOrderId, order.id), eq(inventoryMovements.kind, "stock_return")));
+        const returned = returnedLines.reduce((acc, line) =>
+          acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n);
         const existing = await tx.select({ amount: sum(businessPayments.amountZmw) }).from(businessPayments)
           .where(and(eq(businessPayments.direction, "customer_receipt"), eq(businessPayments.salesOrderId, order.id)));
-        outstanding = total - cents(String(existing[0]?.amount ?? "0.00"));
+        outstanding = total - returned - cents(String(existing[0]?.amount ?? "0.00"));
       } else {
         const [order] = await tx.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.orderId)).for("update").limit(1);
         if (!order) return { error: "Purchase order not found.", status: 404 };

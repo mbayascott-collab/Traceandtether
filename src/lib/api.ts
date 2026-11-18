@@ -47,7 +47,7 @@ export interface InventoryItem {
   stockValueZmw: string; averageUnitCostZmw: string;
   locations: { id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueZmw: string }[];
 }
-export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; createdAt: string; evidenceFileName: string | null; evidenceMimeType: string | null; }
+export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; salesDeliveryLineId: number | null; createdAt: string; evidenceFileName: string | null; evidenceMimeType: string | null; }
 export interface InventoryLocation { id: number; name: string; active: boolean; }
 export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; locationName: string | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
@@ -60,7 +60,12 @@ export interface SalesOrderLine {
 export interface SalesDeliveryReceipt { receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null; }
 export interface SalesDelivery {
   id: number; deliveryNumber: string; deliveryDate: string; totalZmw: string; receipt: SalesDeliveryReceipt | null;
-  lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string }[];
+  lines: {
+    salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string;
+    quantity: number; returnedQuantity: number;
+    returns: { quantity: number; reason: string; createdAt: string; locationName: string | null }[];
+    unitPriceZmw: string; lineTotalZmw: string;
+  }[];
 }
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "partially_fulfilled" | "fulfilled" | "cancelled"; orderDate: string; confirmedAt?: string | null; fulfilledAt: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; deliveredZmw: string; deliveries: SalesDelivery[]; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
@@ -505,6 +510,14 @@ export async function updateSalesOrderStatus(
 }
 export async function createSalesDelivery(id: number, input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }): Promise<void> {
   await request(`/api/sales-orders/${id}/deliveries`, { method: "POST", body: JSON.stringify(input) });
+}
+export async function recordSalesReturn(
+  deliveryLineId: number,
+  input: { idempotencyKey: string; locationId: number; quantity: number; returnDate: string; reason: string },
+): Promise<void> {
+  await request(`/api/sales-delivery-lines/${deliveryLineId}/returns`, {
+    method: "POST", body: JSON.stringify(input),
+  });
 }
 export async function saveSalesDeliveryReceipt(
   deliveryId: number,

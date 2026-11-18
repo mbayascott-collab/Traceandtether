@@ -127,6 +127,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       id: inventoryMovements.id, productId: inventoryMovements.productId, locationId: inventoryMovements.locationId,
       kind: inventoryMovements.kind, quantityDelta: inventoryMovements.quantityDelta, reason: inventoryMovements.reason,
       reference: inventoryMovements.reference, sourceKey: inventoryMovements.sourceKey, reservationId: inventoryMovements.reservationId,
+      salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
       createdAt: inventoryMovements.createdAt, evidenceFileName: inventoryMovements.evidenceFileName,
       evidenceMimeType: inventoryMovements.evidenceMimeType,
       productName: products.name, sku: products.sku, locationName: inventoryLocations.name,

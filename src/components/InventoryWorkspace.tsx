@@ -115,7 +115,8 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),
         reference: String(d.get("reference") || "") || null, reason: String(d.get("reason")),
       }))}>
-        <h2>Record a return or damage</h2>
+        <h2>Record other returned stock or damage</h2>
+        <p className="report-footnote field-full">For a customer return from a sales delivery, use “Record return” next to that delivery item on the Sales orders page. This stock event does not change a customer balance.</p>
         <label>Type<select name="kind" defaultValue="stock_return"><option value="stock_return">Returned to usable stock</option><option value="stock_damage">Damaged and written off</option></select></label>
         <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</select></label>
         <label>Location<select name="locationId" required defaultValue=""><option value="">Choose location</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></label>
