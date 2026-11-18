@@ -246,13 +246,13 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
     shipmentLineToOrderLine.set(receipt.id, receipt.purchaseOrderLineId);
   });
 
-  const actualClearingByProduct = new Map<number, bigint>();
+  const actualClearingByLine = new Map<number, bigint>();
   const actualReceiptClearing = await tx.select({
-    sourceKey: inventoryMovements.sourceKey,
-    productId: inventoryMovements.productId,
+    shipmentLineId: journalEntries.shipmentLineId,
+    movementSourceKey: inventoryMovements.sourceKey,
     creditZmw: journalLines.creditZmw,
   }).from(journalEntries)
-    .innerJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+    .leftJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
     .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
     .where(and(
       eq(journalEntries.sourceType, "stock_receipt"),
@@ -260,11 +260,14 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
       gt(journalLines.creditZmw, "0"),
     ));
   for (const row of actualReceiptClearing) {
-    const shipmentLineId = Number(row.sourceKey?.match(/^shipment-line-(\d+)-to-\d+$/)?.[1]);
-    if (!Number.isSafeInteger(shipmentLineId) || !shipmentLineToOrderLine.has(shipmentLineId)) continue;
-    const line = rows.find((candidate: any) => candidate.id === shipmentLineToOrderLine.get(shipmentLineId));
-    if (!line) continue;
-    actualClearingByProduct.set(line.productId, (actualClearingByProduct.get(line.productId) ?? 0n) + cents(row.creditZmw));
+    const legacyShipmentLineId = Number(row.movementSourceKey?.match(/^shipment-line-(\d+)-to-\d+$/)?.[1]);
+    const shipmentLineId = row.shipmentLineId ?? (
+      Number.isSafeInteger(legacyShipmentLineId) ? legacyShipmentLineId : null
+    );
+    if (shipmentLineId === null) continue;
+    const orderLineId = shipmentLineToOrderLine.get(shipmentLineId);
+    if (orderLineId === undefined) continue;
+    actualClearingByLine.set(orderLineId, (actualClearingByLine.get(orderLineId) ?? 0n) + cents(row.creditZmw));
   }
 
   const priorAdjustmentRows = await tx.select({
@@ -319,7 +322,7 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
       ? roundedDivide((allocationByLine.get(line.id) ?? 0n) * BigInt(stockedQuantity), BigInt(line.quantityOrdered))
       : 0n;
     const adjustmentCents = expectedPosted
-      - (actualClearingByProduct.get(line.productId) ?? 0n)
+      - (actualClearingByLine.get(line.id) ?? 0n)
       - (priorAdjustmentByProduct.get(line.productId) ?? 0n);
     const onHand = onHandByProduct.get(line.productId) ?? 0;
     const inventoryValue = inventoryValueByProduct.get(line.productId) ?? 0n;
@@ -340,7 +343,7 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
     total + (line.adjustmentCents > 0n ? line.adjustmentCents : 0n), 0n);
   const totalExpenseCents = allocation.lines.reduce((total, line) =>
     total + cents(line.allocatedExpensesZmw), 0n);
-  const receiptClearingCents = [...actualClearingByProduct.values()].reduce((total, value) => total + value, 0n);
+  const receiptClearingCents = [...actualClearingByLine.values()].reduce((total, value) => total + value, 0n);
   const clearingBalanceCents = totalExpenseCents - receiptClearingCents - priorClearingCredits;
   const unpostedCents = clearingBalanceCents - adjustmentCents;
 
@@ -520,7 +523,8 @@ export async function ensureAccountingAccounts(tx: any) {
 }
 
 export async function postJournal(tx: any, input: {
-  sourceKey: string; sourceType: string; sourceId: number; memo: string; entryDate?: string; lines: PostingLine[];
+  sourceKey: string; sourceType: string; sourceId: number; shipmentLineId?: number;
+  memo: string; entryDate?: string; lines: PostingLine[];
 }) {
   const [existing] = await tx.select().from(journalEntries).where(eq(journalEntries.sourceKey, input.sourceKey)).limit(1);
   if (existing) return existing;
@@ -529,6 +533,7 @@ export async function postJournal(tx: any, input: {
   const inserted = await tx.insert(journalEntries).values({
     entryNumber: `JE-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
     sourceKey: input.sourceKey, sourceType: input.sourceType, sourceId: input.sourceId,
+    shipmentLineId: input.shipmentLineId ?? null,
     memo: input.memo, entryDate: input.entryDate ?? new Date().toISOString().slice(0, 10),
   }).returning();
   const entry = inserted[0] as typeof journalEntries.$inferSelect;

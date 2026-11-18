@@ -595,6 +595,7 @@ export const journalEntries = pgTable(
     sourceKey: varchar("source_key", { length: 180 }),
     sourceType: varchar("source_type", { length: 40 }).notNull(),
     sourceId: integer("source_id"),
+    shipmentLineId: integer("shipment_line_id").references(() => shipmentLines.id, { onDelete: "restrict" }),
     memo: varchar("memo", { length: 500 }).notNull(),
     entryDate: date("entry_date").notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -603,6 +604,7 @@ export const journalEntries = pgTable(
     uniqueIndex("journal_entries_number_unique").on(table.entryNumber),
     uniqueIndex("journal_entries_source_key_unique").on(table.sourceKey),
     index("journal_entries_date_idx").on(table.entryDate),
+    index("journal_entries_shipment_line_idx").on(table.shipmentLineId),
   ],
 );
 

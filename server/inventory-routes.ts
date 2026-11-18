@@ -247,6 +247,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       if (receiptPosting.inventoryCost > 0n) {
         await postJournal(tx, {
           sourceKey: `inventory-movement-${movement.id}`, sourceType: "stock_receipt", sourceId: movement.id,
+          shipmentLineId: line.id,
           memo: `Stock receipt for ${order.orderNumber}`, entryDate: shipment.receivedAt ?? undefined,
           lines: receiptPosting.lines,
         });

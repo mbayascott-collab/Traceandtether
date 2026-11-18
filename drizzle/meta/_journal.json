@@ -253,6 +253,13 @@
       "when": 1794997231077,
       "tag": "0035_opening_stock_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794998882976,
+      "tag": "0036_heavy_lord_hawal",
+      "breakpoints": true
     }
   ]
 }

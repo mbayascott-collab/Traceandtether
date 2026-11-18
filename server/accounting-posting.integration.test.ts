@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   accountingAccounts, customers, importExpenses, inventoryLocations, inventoryMovements,
   journalEntries, journalLines, products, purchaseOrderLines, shipmentLines,
@@ -139,6 +139,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
       lines: [{ shipmentLineId, quantityReceived: 4 }],
     }, 200);
     await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId }, 201);
+    const [earlyReceiptMovement] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-4`));
+    const [earlyReceiptEntry] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, earlyReceiptMovement.id),
+    ));
+    assert.equal(earlyReceiptEntry.shipmentLineId, shipmentLineId);
+    // Simulate a pre-migration journal that relies on its old movement key.
+    await db.update(journalEntries).set({ shipmentLineId: null })
+      .where(eq(journalEntries.id, earlyReceiptEntry.id));
     const { orders: [afterEarlyExpense] } = await request(
       `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
     );
@@ -241,6 +251,10 @@ test("database flow adjusts late import costs across partial receipts and sales"
       lines: [{ shipmentLineId, quantityReceived: 10 }],
     }, 200);
     await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId }, 201);
+    const [secondReceiptMovement] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-10`));
+    await db.update(inventoryMovements).set({ sourceKey: `receipt-key-reformatted-${suffix}` })
+      .where(eq(inventoryMovements.id, secondReceiptMovement.id));
     const { orders: [afterSecondReceipt] } = await request(
       `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
     );
@@ -255,10 +269,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
       )),
       db.select().from(inventoryMovements).where(and(
         eq(inventoryMovements.productId, productId!),
-        or(
-          eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-4`),
-          eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-10`),
-        ),
+        eq(inventoryMovements.kind, "stock_receipt"),
       )),
       db.select().from(journalEntries).where(and(
         eq(journalEntries.sourceType, "landed_cost_adjustment"),
@@ -321,12 +332,10 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(linkedExpenses.length, 2);
     assert.deepEqual(linkedExpenses.map((expense) => expense.id).sort(), [earlyExpense.id, lateExpense.id].sort());
     assert.equal(linkedReceiptLines.length, 1);
-    assert.deepEqual(
-      receiptMovements.map((movement) => movement.sourceKey).sort(),
-      [`shipment-line-${shipmentLineId}-to-10`, `shipment-line-${shipmentLineId}-to-4`].sort(),
-    );
+    assert.deepEqual(receiptMovements.map((movement) => movement.quantityDelta).sort(), [4, 6]);
     assert.ok(linkedReceiptLines.every((line) => line.orderId === purchaseOrderId));
     assert.ok(receiptEntries.every((entry) => receiptMovements.some((movement) => movement.id === entry.sourceId)));
+    assert.deepEqual(receiptEntries.map((entry) => entry.shipmentLineId).sort(), [null, shipmentLineId].sort());
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
