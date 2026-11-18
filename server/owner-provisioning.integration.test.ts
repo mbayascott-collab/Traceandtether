@@ -1,0 +1,130 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import test from "node:test";
+import { eq, inArray } from "drizzle-orm";
+import { appUserAccess, appUsers } from "../shared/schema";
+
+test("Clerk first sign-in provisions only the configured verified owner", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { clerkClient }, { resolveUser }] = await Promise.all([
+    import("./db"),
+    import("@clerk/express"),
+    import("./routes"),
+  ]);
+  const tables = await pool.query(
+    "SELECT to_regclass('public.app_user_access') IS NOT NULL AS access, to_regclass('public.app_users') IS NOT NULL AS users",
+  );
+  if (!tables.rows[0]?.access || !tables.rows[0]?.users) {
+    t.skip("requires the user access database migration");
+    await pool.end();
+    return;
+  }
+
+  const suffix = randomUUID();
+  const ownerEmail = `owner-${suffix}@example.test`;
+  const unverifiedEmail = `unverified-${suffix}@example.test`;
+  const configuredEmail = `configured-${suffix}@example.test`;
+  const managerEmail = `manager-${suffix}@example.test`;
+  const ownerUserId = `first-owner-${suffix}`;
+  const unverifiedUserId = `unverified-owner-${suffix}`;
+  const managerUserId = `other-account-${suffix}`;
+  const clerkUsers = new Map([
+    [ownerUserId, {
+      id: ownerUserId,
+      primaryEmailAddressId: "owner-primary",
+      emailAddresses: [{
+        id: "owner-primary",
+        emailAddress: ownerEmail.toUpperCase(),
+        verification: { status: "verified" },
+      }],
+    }],
+    [unverifiedUserId, {
+      id: unverifiedUserId,
+      primaryEmailAddressId: "unverified-primary",
+      emailAddresses: [{
+        id: "unverified-primary",
+        emailAddress: unverifiedEmail,
+        verification: { status: "unverified" },
+      }],
+    }],
+    [managerUserId, {
+      id: managerUserId,
+      primaryEmailAddressId: "manager-primary",
+      emailAddresses: [{
+        id: "manager-primary",
+        emailAddress: managerEmail,
+        verification: { status: "verified" },
+      }],
+    }],
+  ]);
+  const previousOwnerEmail = process.env.INITIAL_ADMIN_EMAIL;
+  const userIds = [ownerUserId, unverifiedUserId, managerUserId];
+  const emails = [ownerEmail, unverifiedEmail, configuredEmail, managerEmail];
+
+  t.mock.method(clerkClient.users, "getUser", async (userId: string) => {
+    const clerkUser = clerkUsers.get(userId);
+    assert.ok(clerkUser, `unexpected Clerk user lookup: ${userId}`);
+    return clerkUser as never;
+  });
+
+  try {
+    // A verified configured owner gets access on the first sign-in and on repeat sign-in.
+    process.env.INITIAL_ADMIN_EMAIL = ` ${ownerEmail.toUpperCase()} `;
+    const firstOwnerSignIn = await resolveUser(ownerUserId);
+    assert.deepEqual(firstOwnerSignIn, {
+      authorized: true,
+      actor: { clerkUserId: ownerUserId, email: ownerEmail, role: "owner" },
+    });
+    assert.deepEqual(await resolveUser(ownerUserId), firstOwnerSignIn);
+
+    const [ownerGrant] = await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerEmail));
+    assert.equal(ownerGrant?.role, "owner");
+    assert.equal(ownerGrant?.active, true);
+    const ownerGrants = await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerEmail));
+    assert.equal(ownerGrants.length, 1, "repeat sign-in must not create another owner grant");
+    const ownerRecords = await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, ownerUserId));
+    assert.equal(ownerRecords.length, 1);
+    assert.equal(ownerRecords[0]?.role, "owner");
+
+    // An unverified Clerk primary address cannot create either access record.
+    process.env.INITIAL_ADMIN_EMAIL = unverifiedEmail;
+    assert.deepEqual(await resolveUser(unverifiedUserId), {
+      authorized: false,
+      email: unverifiedEmail,
+      reason: "email_not_verified",
+    });
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, unverifiedEmail))).length, 0);
+    assert.equal((await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, unverifiedUserId))).length, 0);
+
+    // A verified address that differs from configuration remains a manager, not an owner.
+    await db.insert(appUserAccess).values({
+      email: managerEmail,
+      role: "manager",
+      active: true,
+    });
+    process.env.INITIAL_ADMIN_EMAIL = configuredEmail;
+    const otherAccountSignIn = await resolveUser(managerUserId);
+    assert.deepEqual(otherAccountSignIn, {
+      authorized: true,
+      actor: { clerkUserId: managerUserId, email: managerEmail, role: "manager" },
+    });
+    const [managerGrant] = await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, managerEmail));
+    assert.equal(managerGrant?.role, "manager");
+    const managerRecords = await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, managerUserId));
+    assert.equal(managerRecords[0]?.role, "manager");
+  } finally {
+    if (previousOwnerEmail === undefined) delete process.env.INITIAL_ADMIN_EMAIL;
+    else process.env.INITIAL_ADMIN_EMAIL = previousOwnerEmail;
+    await db.delete(appUsers).where(inArray(appUsers.clerkUserId, userIds));
+    await db.delete(appUserAccess).where(inArray(appUserAccess.email, emails));
+    await pool.end();
+  }
+});
