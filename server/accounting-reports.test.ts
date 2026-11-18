@@ -93,6 +93,42 @@ test("year-end reports use the requested period and balance through its end date
   assert.equal(liabilitiesAndEquity, 1770);
 });
 
+test("year-end reports keep accumulated losses negative while the balance sheet balances", () => {
+  const lossYear: FixtureLine[] = [
+    ...journal("2025-12-31", [
+      ["cash", "debit", "1000.00"], ["payable", "credit", "30.00"], ["equity", "credit", "970.00"],
+    ]),
+    ...journal("2026-02-10", [
+      ["cash", "debit", "100.00"], ["sales", "credit", "100.00"],
+    ]),
+    ...journal("2026-03-05", [
+      ["rent", "debit", "80.00"], ["cash", "credit", "80.00"],
+    ]),
+    ...journal("2026-04-02", [
+      ["cogs", "debit", "70.00"], ["cash", "credit", "70.00"],
+    ]),
+  ];
+  const reports = calculateAccountingReports(accounts, lossYear, "2026-01-01", "2026-12-31");
+
+  assert.deepEqual(
+    [reports.totals.incomeZmw, reports.totals.expensesZmw, reports.totals.netIncomeZmw],
+    ["100.00", "150.00", "-50.00"],
+  );
+  assert.equal(reports.balanceSheet.at(-1)?.name, "Accumulated earnings (not closed)");
+  assert.equal(reports.balanceSheet.at(-1)?.amountZmw, "-50.00");
+  const exportedBalanceSheet = accountingReportExportRows(reports).balanceSheet;
+  assert.equal(exportedBalanceSheet.at(-1)?.[3], "-50.00");
+
+  const assets = reports.balanceSheet
+    .filter((row) => row.type === "asset")
+    .reduce((sum, row) => sum + Number(row.amountZmw), 0);
+  const liabilitiesAndEquity = reports.balanceSheet
+    .filter((row) => row.type === "liability" || row.type === "equity")
+    .reduce((sum, row) => sum + Number(row.amountZmw), 0);
+  assert.equal(assets, 950);
+  assert.equal(liabilitiesAndEquity, 950);
+});
+
 test("opening-balance reversal remains in history while reports use the corrected replacement", () => {
   const openingAndCorrections: AccountingReportLine[] = [
     { accountId: 1, entryDate: "2025-12-31", debitZmw: "1000.00", creditZmw: "0.00" },
