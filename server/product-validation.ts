@@ -233,6 +233,38 @@ export const importExpenseInputSchema = z.object({
   }
 });
 
+type ShipmentImportExpenseIdentity = {
+  shipmentId: number | null;
+  category: string;
+  description: string;
+  amount: string;
+  currency: string;
+  incurredAt: string | null;
+  reference: string | null;
+};
+
+function normalizeDecimal(value: string, scale: number) {
+  const [whole, fraction = ""] = value.split(".");
+  return `${BigInt(whole)}.${fraction.padEnd(scale, "0")}`;
+}
+
+export function isDuplicateShipmentImportExpense(
+  existing: ShipmentImportExpenseIdentity,
+  incoming: ShipmentImportExpenseIdentity,
+) {
+  if (existing.shipmentId === null || existing.shipmentId !== incoming.shipmentId) return false;
+
+  const existingReference = existing.reference?.trim().toLocaleLowerCase("en-US") ?? "";
+  const incomingReference = incoming.reference?.trim().toLocaleLowerCase("en-US") ?? "";
+  if (existingReference && incomingReference) return existingReference === incomingReference;
+
+  return existing.category.trim().toLocaleLowerCase("en-US") === incoming.category.trim().toLocaleLowerCase("en-US")
+    && existing.description.trim().toLocaleLowerCase("en-US") === incoming.description.trim().toLocaleLowerCase("en-US")
+    && normalizeDecimal(existing.amount, 2) === normalizeDecimal(incoming.amount, 2)
+    && existing.currency.trim().toUpperCase() === incoming.currency.trim().toUpperCase()
+    && existing.incurredAt === incoming.incurredAt;
+}
+
 export const inventoryReservationInputSchema = z.object({
   productId: positiveInteger,
   locationId: positiveInteger.optional(),

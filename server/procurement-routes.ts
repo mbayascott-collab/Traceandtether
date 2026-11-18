@@ -7,7 +7,7 @@ import {
   importExpenses, products, purchaseOrderLines, purchaseOrders, shipmentLines, shipmentPurchaseOrders, shipments, suppliers,
 } from "../shared/schema";
 import {
-  importExpenseInputSchema, purchaseOrderInputSchema, purchaseOrderUpdateSchema,
+  importExpenseInputSchema, isDuplicateShipmentImportExpense, purchaseOrderInputSchema, purchaseOrderUpdateSchema,
   shipmentInputSchema, shipmentReceiptSchema,
 } from "./product-validation";
 import { db } from "./db";
@@ -256,6 +256,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/import-expenses", owner, async (req, res) => {
     const parsed = importExpenseInputSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.issues[0]?.message ?? "Check expense details.");
+    const incurredAt = parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10);
     const result = await db.transaction(async (tx) => {
       if (parsed.data.purchaseOrderId !== null) {
         const [order] = await tx.select({ status: purchaseOrders.status }).from(purchaseOrders)
@@ -265,12 +266,22 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         const [shipment] = await tx.select({ status: shipments.status }).from(shipments)
           .where(eq(shipments.id, parsed.data.shipmentId)).for("update").limit(1);
         if (!shipment || shipment.status === "cancelled") return { error: "Choose a shipment that has not been cancelled.", status: 400 };
+        const existingShipmentExpenses = await tx.select().from(importExpenses)
+          .where(eq(importExpenses.shipmentId, parsed.data.shipmentId));
+        if (existingShipmentExpenses.some((expense) => isDuplicateShipmentImportExpense(expense, {
+          ...parsed.data, incurredAt,
+        }))) {
+          return {
+            error: "This forwarder bill is already recorded for this shipment. Review the recorded expenses before saving again.",
+            status: 409,
+          };
+        }
         const [shipmentOrder] = await tx.select({ purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
           .from(shipmentPurchaseOrders).where(eq(shipmentPurchaseOrders.shipmentId, parsed.data.shipmentId)).limit(1);
         if (!shipmentOrder) return { error: "The shipment has no linked purchase orders.", status: 400 };
       }
       const [created] = await tx.insert(importExpenses).values({
-        ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
+        ...parsed.data, incurredAt,
       }).returning();
       await recordBusinessAudit(tx, {
         entityType: "import_expense", entityId: created.id,

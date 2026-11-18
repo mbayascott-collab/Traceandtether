@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
+  customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, isDuplicateShipmentImportExpense, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
 import { PublicShopProtection, type OrderLimitStore } from "./public-shop-protection";
@@ -165,6 +165,30 @@ test("validates shipment and expense inputs", () => {
   assert.equal(importExpenseInputSchema.safeParse({ ...expense, purchaseOrderId: null, shipmentId: null }).success, false);
   assert.equal(importExpenseInputSchema.safeParse({ ...expense, shipmentId: 7 }).success, false);
   assert.equal(importExpenseInputSchema.safeParse({ ...expense, amount: "0.00" }).success, false);
+
+  const sharedBill = importExpenseInputSchema.parse({
+    ...expense, purchaseOrderId: null, shipmentId: 7, reference: null,
+  });
+  assert.equal(isDuplicateShipmentImportExpense(sharedBill, {
+    ...sharedBill, amount: "120", reference: null,
+  }), true);
+  assert.equal(isDuplicateShipmentImportExpense(sharedBill, {
+    ...sharedBill, amount: "121.00", reference: null,
+  }), false);
+  assert.equal(isDuplicateShipmentImportExpense(sharedBill, {
+    ...sharedBill, amount: "121.00", reference: "FWD-42",
+  }), false);
+  assert.equal(isDuplicateShipmentImportExpense(sharedBill, {
+    ...sharedBill, amount: "121.00", reference: "fwd-42",
+  }), false);
+  assert.equal(isDuplicateShipmentImportExpense(
+    { ...sharedBill, reference: "FWD-42" },
+    { ...sharedBill, description: "Corrected description", reference: "fwd-42" },
+  ), true);
+  assert.equal(isDuplicateShipmentImportExpense(
+    { ...sharedBill, reference: "FWD-42" },
+    { ...sharedBill, reference: "FWD-43" },
+  ), false);
 });
 
 test("validates reservation quantities and non-zero reasoned stock adjustments", () => {
