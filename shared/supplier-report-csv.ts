@@ -14,8 +14,16 @@ export type SupplierReportRow = {
   averageDeliveryVarianceDays: string | null;
 };
 
+export type SupplierMonthlySpendRow = {
+  month: string;
+  orderedGoodsZmw: string;
+  importCostsZmw: string;
+  paymentsZmw: string;
+};
+
 export type SupplierReportCsvData = {
   period: { from: string | null; to: string | null };
+  monthlySpend: SupplierMonthlySpendRow[];
   totals: {
     orderedGoodsZmw: string;
     importCostsZmw: string;
@@ -102,6 +110,19 @@ export function supplierReportCsv(report: SupplierReportCsvData) {
     ],
     [],
     ["Unallocated import costs (not assigned to a supplier)", report.totals.unallocatedImportCostsZmw, "ZMW"],
+    [],
+    ["Monthly supplier spend by recorded dates"],
+    ["Goods ordered use purchase-order dates; import costs use expense dates; supplier payments use payment dates and are separate from costs."],
+    ["Month", "Goods ordered (purchase-order date, ZMW)", "Import costs (expense date, ZMW)", "Supplier payments (payment date, separate, ZMW)"],
+    ...report.monthlySpend.map((month) => [
+      month.month, month.orderedGoodsZmw, month.importCostsZmw, month.paymentsZmw,
+    ]),
+    [
+      "Total",
+      report.monthlySpend.reduce((total, month) => total + Number(month.orderedGoodsZmw), 0).toFixed(2),
+      report.monthlySpend.reduce((total, month) => total + Number(month.importCostsZmw), 0).toFixed(2),
+      report.monthlySpend.reduce((total, month) => total + Number(month.paymentsZmw), 0).toFixed(2),
+    ],
   ];
   return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }

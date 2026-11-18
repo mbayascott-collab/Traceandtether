@@ -19,6 +19,7 @@ type DashboardData = {
 };
 type SupplierAnalytics = {
   period: { from: string | null; to: string | null };
+  monthlySpend: { month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string }[];
   totals: {
     orderedGoodsZmw: string; importCostsZmw: string; unallocatedImportCostsZmw: string; paymentsZmw: string;
     orders: number; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number;
@@ -183,6 +184,36 @@ export default function BusinessAnalyticsWorkspace() {
         {Number(supplierReport.totals.unallocatedImportCostsZmw) > 0 && <p className="analytics-unallocated-costs" role="status">
           {money(supplierReport.totals.unallocatedImportCostsZmw)} in import costs could not be assigned to a supplier and is not included in supplier rows.
         </p>}
+        <section className="analytics-monthly-supplier-spend" aria-labelledby="monthly-supplier-spend-heading">
+          <div className="analytics-monthly-supplier-heading">
+            <div>
+              <h3 id="monthly-supplier-spend-heading">Monthly buying and import costs</h3>
+              <p>Goods ordered by purchase-order date · Import costs by recorded expense date · Payments by payment date, shown separately</p>
+            </div>
+          </div>
+          <div className="table-wrap analytics-monthly-supplier-table-wrap">
+            <table className="analytics-monthly-supplier-table">
+              <caption className="analytics-table-caption">Monthly goods ordered, import costs, and supplier payments in Zambian kwacha using their separate recorded dates</caption>
+              <thead><tr>
+                <th scope="col">Month</th><th scope="col">Goods ordered</th>
+                <th scope="col">Import costs</th><th scope="col">Supplier payments · separate</th>
+              </tr></thead>
+              <tbody>
+                {supplierReport.monthlySpend.map((month) => <tr key={month.month}>
+                  <th scope="row">{new Date(`${month.month}-01T00:00:00Z`).toLocaleDateString("en", { month: "long", year: "numeric", timeZone: "UTC" })}</th>
+                  <td>{money(month.orderedGoodsZmw)}</td><td>{money(month.importCostsZmw)}</td><td>{money(month.paymentsZmw)}</td>
+                </tr>)}
+                {!supplierReport.monthlySpend.length && <tr><td colSpan={4} className="analytics-supplier-empty">No supplier costs or payments in this period.</td></tr>}
+              </tbody>
+              {supplierReport.monthlySpend.length > 0 && <tfoot><tr>
+                <th scope="row">Total</th>
+                <td>{money(supplierReport.monthlySpend.reduce((sum, month) => sum + Number(month.orderedGoodsZmw), 0).toFixed(2))}</td>
+                <td>{money(supplierReport.monthlySpend.reduce((sum, month) => sum + Number(month.importCostsZmw), 0).toFixed(2))}</td>
+                <td>{money(supplierReport.monthlySpend.reduce((sum, month) => sum + Number(month.paymentsZmw), 0).toFixed(2))}</td>
+              </tr></tfoot>}
+            </table>
+          </div>
+        </section>
         <div className="analytics-delivery-summary" aria-label="Delivery date quality totals">
           <div className="delivery-summary-item delivery-matched"><span>Matched delivery dates</span><strong>{supplierReport.totals.measuredDeliveryOrders}</strong><small>Expected and actual dates recorded</small></div>
           <div className="delivery-summary-item delivery-missing"><span>Missing expected date</span><strong>{supplierReport.totals.missingExpectedDateOrders}</strong><small>Orders without a planned date</small></div>
@@ -217,7 +248,7 @@ export default function BusinessAnalyticsWorkspace() {
           </tr>)}
           {!supplierReport.suppliers.length && <tr><td colSpan={13} className="analytics-supplier-empty">No supplier orders in this period.</td></tr>}
         </tbody></table></div>
-        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis. Payments and import costs use their own recorded dates and exchange rates. Matched delivery dates use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
+        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis and counted once in the month of the recorded expense date. Supplier payments are reported separately and are not costs. Matched delivery dates use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
       </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
     </>}

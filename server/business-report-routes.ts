@@ -10,7 +10,7 @@ import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/bu
 import { allocateLandedCosts } from "../shared/landed-cost";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
-import { supplierDeliveryMetrics } from "./supplier-analytics";
+import { supplierDeliveryMetrics, supplierMonthlySpend } from "./supplier-analytics";
 import { calculateSalesActivity } from "./sales-analytics";
 
 const cents = (value: string) => {
@@ -232,11 +232,13 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)),
       db.select({
         id: importExpenses.id, purchaseOrderId: importExpenses.purchaseOrderId, shipmentId: importExpenses.shipmentId,
+        incurredAt: importExpenses.incurredAt,
         amount: importExpenses.amount, exchangeRateToZmw: importExpenses.exchangeRateToZmw, basis: importExpenses.basis,
         amountZmw: sql<string>`round(${importExpenses.amount}::numeric * ${importExpenses.exchangeRateToZmw}::numeric, 2)::text`,
       }).from(importExpenses).where(and(...expenseConditions)),
       db.select({
-        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name, amountZmw: businessPayments.amountZmw,
+        supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
+        paymentDate: businessPayments.paymentDate, amountZmw: businessPayments.amountZmw,
       }).from(businessPayments).innerJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(and(eq(businessPayments.direction, "supplier_payment"), ...paymentConditions)),
@@ -325,6 +327,14 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       }
     }
     const deliveryMetrics = supplierDeliveryMetrics(orders, shipmentRows, shipmentLinks, new Date().toISOString().slice(0, 10));
+    const monthlySpend = supplierMonthlySpend({
+      purchaseLines: purchaseLines.map((line) => ({
+        orderedAt: line.orderedAt, status: line.status, totalZmw: line.totalZmw,
+      })),
+      expenses: expenses.map((expense) => ({ incurredAt: expense.incurredAt, amountZmw: expense.amountZmw })),
+      payments: payments.map((payment) => ({ paymentDate: payment.paymentDate, amountZmw: payment.amountZmw })),
+      fromDate: fromDate || null, toDate: toDate || null,
+    });
     const rows = [...bySupplier.values()].map((supplier) => ({
       supplierId: supplier.supplierId, name: supplier.name, orders: supplier.orders.size,
       orderedGoodsZmw: from(supplier.orderedGoods), importCostsZmw: from(supplier.importCosts),
@@ -341,6 +351,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     const allocatedImportCosts = rows.reduce((sum, row) => sum + cents(row.importCostsZmw), 0n);
     res.json({
       period: { from: fromDate || null, to: toDate || null },
+      monthlySpend,
       totals: {
         suppliers: rows.length, orders: rows.reduce((sum, row) => sum + row.orders, 0),
         orderedGoodsZmw: from(rows.reduce((sum, row) => sum + cents(row.orderedGoodsZmw), 0n)),

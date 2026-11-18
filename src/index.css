@@ -2719,6 +2719,18 @@ textarea:focus-visible {
 .analytics-supplier-totals > div { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--line); border-radius: 7px; }
 .analytics-supplier-totals span { color: var(--muted); font-size: 9px; }
 .analytics-supplier-totals strong { color: var(--ink); font: 650 13px var(--font-mono); }
+.analytics-monthly-supplier-spend { margin: 0 16px 16px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.analytics-monthly-supplier-heading { padding: 12px 14px; background: #f7f8f2; }
+.analytics-monthly-supplier-heading h3 { margin: 0; color: var(--ink); font-size: 12px; }
+.analytics-monthly-supplier-heading p { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.analytics-monthly-supplier-table-wrap { max-height: 360px; overflow: auto; }
+.analytics-monthly-supplier-table { width: 100%; border-collapse: collapse; text-align: right; }
+.analytics-monthly-supplier-table th, .analytics-monthly-supplier-table td { padding: 9px 12px; border-bottom: 1px solid #ebefea; color: var(--ink-soft); font: 500 10px var(--font-mono); white-space: nowrap; }
+.analytics-monthly-supplier-table thead th { position: sticky; top: 0; z-index: 1; color: #71817a; background: #f7f8f2; font: 700 8px var(--font-sans); letter-spacing: .06em; text-transform: uppercase; }
+.analytics-monthly-supplier-table th:first-child { text-align: left; }
+.analytics-monthly-supplier-table tbody th { color: var(--ink); font-family: var(--font-sans); font-weight: 600; }
+.analytics-monthly-supplier-table tfoot th, .analytics-monthly-supplier-table tfoot td { color: var(--ink); background: #f7f8f2; font-weight: 700; }
+.analytics-monthly-supplier-table tbody tr:last-child th, .analytics-monthly-supplier-table tbody tr:last-child td { border-bottom: 0; }
 .analytics-unallocated-costs { margin: 0 16px 14px; padding: 10px 12px; border: 1px solid #dfbd8f; border-radius: 6px; background: #fbf6ec; color: #805c2d; font-size: 10px; line-height: 1.5; }
 .analytics-delivery-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 0 16px 15px; }
 .delivery-summary-item { min-width: 0; display: grid; align-content: start; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 7px; background: #f9faf5; }
@@ -2756,6 +2768,7 @@ textarea:focus-visible {
 @media (max-width: 700px) {
   .analytics-grid { grid-template-columns: 1fr; }
   .analytics-supplier-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analytics-monthly-supplier-spend { margin-right: 12px; margin-left: 12px; }
   .analytics-delivery-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .analytics-rank-row, .analytics-customer-row { grid-template-columns: minmax(90px, 1fr) minmax(45px, 0.7fr) auto; gap: 7px; }
   .analytics-rank-values span { font-size: 8px; }

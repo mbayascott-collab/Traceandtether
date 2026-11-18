@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { supplierDeliveryMetrics } from "./supplier-analytics";
+import { supplierDeliveryMetrics, supplierMonthlySpend } from "./supplier-analytics";
 import { supplierReportCsv } from "../shared/supplier-report-csv";
 
 test("compares recorded shipment dates and uses the purchase order date when shipment expectation is absent", () => {
@@ -84,6 +84,9 @@ test("ignores cancelled orders and shipments and keeps suppliers without date pa
 test("supplier CSV keeps the selected range, supplier delivery values, and unallocated costs separate", () => {
   const csv = supplierReportCsv({
     period: { from: "2025-01-01", to: "2025-01-31" },
+    monthlySpend: [{
+      month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "35.00", paymentsZmw: "120.00",
+    }],
     totals: {
       orderedGoodsZmw: "240.00", importCostsZmw: "35.00", unallocatedImportCostsZmw: "5.00", paymentsZmw: "120.00",
       orders: 2, onTimeOrders: 1, lateOrders: 1, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
@@ -102,11 +105,14 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
   assert.match(csv, /"'\+1\.5 days · late"/);
   assert.match(csv, /"Unallocated import costs \(not assigned to a supplier\)","5\.00","ZMW"/);
   assert.match(csv, /"Total","2","240\.00","35\.00","120\.00"/);
+  assert.match(csv, /"Goods ordered use purchase-order dates; import costs use expense dates; supplier payments use payment dates and are separate from costs\."/);
+  assert.match(csv, /"2025-01","240\.00","35\.00","120\.00"/);
 });
 
 test("supplier CSV protects formula-like supplier names", () => {
   const csv = supplierReportCsv({
     period: { from: null, to: null },
+    monthlySpend: [],
     totals: {
       orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
       orders: 0, onTimeOrders: 0, lateOrders: 0, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
@@ -120,4 +126,46 @@ test("supplier CSV protects formula-like supplier names", () => {
   });
 
   assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
+});
+
+test("monthly supplier spend uses order, expense, and payment dates independently", () => {
+  const monthly = supplierMonthlySpend({
+    fromDate: "2025-01-01",
+    toDate: "2025-03-31",
+    purchaseLines: [
+      { orderedAt: "2025-01-28", status: "ordered", totalZmw: "100.00" },
+      { orderedAt: "2025-02-03", status: "received", totalZmw: "50.00" },
+      { orderedAt: "2025-02-10", status: "cancelled", totalZmw: "900.00" },
+      { orderedAt: "2024-12-31", status: "received", totalZmw: "700.00" },
+    ],
+    expenses: [
+      { incurredAt: "2025-02-05", amountZmw: "30.00" },
+      { incurredAt: "2025-03-12", amountZmw: "20.00" },
+      { incurredAt: "2024-12-31", amountZmw: "800.00" },
+    ],
+    payments: [
+      { paymentDate: "2025-03-01", amountZmw: "60.00" },
+      { paymentDate: "2025-01-15", amountZmw: "40.00" },
+    ],
+  });
+
+  assert.deepEqual(monthly, [
+    { month: "2025-01", orderedGoodsZmw: "100.00", importCostsZmw: "0.00", paymentsZmw: "40.00" },
+    { month: "2025-02", orderedGoodsZmw: "50.00", importCostsZmw: "30.00", paymentsZmw: "0.00" },
+    { month: "2025-03", orderedGoodsZmw: "0.00", importCostsZmw: "20.00", paymentsZmw: "60.00" },
+  ]);
+});
+
+test("monthly supplier spend counts shared shipment expenses once in the incurred month", () => {
+  const monthly = supplierMonthlySpend({
+    fromDate: "2025-02-01",
+    toDate: "2025-02-28",
+    purchaseLines: [{ orderedAt: "2025-01-15", status: "received", totalZmw: "100.00" }],
+    expenses: [{ incurredAt: "2025-02-20", amountZmw: "75.25" }],
+    payments: [],
+  });
+
+  assert.deepEqual(monthly, [
+    { month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "75.25", paymentsZmw: "0.00" },
+  ]);
 });

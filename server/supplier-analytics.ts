@@ -1,3 +1,5 @@
+import type { SupplierMonthlySpendRow } from "../shared/supplier-report-csv";
+
 export type SupplierDeliveryOrder = {
   id: number;
   supplierId: number;
@@ -29,6 +31,62 @@ export type SupplierDeliveryMetrics = {
   missingActualDateOrders: number;
   incompleteDeliveryOrders: number;
 };
+
+export type SupplierMonthlySpendInput = {
+  purchaseLines: { orderedAt: string; status: string; totalZmw: string }[];
+  expenses: { incurredAt: string; amountZmw: string }[];
+  payments: { paymentDate: string; amountZmw: string }[];
+  fromDate: string | null;
+  toDate: string | null;
+};
+
+const toCents = (value: string) => {
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+};
+const fromCents = (value: bigint) => `${value / 100n}.${String(value % 100n).padStart(2, "0")}`;
+
+export function supplierMonthlySpend(input: SupplierMonthlySpendInput): SupplierMonthlySpendRow[] {
+  const monthTotals = new Map<string, { orderedGoods: bigint; importCosts: bigint; payments: bigint }>();
+  const add = (date: string, category: "orderedGoods" | "importCosts" | "payments", amount: string) => {
+    if ((input.fromDate && date < input.fromDate) || (input.toDate && date > input.toDate)) return;
+    const month = date.slice(0, 7);
+    const totals = monthTotals.get(month) ?? { orderedGoods: 0n, importCosts: 0n, payments: 0n };
+    totals[category] += toCents(amount);
+    monthTotals.set(month, totals);
+  };
+
+  for (const line of input.purchaseLines) {
+    if (line.status !== "cancelled") add(line.orderedAt, "orderedGoods", line.totalZmw);
+  }
+  for (const expense of input.expenses) add(expense.incurredAt, "importCosts", expense.amountZmw);
+  for (const payment of input.payments) add(payment.paymentDate, "payments", payment.amountZmw);
+
+  const observedMonths = [...monthTotals.keys()].sort();
+  const firstMonth = input.fromDate?.slice(0, 7) ?? observedMonths[0];
+  const lastMonth = input.toDate?.slice(0, 7) ?? observedMonths.at(-1);
+  if (!firstMonth || !lastMonth || firstMonth > lastMonth) return [];
+
+  const result: SupplierMonthlySpendRow[] = [];
+  const [startYear, startMonth] = firstMonth.split("-").map(Number);
+  const [endYear, endMonth] = lastMonth.split("-").map(Number);
+  for (let year = startYear, month = startMonth; year < endYear || (year === endYear && month <= endMonth);) {
+    const key = `${year}-${String(month).padStart(2, "0")}`;
+    const totals = monthTotals.get(key) ?? { orderedGoods: 0n, importCosts: 0n, payments: 0n };
+    result.push({
+      month: key,
+      orderedGoodsZmw: fromCents(totals.orderedGoods),
+      importCostsZmw: fromCents(totals.importCosts),
+      paymentsZmw: fromCents(totals.payments),
+    });
+    month += 1;
+    if (month > 12) {
+      year += 1;
+      month = 1;
+    }
+  }
+  return result;
+}
 
 const daysBetween = (expectedAt: string, actualAt: string) =>
   Math.round((Date.parse(`${actualAt}T00:00:00Z`) - Date.parse(`${expectedAt}T00:00:00Z`)) / 86_400_000);
