@@ -11,6 +11,7 @@ import {
   shipmentInputSchema, shipmentReceiptSchema,
 } from "./product-validation";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import { cents, formatCents, landedCostAdjustmentPreview, postJournal, type PostingLine } from "./accounting-posting";
 
 const invalid = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
@@ -51,6 +52,10 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         await tx.insert(purchaseOrderLines).values(lines.map((line) => ({
           ...line, purchaseOrderId: created.id,
         })));
+        await recordBusinessAudit(tx, {
+          entityType: "purchase_order", entityId: created.id, recordLabel: created.orderNumber,
+          actor: res.locals.actor, action: "created", changedFields: [...Object.keys(input), "lines"],
+        });
         return created;
       });
       res.status(201).json({ order });
@@ -75,8 +80,15 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         .where(and(eq(shipmentPurchaseOrders.purchaseOrderId, id), ne(shipments.status, "cancelled"))).limit(1);
       if (openShipment) return invalid(res, "Cancel or complete the shipment before cancelling this order.");
     }
-    const [order] = await db.update(purchaseOrders).set({ ...parsed.data, updatedAt: new Date() })
-      .where(eq(purchaseOrders.id, id)).returning();
+    const [order] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(purchaseOrders).set({ ...parsed.data, updatedAt: new Date() })
+        .where(eq(purchaseOrders.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "purchase_order", entityId: updated.id, recordLabel: updated.orderNumber,
+        actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
+      });
+      return [updated];
+    });
     res.json({ order });
   });
 
@@ -142,6 +154,11 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         shipmentId: created.id, purchaseOrderId,
       })));
       await tx.insert(shipmentLines).values(lines.map((line) => ({ ...line, shipmentId: created.id, quantityReceived: 0 })));
+      await recordBusinessAudit(tx, {
+        entityType: "shipment", entityId: created.id,
+        recordLabel: created.shipmentReference || `Shipment #${created.id}`,
+        actor: res.locals.actor, action: "created", changedFields: [...Object.keys(input), "purchaseOrderIds", "lines"],
+      });
       return created;
     });
     res.status(201).json({ shipment });
@@ -187,6 +204,11 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       const [saved] = await tx.update(shipments).set({
         status, receivedAt: status === "received" ? new Date().toISOString().slice(0, 10) : null, updatedAt: new Date(),
       }).where(eq(shipments.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "shipment", entityId: saved.id,
+        recordLabel: saved.shipmentReference || `Shipment #${saved.id}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["status", "receivedAt", "receivedQuantities"],
+      });
       for (const orderId of orderIds) {
         const orderLines = allOrderLines.filter((line) => line.purchaseOrderId === orderId);
         const lineIds = orderLines.map((line) => line.id);
@@ -198,7 +220,12 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         const totalReceived = orderLines.reduce((total, line) => total + (receivedByLine.get(line.id) ?? 0), 0);
         const totalOrdered = orderLines.reduce((total, line) => total + line.quantityOrdered, 0);
         const orderStatus = totalReceived === totalOrdered ? "received" : totalReceived > 0 ? "partially_received" : "ordered";
-        await tx.update(purchaseOrders).set({ status: orderStatus, updatedAt: new Date() }).where(eq(purchaseOrders.id, orderId));
+        const [updatedOrder] = await tx.update(purchaseOrders).set({ status: orderStatus, updatedAt: new Date() })
+          .where(eq(purchaseOrders.id, orderId)).returning();
+        if (updatedOrder) await recordBusinessAudit(tx, {
+          entityType: "purchase_order", entityId: updatedOrder.id, recordLabel: updatedOrder.orderNumber,
+          actor: res.locals.actor, action: "updated", changedFields: ["status"],
+        });
       }
       return saved;
     });
@@ -224,6 +251,11 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       const [created] = await tx.insert(importExpenses).values({
         ...parsed.data, incurredAt: parsed.data.incurredAt ?? new Date().toISOString().slice(0, 10),
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "import_expense", entityId: created.id,
+        recordLabel: `${created.category}: ${created.description}`,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
       const expenseResult = await tx.execute(sql`
         select round(${parsed.data.amount}::numeric * ${parsed.data.exchangeRateToZmw}::numeric, 2)::text as amount
       `);
@@ -348,6 +380,11 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         sourceId: purchaseOrderId,
         memo: `Reviewed import-cost adjustment for ${order.orderNumber}: ${parsed.data.note}`,
         lines,
+      });
+      await recordBusinessAudit(tx, {
+        entityType: "landed_cost_adjustment", entityId: journalEntry.id,
+        recordLabel: `Landed-cost adjustment · ${order.orderNumber}`,
+        actor: res.locals.actor, action: "created", changedFields: ["reviewedAmountZmw", "reviewedLines", "note"],
       });
       return { journalEntry, preview };
     });

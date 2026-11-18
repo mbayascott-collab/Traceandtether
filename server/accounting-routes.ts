@@ -4,6 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { accountingAccounts, businessExpenses, journalEntries, journalLines } from "../shared/schema";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import {
   buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts,
   journalLinesAreBalanced, operatingExpenseAccountKey, postJournal,
@@ -80,6 +81,11 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         reference: input.reference || null,
         notes: input.notes || null,
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "business_expense", entityId: expense.id,
+        recordLabel: `${expense.category}: ${expense.description}`,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(input),
+      });
       const accountKey = operatingExpenseAccountKey(input.category);
       const cashKey = cashAccountKeyForMethod(input.method);
       const accountNames = await ensureAccountingAccounts(tx);
@@ -140,6 +146,10 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         entryDate: input.effectiveAt,
         memo: input.memo,
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "journal_entry", entityId: entry.id, recordLabel: entry.entryNumber,
+        actor: res.locals.actor, action: "created", changedFields: ["entryDate", "memo", "openingBalances"],
+      });
       await tx.insert(journalLines).values(lines.map((line) => {
         const account = accountMap.get(line.accountKey)!;
         return {
@@ -200,6 +210,10 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         entryDate: input.receivedAt,
         memo: `${memo}${input.reference ? ` · ${input.reference}` : ""}`,
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "journal_entry", entityId: entry.id, recordLabel: entry.entryNumber,
+        actor: res.locals.actor, action: "created", changedFields: ["entryDate", "memo", "fundingType", "amount", "method", "reference", "notes"],
+      });
       await tx.insert(journalLines).values(lines.map((line) => {
         const account = accountMap.get(line.accountKey)!;
         return {

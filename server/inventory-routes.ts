@@ -11,6 +11,7 @@ import {
   shipmentLines, shipments, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import {
   accountBalance, buildOpeningStockLines, cents, ensureAccountingAccounts, formatCents,
   journalLinesAreBalanced, postJournal, weightedAverageUnitCostCents,
@@ -112,7 +113,14 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const parsed = z.object({ name: z.string().trim().min(2).max(120) }).strict().safeParse(req.body);
     if (!parsed.success) return bad(res, "Enter a location name between 2 and 120 characters.");
     try {
-      const [location] = await db.insert(inventoryLocations).values({ name: parsed.data.name }).returning();
+      const [location] = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(inventoryLocations).values({ name: parsed.data.name }).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "inventory_location", entityId: created.id, recordLabel: created.name,
+          actor: res.locals.actor, action: "created", changedFields: ["name"],
+        });
+        return [created];
+      });
       return res.status(201).json({ location });
     } catch {
       return res.status(409).json({ error: "A stock location with that name already exists." });
@@ -196,6 +204,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         });
       }
       await tx.update(shipmentLines).set({ quantityStocked: line.quantityReceived }).where(eq(shipmentLines.id, line.id));
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `${quantity} units received for product #${productLine.productId}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
+      });
       return { movement };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -223,6 +236,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       const current = await balance(tx, product.id, locationId), available = current.onHand - current.reserved;
       if (parsed.data.quantity > available) return { error: `Only ${available} units are available to reserve.`, status: 409 };
       const [reservation] = await tx.insert(inventoryReservations).values({ ...parsed.data, locationId }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: reservation.id,
+        recordLabel: `Reservation #${reservation.id} · product #${reservation.productId}`,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
       return { reservation };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -238,6 +256,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       if (reservation.salesOrderId) return { error: "Manage this reservation through its sales order.", status: 409 };
       if (reservation.status !== "active") return { error: "Only active reservations can be released.", status: 409 };
       const [saved] = await tx.update(inventoryReservations).set({ status: "released", updatedAt: new Date() }).where(eq(inventoryReservations.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: saved.id,
+        recordLabel: `Reservation #${saved.id} · product #${saved.productId}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["status"],
+      });
       return { reservation: saved };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -274,6 +297,16 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         });
       }
       await tx.update(inventoryReservations).set({ status: "fulfilled", updatedAt: new Date() }).where(eq(inventoryReservations.id, id));
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: reservation.id,
+        recordLabel: `Reservation #${reservation.id} · product #${reservation.productId}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["status"],
+      });
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `Fulfilled reservation #${reservation.id}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason"],
+      });
       return { movement };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -296,6 +329,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       const [movement] = await tx.insert(inventoryMovements).values({
         ...parsed.data, locationId, kind: "adjustment",
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `Stock adjustment · product #${product.id}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
+      });
       const inventoryValue = await accountBalance(tx, "inventory", product.id);
       if (productTotal.onHand > 0 && inventoryValue > 0n) {
         const value = (inventoryValue * BigInt(Math.abs(parsed.data.quantityDelta)) + BigInt(productTotal.onHand / 2)) / BigInt(productTotal.onHand);
@@ -342,6 +380,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         { productId: product.id, locationId: parsed.data.fromLocationId, kind: "stock_transfer_out", quantityDelta: -parsed.data.quantity, reason: parsed.data.reason, reference: parsed.data.reference, sourceKey: `${transferKey}-out` },
         { productId: product.id, locationId: parsed.data.toLocationId, kind: "stock_transfer_in", quantityDelta: parsed.data.quantity, reason: parsed.data.reason, reference: parsed.data.reference, sourceKey: `${transferKey}-in` },
       ]).returning();
+      for (const movement of movements) await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `Stock transfer · product #${product.id}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
+      });
       return { movements };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -372,6 +415,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         productId: product.id, locationId: location.id, kind: parsed.data.kind, quantityDelta: delta,
         reason: parsed.data.reason, reference: parsed.data.reference, sourceKey: `${parsed.data.kind}:${randomUUID()}`,
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `${parsed.data.kind.replaceAll("_", " ")} · product #${product.id}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
+      });
       const inventoryValue = await accountBalance(tx, "inventory", product.id);
       const cost = productTotal.onHand > 0 ? (inventoryValue * BigInt(parsed.data.quantity) + BigInt(productTotal.onHand / 2)) / BigInt(productTotal.onHand) : 0n;
       if (cost > 0n) await postJournal(tx, {
@@ -417,6 +465,10 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         productId: product.id, locationId, kind: "opening_stock", quantityDelta: parsed.data.quantity,
         reason: memo, reference: parsed.data.reference, sourceKey,
       }).returning())[0]!;
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id, recordLabel: `Opening stock · ${product.name}`,
+        actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
+      });
       await postJournal(tx, {
         sourceKey, sourceType: "opening_stock", sourceId: movement.id,
         memo, entryDate: effectiveAt, lines,

@@ -4,9 +4,10 @@ import { and, asc, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
 import {
-  appUserAccess, appUsers, productAuditLogs, productCategories, products, supplierQuotes, suppliers,
+  appUserAccess, appUsers, businessAuditLogs, productCategories, products, supplierQuotes, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import { databaseErrorStatus } from "./database-errors";
 import { registerProcurementRoutes } from "./procurement-routes";
 import { registerInventoryRoutes } from "./inventory-routes";
@@ -151,6 +152,23 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ users });
   });
 
+  app.get("/api/audit-logs", requireBusinessAccess, async (req, res) => {
+    const parsed = z.object({
+      entityType: z.string().trim().min(1).max(48).optional(),
+      limit: z.string().regex(/^\d+$/).default("250"),
+    }).safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Choose a valid audit history filter." });
+      return;
+    }
+    const limit = Math.min(500, Math.max(1, Number(parsed.data.limit)));
+    const entries = await db.select().from(businessAuditLogs)
+      .where(parsed.data.entityType ? eq(businessAuditLogs.entityType, parsed.data.entityType) : undefined)
+      .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id))
+      .limit(limit);
+    res.json({ entries });
+  });
+
   app.post("/api/user-access", requireBusinessAccess, async (req, res) => {
     const parsed = z.object({
       email: z.string().trim().email().max(320),
@@ -239,7 +257,14 @@ export function registerApiRoutes(app: import("express").Express) {
       return;
     }
     try {
-      const [supplier] = await db.insert(suppliers).values(parsed.data).returning();
+      const [supplier] = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(suppliers).values(parsed.data).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "supplier", entityId: created.id, recordLabel: created.name,
+          actor: res.locals.actor as Actor, action: "created", changedFields: Object.keys(parsed.data),
+        });
+        return [created];
+      });
       res.status(201).json({ supplier });
     } catch (error) {
       const databaseError = databaseErrorStatus(error, "A supplier with this name already exists.");
@@ -263,9 +288,16 @@ export function registerApiRoutes(app: import("express").Express) {
       return;
     }
     try {
-      const [supplier] = await db.update(suppliers)
-        .set({ ...parsed.data, updatedAt: new Date() })
-        .where(eq(suppliers.id, id)).returning();
+      const [supplier] = await db.transaction(async (tx) => {
+        const [updated] = await tx.update(suppliers)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(eq(suppliers.id, id)).returning();
+        if (updated) await recordBusinessAudit(tx, {
+          entityType: "supplier", entityId: updated.id, recordLabel: updated.name,
+          actor: res.locals.actor as Actor, action: "updated", changedFields: Object.keys(parsed.data),
+        });
+        return [updated];
+      });
       if (!supplier) {
         res.status(404).json({ error: "Supplier not found." });
         return;
@@ -315,7 +347,15 @@ export function registerApiRoutes(app: import("express").Express) {
         res.status(400).json({ error: "Choose an active supplier for this quote." });
         return;
       }
-      const [quote] = await db.insert(supplierQuotes).values(parsed.data).returning();
+      const [quote] = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(supplierQuotes).values(parsed.data).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "supplier_quote", entityId: created.id,
+          recordLabel: `Supplier quote #${created.id}`, actor: res.locals.actor as Actor,
+          action: "created", changedFields: Object.keys(parsed.data),
+        });
+        return [created];
+      });
       res.status(201).json({ quote });
     } catch (error) {
       const databaseError = databaseErrorStatus(
@@ -356,9 +396,17 @@ export function registerApiRoutes(app: import("express").Express) {
           return;
         }
       }
-      const [quote] = await db.update(supplierQuotes)
-        .set({ ...parsed.data, updatedAt: new Date() })
-        .where(eq(supplierQuotes.id, id)).returning();
+      const [quote] = await db.transaction(async (tx) => {
+        const [updated] = await tx.update(supplierQuotes)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(eq(supplierQuotes.id, id)).returning();
+        if (updated) await recordBusinessAudit(tx, {
+          entityType: "supplier_quote", entityId: updated.id,
+          recordLabel: `Supplier quote #${updated.id}`, actor: res.locals.actor as Actor,
+          action: "updated", changedFields: Object.keys(parsed.data),
+        });
+        return [updated];
+      });
       res.json({ quote });
     } catch (error) {
       const databaseError = databaseErrorStatus(
@@ -381,10 +429,14 @@ export function registerApiRoutes(app: import("express").Express) {
     }
 
     try {
-      const [category] = await db
-        .insert(productCategories)
-        .values(parsed.data)
-        .returning();
+      const [category] = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(productCategories).values(parsed.data).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "category", entityId: created.id, recordLabel: created.name,
+          actor: res.locals.actor as Actor, action: "created", changedFields: Object.keys(parsed.data),
+        });
+        return [created];
+      });
       res.status(201).json({ category });
     } catch (error) {
       const databaseError = databaseErrorStatus(error);
@@ -409,11 +461,16 @@ export function registerApiRoutes(app: import("express").Express) {
     }
 
     try {
-      const [category] = await db
-        .update(productCategories)
-        .set({ ...parsed.data, updatedAt: new Date() })
-        .where(eq(productCategories.id, id))
-        .returning();
+      const [category] = await db.transaction(async (tx) => {
+        const [updated] = await tx.update(productCategories)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(eq(productCategories.id, id)).returning();
+        if (updated) await recordBusinessAudit(tx, {
+          entityType: "category", entityId: updated.id, recordLabel: updated.name,
+          actor: res.locals.actor as Actor, action: "updated", changedFields: Object.keys(parsed.data),
+        });
+        return [updated];
+      });
       if (!category) {
         res.status(404).json({ error: "Category not found." });
         return;
@@ -490,11 +547,9 @@ export function registerApiRoutes(app: import("express").Express) {
     try {
       const product = await db.transaction(async (tx) => {
         const [created] = await tx.insert(products).values(parsed.data).returning();
-        await tx.insert(productAuditLogs).values({
-          productId: created.id,
-          actorClerkUserId: actor.clerkUserId,
-          action: "created",
-          changedFields: Object.keys(parsed.data),
+        await recordBusinessAudit(tx, {
+          entityType: "product", entityId: created.id, recordLabel: created.name,
+          actor, action: "created", changedFields: Object.keys(parsed.data),
         });
         return created;
       });
@@ -539,11 +594,9 @@ export function registerApiRoutes(app: import("express").Express) {
           .returning();
 
         if (changedFields.length > 0) {
-          await tx.insert(productAuditLogs).values({
-            productId: id,
-            actorClerkUserId: actor.clerkUserId,
-            action: parsed.data.status === "inactive" ? "deactivated" : "updated",
-            changedFields,
+          await recordBusinessAudit(tx, {
+            entityType: "product", entityId: id, recordLabel: updated.name,
+            actor, action: "updated", changedFields,
           });
         }
         return updated;

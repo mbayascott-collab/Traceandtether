@@ -197,6 +197,13 @@
       "when": 1794992367789,
       "tag": "0027_curvy_millenium_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1794992861222,
+      "tag": "0028_business_audit_logs",
+      "breakpoints": true
     }
   ]
 }

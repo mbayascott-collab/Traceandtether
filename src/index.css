@@ -3144,3 +3144,32 @@ textarea:focus-visible {
     width: 100%;
   }
 }
+
+.audit-filter {
+  display: grid;
+  gap: 6px;
+  min-width: 190px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.audit-filter select {
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fffefa;
+  color: var(--text);
+}
+
+.audit-error {
+  margin-bottom: 14px;
+  color: #8c3129;
+}
+
+@media (max-width: 700px) {
+  .audit-filter {
+    width: 100%;
+  }
+}

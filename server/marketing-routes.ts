@@ -3,6 +3,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
@@ -75,16 +76,30 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/marketing/campaigns", owner, async (req, res) => {
     const parsed = campaignSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
-    const [campaign] = await db.insert(marketingCampaigns).values({
-      ...parsed.data, trackingCode: randomUUID(),
-    }).returning();
+    const [campaign] = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(marketingCampaigns).values({
+        ...parsed.data, trackingCode: randomUUID(),
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_campaign", entityId: created.id, recordLabel: created.name,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
+      return [created];
+    });
     res.status(201).json({ campaign });
   });
   app.patch("/api/marketing/campaigns/:id", owner, async (req, res) => {
     const id = Number(req.params.id), parsed = campaignSchema.safeParse(req.body);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
     if (!parsed.success) return bad(res, parsed.error);
-    const [campaign] = await db.update(marketingCampaigns).set({ ...parsed.data, updatedAt: new Date() }).where(eq(marketingCampaigns.id, id)).returning();
+    const [campaign] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(marketingCampaigns).set({ ...parsed.data, updatedAt: new Date() }).where(eq(marketingCampaigns.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "marketing_campaign", entityId: updated.id, recordLabel: updated.name,
+        actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
+      });
+      return [updated];
+    });
     if (!campaign) return res.status(404).json({ error: "Campaign not found." });
     res.json({ campaign });
   });
@@ -99,9 +114,16 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const parsed = contentSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
     if (!await hasCampaign(parsed.data.campaignId)) return res.status(400).json({ error: "Choose an existing campaign." });
-    const [item] = await db.insert(marketingContentItems).values({
-      ...parsed.data, scheduledAt: parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : null,
-    }).returning();
+    const [item] = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(marketingContentItems).values({
+        ...parsed.data, scheduledAt: parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : null,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_content", entityId: created.id, recordLabel: created.title,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
+      return [created];
+    });
     res.status(201).json({ item });
   });
   app.patch("/api/marketing/content/:id", owner, async (req, res) => {
@@ -109,9 +131,16 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid content item." });
     if (!parsed.success) return bad(res, parsed.error);
     if (!await hasCampaign(parsed.data.campaignId)) return res.status(400).json({ error: "Choose an existing campaign." });
-    const [item] = await db.update(marketingContentItems).set({
-      ...parsed.data, scheduledAt: parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : null, updatedAt: new Date(),
-    }).where(eq(marketingContentItems.id, id)).returning();
+    const [item] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(marketingContentItems).set({
+        ...parsed.data, scheduledAt: parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : null, updatedAt: new Date(),
+      }).where(eq(marketingContentItems.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "marketing_content", entityId: updated.id, recordLabel: updated.title,
+        actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
+      });
+      return [updated];
+    });
     if (!item) return res.status(404).json({ error: "Content item not found." });
     res.json({ item });
   });
@@ -128,6 +157,11 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     if (!await hasCampaign(parsed.data.campaignId)) return res.status(400).json({ error: "Choose an existing campaign." });
     const [expense, amountResult] = await db.transaction(async (tx) => {
       const [created] = await tx.insert(marketingExpenses).values(parsed.data).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_expense", entityId: created.id,
+        recordLabel: `${created.category}: ${created.description}`,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
       const converted = await tx.execute(sql`select round(${parsed.data.amount}::numeric * ${parsed.data.exchangeRateToZmw}::numeric, 2)::text as amount`);
       const amountZmw = String(converted.rows[0]?.amount ?? "0.00");
       await postJournal(tx, {
@@ -188,23 +222,47 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/marketing/customer-groups", owner, ownerOnly, async (req, res) => {
     const parsed = customerGroupSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
-    const [group] = await db.insert(marketingCustomerGroups).values(parsed.data).returning();
+    const [group] = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(marketingCustomerGroups).values(parsed.data).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_customer_group", entityId: created.id, recordLabel: created.name,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
+      return [created];
+    });
     res.status(201).json({ group });
   });
   app.patch("/api/marketing/customer-groups/:id", owner, ownerOnly, async (req, res) => {
     const id = Number(req.params.id), parsed = customerGroupSchema.safeParse(req.body);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
     if (!parsed.success) return bad(res, parsed.error);
-    const [group] = await db.update(marketingCustomerGroups).set({
-      ...parsed.data, updatedAt: new Date(),
-    }).where(eq(marketingCustomerGroups.id, id)).returning();
+    const [group] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(marketingCustomerGroups).set({
+        ...parsed.data, updatedAt: new Date(),
+      }).where(eq(marketingCustomerGroups.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "marketing_customer_group", entityId: updated.id, recordLabel: updated.name,
+        actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
+      });
+      return [updated];
+    });
     if (!group) return res.status(404).json({ error: "Customer group not found." });
     res.json({ group });
   });
   app.delete("/api/marketing/customer-groups/:id", owner, ownerOnly, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
-    const [group] = await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).returning({ id: marketingCustomerGroups.id });
+    const [group] = await db.transaction(async (tx) => {
+      const [existing] = await tx.select({ id: marketingCustomerGroups.id, name: marketingCustomerGroups.name })
+        .from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
+      if (!existing) return [];
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_customer_group", entityId: existing.id, recordLabel: existing.name,
+        actor: res.locals.actor, action: "deleted",
+      });
+      return await tx.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id))
+        .returning({ id: marketingCustomerGroups.id });
+    });
     if (!group) return res.status(404).json({ error: "Customer group not found." });
     res.status(204).end();
   });

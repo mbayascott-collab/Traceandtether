@@ -15,6 +15,7 @@ import {
   Calculator,
   FolderOpen,
   FileText,
+  History,
   Info,
   LayoutDashboard,
   LockKeyhole,
@@ -63,6 +64,7 @@ import ProfitabilityWorkspace, { BusinessDashboard } from "./BusinessReports";
 import PaymentsWorkspace from "./PaymentsWorkspace";
 import UserAccessWorkspace from "./UserAccessWorkspace";
 import BusinessAnalyticsWorkspace from "./BusinessAnalyticsWorkspace";
+import AuditWorkspace from "./AuditWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
@@ -289,7 +291,8 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
   const isMarketing = location === "/marketing";
   const isProfitability = location === "/profitability";
   const isUserAccess = location === "/user-access";
-  const currentSection = isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : isAnalytics ? "Analytics" : isUserAccess ? "User access" : "Dashboard";
+  const isAuditHistory = location === "/audit-history";
+  const currentSection = isAuditHistory ? "Change history" : isProducts ? "Products" : isCategories ? "Categories" : isSuppliers ? "Suppliers" : isQuotes ? "Quotations" : isComparison ? "Supplier comparison" : isPurchaseOrders ? "Purchase orders" : isShipments ? "Shipments" : isImportExpenses ? "Import expenses" : isLandedCosts ? "Landed costs" : isInventory ? "Inventory" : isStockReceipts ? "Stock receipts" : isReservations ? "Reservations" : isStockAdjustments ? "Stock adjustments" : isCustomers ? "Customers" : isCustomerQuotes ? "Customer quotes" : isSalesOrders ? "Sales orders" : isPayments ? "Payments" : isAccounting ? "Accounting" : isMarketing ? "Marketing" : isProfitability ? "Profitability" : isAnalytics ? "Analytics" : isUserAccess ? "User access" : "Dashboard";
   useEffect(() => {
     document.querySelector(".app-main")?.scrollTo(0, 0);
     window.scrollTo(0, 0);
@@ -507,6 +510,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           </Link>
           <Link href="/user-access" aria-current={isUserAccess ? "page" : undefined}>
             <ShieldCheck aria-hidden="true" /><span>User access</span>
+          </Link>
+          <Link href="/audit-history" aria-current={isAuditHistory ? "page" : undefined}>
+            <History aria-hidden="true" /><span>Change history</span>
           </Link>
         </nav>
         <div className="sidebar-spacer" />
@@ -889,6 +895,7 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isMarketing && <MarketingWorkspace />}
           {isProfitability && <ProfitabilityWorkspace />}
           {isUserAccess && <UserAccessWorkspace />}
+          {isAuditHistory && <AuditWorkspace />}
         </div>
       </main>
 

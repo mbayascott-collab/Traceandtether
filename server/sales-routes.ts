@@ -10,6 +10,7 @@ import {
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
+import { recordBusinessAudit, type AuditActor } from "./audit";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -30,7 +31,7 @@ async function stockBalance(tx: any, productId: number, locationId?: number) {
   return { onHand: Number(m?.value ?? 0), reserved: Number(r?.value ?? 0), locationId: location?.id ?? null };
 }
 
-async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }) {
+async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }, actor: AuditActor) {
   const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, orderId)).for("update").limit(1);
   if (!order) return { error: "Sales order not found.", status: 404 };
   if (order.status !== "confirmed" && order.status !== "partially_fulfilled") {
@@ -82,6 +83,11 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
       status: remainingReservation > 0 ? "active" : "fulfilled",
       updatedAt: new Date(),
     }).where(eq(inventoryReservations.id, hold.id));
+    await recordBusinessAudit(tx, {
+      entityType: "inventory_reservation", entityId: hold.id,
+      recordLabel: `Reservation #${hold.id} · product #${line.productId}`,
+      actor, action: "updated", changedFields: ["quantity", "status"],
+    });
     const [movementTotal] = await tx.select({ value: sum(inventoryMovements.quantityDelta) })
       .from(inventoryMovements).where(eq(inventoryMovements.productId, line.productId));
     const onHand = Number(movementTotal?.value ?? 0);
@@ -93,10 +99,15 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
         { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory delivered" },
       );
     }
-    await tx.insert(inventoryMovements).values({
+    const [movement] = await tx.insert(inventoryMovements).values({
       productId: line.productId, locationId: hold.locationId, kind: "reservation_fulfillment", quantityDelta: -lineInput.quantity,
       reason: `Delivered on ${delivery.deliveryNumber}`, reference: delivery.deliveryNumber,
       sourceKey: `sales-delivery-${delivery.id}-product-${line.productId}`, reservationId: hold.id,
+    }).returning();
+    await recordBusinessAudit(tx, {
+      entityType: "inventory_movement", entityId: movement.id,
+      recordLabel: `Delivery ${delivery.deliveryNumber} · product #${line.productId}`,
+      actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
     });
     revenue += cents(line.unitPriceZmw) * BigInt(lineInput.quantity);
   }
@@ -121,6 +132,14 @@ async function recordDelivery(tx: any, orderId: number, input: { deliveryDate: s
     fulfilledAt: complete ? new Date() : null,
     updatedAt: new Date(),
   }).where(eq(salesOrders.id, orderId)).returning();
+  await recordBusinessAudit(tx, {
+    entityType: "sales_delivery", entityId: delivery.id, recordLabel: delivery.deliveryNumber,
+    actor, action: "created", changedFields: ["deliveryDate", "lines"],
+  });
+  await recordBusinessAudit(tx, {
+    entityType: "sales_order", entityId: saved.id, recordLabel: saved.orderNumber,
+    actor, action: "updated", changedFields: ["status"],
+  });
   return { delivery, order: saved };
 }
 
@@ -187,6 +206,11 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         address: parsed.data.address || null,
         status: "active",
       }).returning();
+      const publicActor: AuditActor = { clerkUserId: null, email: "Public shop" };
+      await recordBusinessAudit(tx, {
+        entityType: "customer", entityId: customer.id, recordLabel: customer.name,
+        actor: publicActor, action: "created", changedFields: ["name", "phone", "email", "address", "status"],
+      });
       const orderNumber = `WEB-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`;
       const [order] = await tx.insert(salesOrders).values({
         orderNumber,
@@ -195,6 +219,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         notes: [ "Public shop order request", parsed.data.notes ].filter(Boolean).join(" — "),
         status: "draft",
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: order.id, recordLabel: order.orderNumber,
+        actor: publicActor, action: "created", changedFields: ["customerId", "deliveryAddress", "notes", "status", "lines"],
+      });
       const byId = new Map(selected.map((product) => [product.id, product]));
       await tx.insert(salesOrderLines).values(parsed.data.lines.map((line) => ({
         salesOrderId: order.id,
@@ -219,14 +247,28 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/customers", owner, async (req, res) => {
     const parsed = customerInputSchema.safeParse({ ...req.body, status: req.body?.status ?? "active" });
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the customer details.");
-    const [customer] = await db.insert(customers).values(parsed.data).returning();
+    const [customer] = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(customers).values(parsed.data).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "customer", entityId: created.id, recordLabel: created.name,
+        actor: res.locals.actor, action: "created", changedFields: Object.keys(parsed.data),
+      });
+      return [created];
+    });
     res.status(201).json({ customer });
   });
   app.patch("/api/customers/:id", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid customer.");
     const parsed = customerInputSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the customer details.");
-    const [customer] = await db.update(customers).set({ ...parsed.data, updatedAt: new Date() }).where(eq(customers.id, id)).returning();
+    const [customer] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(customers).set({ ...parsed.data, updatedAt: new Date() }).where(eq(customers.id, id)).returning();
+      if (updated) await recordBusinessAudit(tx, {
+        entityType: "customer", entityId: updated.id, recordLabel: updated.name,
+        actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
+      });
+      return [updated];
+    });
     if (!customer) return res.status(404).json({ error: "Customer not found." });
     res.json({ customer });
   });
@@ -313,6 +355,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         ...input, quoteNumber: `CQ-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
       }).returning();
       await tx.insert(customerQuoteLines).values(lines.map((line) => ({ ...line, customerQuoteId: created.id })));
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: created.id, recordLabel: created.quoteNumber,
+        actor: res.locals.actor, action: "created", changedFields: [...Object.keys(input), "lines"],
+      });
       return created;
     });
     res.status(201).json({ quote });
@@ -335,6 +381,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       await tx.delete(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id));
       await tx.insert(customerQuoteLines).values(lines.map((line) => ({ ...line, customerQuoteId: id })));
       const [quote] = await tx.update(customerQuotes).set({ ...input, updatedAt: new Date() }).where(eq(customerQuotes.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: quote.id, recordLabel: quote.quoteNumber,
+        actor: res.locals.actor, action: "updated", changedFields: [...Object.keys(input), "lines"],
+      });
       return { quote };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -349,6 +399,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       if (quote.status === "converted" || quote.salesOrderId) {
         return { error: "Delete the linked draft sales order before deleting this quote.", status: 409 };
       }
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: quote.id, recordLabel: quote.quoteNumber,
+        actor: res.locals.actor, action: "deleted",
+      });
       await tx.delete(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id));
       await tx.delete(customerQuotes).where(eq(customerQuotes.id, id));
       return { ok: true };
@@ -375,10 +429,18 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         customerId: quote.customerId, deliveryAddress: quote.deliveryAddress,
         notes: `Created from ${quote.quoteNumber}${quote.notes ? ` — ${quote.notes}` : ""}`, status: "draft",
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: order.id, recordLabel: order.orderNumber,
+        actor: res.locals.actor, action: "created", changedFields: ["customerId", "deliveryAddress", "notes", "status", "lines"],
+      });
       await tx.insert(salesOrderLines).values(quoteLines.map((line) => ({
         salesOrderId: order.id, productId: line.productId, quantity: line.quantity, unitPriceZmw: line.unitPriceZmw,
       })));
       const [savedQuote] = await tx.update(customerQuotes).set({ status: "converted", salesOrderId: order.id, updatedAt: new Date() }).where(eq(customerQuotes.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "customer_quote", entityId: savedQuote.id, recordLabel: savedQuote.quoteNumber,
+        actor: res.locals.actor, action: "updated", changedFields: ["status", "salesOrderId"],
+      });
       return { quote: savedQuote, order };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -392,13 +454,25 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const [order] = await db.select({ id: salesOrders.id }).from(salesOrders).where(eq(salesOrders.id, id)).limit(1);
     if (!order) return res.status(404).json({ error: "Sales order not found." });
     if (campaignId === null) {
-      await db.delete(marketingAttributions).where(eq(marketingAttributions.salesOrderId, id));
+      await db.transaction(async (tx) => {
+        await tx.delete(marketingAttributions).where(eq(marketingAttributions.salesOrderId, id));
+        await recordBusinessAudit(tx, {
+          entityType: "sales_order", entityId: order.id, recordLabel: `Sales order #${id}`,
+          actor: res.locals.actor, action: "updated", changedFields: ["campaignAttribution"],
+        });
+      });
       return res.json({ campaignId: null });
     }
     const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId)).limit(1);
     if (!campaign) return bad(res, "Choose an existing campaign.");
-    await db.insert(marketingAttributions).values({ salesOrderId: id, campaignId, source: "manual" })
-      .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, source: "manual", attributedAt: new Date() } });
+    await db.transaction(async (tx) => {
+      await tx.insert(marketingAttributions).values({ salesOrderId: id, campaignId, source: "manual" })
+        .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, source: "manual", attributedAt: new Date() } });
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: order.id, recordLabel: `Sales order #${id}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["campaignAttribution"],
+      });
+    });
     res.json({ campaignId });
   });
   app.post("/api/sales-orders", owner, async (req, res) => {
@@ -415,6 +489,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         customerId: parsed.data.customerId, deliveryAddress: parsed.data.deliveryAddress, notes: parsed.data.notes, status: "draft",
       }).returning();
       await tx.insert(salesOrderLines).values(parsed.data.lines.map((line) => ({ ...line, salesOrderId: created.id })));
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: created.id, recordLabel: created.orderNumber,
+        actor: res.locals.actor, action: "created", changedFields: ["customerId", "deliveryAddress", "notes", "status", "lines"],
+      });
       return created;
     });
     res.status(201).json({ order });
@@ -434,6 +512,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         .from(inventoryReservations).where(eq(inventoryReservations.salesOrderId, id)).limit(1);
       if (reservation) return { error: "This order has stock reservation history and cannot be deleted. Cancel it instead.", status: 409 };
 
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: order.id, recordLabel: order.orderNumber,
+        actor: res.locals.actor, action: "deleted",
+      });
       await tx.update(customerQuotes)
         .set({ status: "accepted", salesOrderId: null, updatedAt: new Date() })
         .where(eq(customerQuotes.salesOrderId, id));
@@ -462,11 +544,21 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         const available = balance.onHand - balance.reserved;
         if (available < line.quantity) return { error: `${available} units available for product ${line.productId}; ${line.quantity} requested.`, status: 409 };
       }
-      await tx.insert(inventoryReservations).values(lines.map((line) => ({
+      const reservations = await tx.insert(inventoryReservations).values(lines.map((line) => ({
         productId: line.productId, locationId: mainLocation.id, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
         reason: `Sales order ${order.orderNumber}`, status: "active" as const,
-      })));
+      }))).returning();
+      for (const reservation of reservations) await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: reservation.id,
+        recordLabel: `Reservation #${reservation.id} · product #${reservation.productId}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["productId", "locationId", "salesOrderId", "quantity", "reference", "reason", "status"],
+      });
       const [saved] = await tx.update(salesOrders).set({ status: "confirmed", confirmedAt: new Date(), updatedAt: new Date() }).where(eq(salesOrders.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: saved.id, recordLabel: saved.orderNumber,
+        actor: res.locals.actor, action: "updated", changedFields: ["status", "confirmedAt"],
+      });
       return { order: saved };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
@@ -476,7 +568,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");
     const parsed = salesDeliveryInputSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the delivery details.");
-    const result = await db.transaction((tx) => recordDelivery(tx, id, parsed.data));
+    const result = await db.transaction((tx) => recordDelivery(tx, id, parsed.data, res.locals.actor));
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.status(201).json(result);
   });
@@ -497,7 +589,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         salesOrderLineId: line.id, quantity: line.quantity - (delivered.get(line.id) ?? 0),
       })).filter((line) => line.quantity > 0);
       if (!remainingLines.length) return { error: "This order has no remaining items to deliver.", status: 409 };
-      return recordDelivery(tx, id, { deliveryDate: new Date().toISOString().slice(0, 10), lines: remainingLines });
+      return recordDelivery(tx, id, { deliveryDate: new Date().toISOString().slice(0, 10), lines: remainingLines }, res.locals.actor);
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
@@ -508,9 +600,18 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, id)).for("update").limit(1);
       if (!order) return { error: "Sales order not found.", status: 404 };
       if (order.status === "fulfilled" || order.status === "cancelled") return { error: "This order can no longer be cancelled.", status: 409 };
-      await tx.update(inventoryReservations).set({ status: "released", updatedAt: new Date() })
-        .where(and(eq(inventoryReservations.salesOrderId, id), eq(inventoryReservations.status, "active")));
+      const releasedReservations = await tx.update(inventoryReservations).set({ status: "released", updatedAt: new Date() })
+        .where(and(eq(inventoryReservations.salesOrderId, id), eq(inventoryReservations.status, "active"))).returning();
+      for (const reservation of releasedReservations) await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: reservation.id,
+        recordLabel: `Reservation #${reservation.id} · product #${reservation.productId}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["status"],
+      });
       const [saved] = await tx.update(salesOrders).set({ status: "cancelled", updatedAt: new Date() }).where(eq(salesOrders.id, id)).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_order", entityId: saved.id, recordLabel: saved.orderNumber,
+        actor: res.locals.actor, action: "updated", changedFields: ["status"],
+      });
       return { order: saved };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });

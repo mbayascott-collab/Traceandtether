@@ -147,6 +147,25 @@ export const productAuditLogs = pgTable("product_audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const businessAuditLogs = pgTable(
+  "business_audit_logs",
+  {
+    id: serial("id").primaryKey(),
+    entityType: varchar("entity_type", { length: 48 }).notNull(),
+    entityId: integer("entity_id").notNull(),
+    recordLabel: varchar("record_label", { length: 240 }).notNull(),
+    actorClerkUserId: varchar("actor_clerk_user_id", { length: 255 }),
+    actorEmail: varchar("actor_email", { length: 320 }).notNull(),
+    action: varchar("action", { length: 16 }).notNull(),
+    changedFields: jsonb("changed_fields").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("business_audit_logs_created_idx").on(table.createdAt),
+    index("business_audit_logs_entity_idx").on(table.entityType, table.entityId, table.createdAt),
+  ],
+);
+
 export const suppliers = pgTable(
   "suppliers",
   {

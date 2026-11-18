@@ -8,6 +8,7 @@ import {
 } from "../shared/schema";
 import { paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
+import { recordBusinessAudit } from "./audit";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
 
@@ -209,14 +210,23 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       return bad(res, "Choose an active cash, bank, mobile money, or other funds account.", 404);
     }
     if (input.lines.some((line) => cents(line.amountZmw) <= 0n)) return bad(res, "Enter amounts greater than zero.");
-    const inserted = await db.insert(paymentStatementLines).values(input.lines.map((line) => ({
-      accountId: input.accountId,
-      transactionDate: line.transactionDate,
-      flow: line.flow,
-      amountZmw: formatCents(cents(line.amountZmw)),
-      description: line.description,
-      reference: line.reference || null,
-    }))).returning({ id: paymentStatementLines.id });
+    const inserted = await db.transaction(async (tx) => {
+      const rows = await tx.insert(paymentStatementLines).values(input.lines.map((line) => ({
+        accountId: input.accountId,
+        transactionDate: line.transactionDate,
+        flow: line.flow,
+        amountZmw: formatCents(cents(line.amountZmw)),
+        description: line.description,
+        reference: line.reference || null,
+      }))).returning();
+      for (const line of rows) await recordBusinessAudit(tx, {
+        entityType: "payment_statement_line", entityId: line.id,
+        recordLabel: `Statement line #${line.id}`,
+        actor: res.locals.actor, action: "created",
+        changedFields: ["accountId", "transactionDate", "flow", "amountZmw", "description", "reference"],
+      });
+      return rows;
+    });
     res.status(201).json({ added: inserted.length });
   });
 
@@ -227,7 +237,14 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     const [line] = await db.select().from(paymentStatementLines).where(eq(paymentStatementLines.id, lineId)).limit(1);
     if (!line) return bad(res, "Statement line not found.", 404);
     if (paymentId === null) {
-      await db.update(paymentStatementLines).set({ matchedPaymentId: null }).where(eq(paymentStatementLines.id, lineId));
+      await db.transaction(async (tx) => {
+        await tx.update(paymentStatementLines).set({ matchedPaymentId: null }).where(eq(paymentStatementLines.id, lineId));
+        await recordBusinessAudit(tx, {
+          entityType: "payment_statement_line", entityId: line.id,
+          recordLabel: `Statement line #${line.id}`,
+          actor: res.locals.actor, action: "updated", changedFields: ["matchedPaymentId"],
+        });
+      });
       return res.json({ ok: true });
     }
     const accountsByKey = await ensureAccountingAccounts(db);
@@ -238,7 +255,14 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       return bad(res, "That payment does not use the selected cash, bank, or mobile money account.", 400);
     }
     try {
-      await db.update(paymentStatementLines).set({ matchedPaymentId: paymentId }).where(eq(paymentStatementLines.id, lineId));
+      await db.transaction(async (tx) => {
+        await tx.update(paymentStatementLines).set({ matchedPaymentId: paymentId }).where(eq(paymentStatementLines.id, lineId));
+        await recordBusinessAudit(tx, {
+          entityType: "payment_statement_line", entityId: line.id,
+          recordLabel: `Statement line #${line.id}`,
+          actor: res.locals.actor, action: "updated", changedFields: ["matchedPaymentId"],
+        });
+      });
     } catch (error) {
       if (isUniqueViolation(error)) return bad(res, "That payment is already matched to another statement line.", 409);
       throw error;
@@ -334,10 +358,25 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     const parsed = dueDateInputSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the due date.");
     const { direction, orderId, dueDate } = parsed.data;
-    const updated = direction === "customer_receipt"
-      ? await db.update(salesOrders).set({ dueDate, updatedAt: new Date() }).where(eq(salesOrders.id, orderId)).returning({ id: salesOrders.id })
-      : await db.update(purchaseOrders).set({ dueDate, updatedAt: new Date() }).where(eq(purchaseOrders.id, orderId)).returning({ id: purchaseOrders.id });
-    if (!updated.length) return bad(res, "Order not found.", 404);
+    const updated = await db.transaction(async (tx) => {
+      if (direction === "customer_receipt") {
+        const [order] = await tx.update(salesOrders).set({ dueDate, updatedAt: new Date() })
+          .where(eq(salesOrders.id, orderId)).returning({ id: salesOrders.id, orderNumber: salesOrders.orderNumber });
+        if (order) await recordBusinessAudit(tx, {
+          entityType: "sales_order", entityId: order.id, recordLabel: order.orderNumber,
+          actor: res.locals.actor, action: "updated", changedFields: ["dueDate"],
+        });
+        return order;
+      }
+      const [order] = await tx.update(purchaseOrders).set({ dueDate, updatedAt: new Date() })
+        .where(eq(purchaseOrders.id, orderId)).returning({ id: purchaseOrders.id, orderNumber: purchaseOrders.orderNumber });
+      if (order) await recordBusinessAudit(tx, {
+        entityType: "purchase_order", entityId: order.id, recordLabel: order.orderNumber,
+        actor: res.locals.actor, action: "updated", changedFields: ["dueDate"],
+      });
+      return order;
+    });
+    if (!updated) return bad(res, "Order not found.", 404);
     res.json({ ok: true, dueDate });
   });
 
@@ -421,6 +460,10 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         amountZmw: formatCents(amount), paymentDate: input.paymentDate, method: input.method,
         reference: input.reference, notes: input.notes,
       }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "payment", entityId: payment.id, recordLabel: payment.paymentNumber,
+        actor: res.locals.actor, action: "created", changedFields: ["direction", "salesOrderId", "purchaseOrderId", "amountZmw", "paymentDate", "method", "reference", "notes"],
+      });
       const cashAccountKey = cashAccountKeyForMethod(input.method);
       await postJournal(tx, {
         sourceKey: `payment-${payment.id}`, sourceType: "payment", sourceId: payment.id,
