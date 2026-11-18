@@ -51,7 +51,7 @@ export interface InventoryMovement { id: number; productId: number; productName:
 export interface InventoryLocation { id: number; name: string; active: boolean; }
 export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; locationName: string | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
-export interface Customer { id: number; name: string; contactPerson: string | null; contactPersonPhone: string | null; email: string | null; phone: string | null; address: string | null; notes: string | null; status: "active" | "inactive"; }
+export interface Customer { id: number; name: string; contactPerson: string | null; contactPersonPhone: string | null; email: string | null; phone: string | null; address: string | null; paymentTermDays: number | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine {
   id: number; productId: number; productName: string; sku: string; quantity: number; deliveredQuantity: number; remainingQuantity: number;
   unitPriceZmw: string; lineTotalZmw: string; stockLocationId: number | null; stockLocationName: string | null;
@@ -109,6 +109,7 @@ export interface Supplier {
   phone: string | null;
   website: string | null;
   paymentTerms: string | null;
+  paymentTermDays: number | null;
   defaultLeadTimeDays: number;
   notes: string | null;
   status: SupplierStatus;

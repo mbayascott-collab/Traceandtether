@@ -20,7 +20,7 @@ import {
 type Mode = "suppliers" | "quotes" | "comparison";
 type SupplierDraft = {
   name: string; country: string; contactName: string; email: string; phone: string;
-  website: string; paymentTerms: string; defaultLeadTimeDays: string; notes: string;
+  website: string; paymentTerms: string; paymentTermDays: string; defaultLeadTimeDays: string; notes: string;
   status: SupplierStatus;
 };
 type QuoteDraft = {
@@ -41,7 +41,7 @@ type QuoteDraft = {
 
 const emptySupplier = (): SupplierDraft => ({
   name: "", country: "", contactName: "", email: "", phone: "", website: "",
-  paymentTerms: "", defaultLeadTimeDays: "0", notes: "", status: "active",
+  paymentTerms: "", paymentTermDays: "", defaultLeadTimeDays: "0", notes: "", status: "active",
 });
 const emptyQuote = (): QuoteDraft => ({
   supplierId: "", productId: "", quoteReference: "", supplierProductCode: "",
@@ -77,7 +77,8 @@ function SupplierModal({ value, onClose, onSaved }: {
   const [draft, setDraft] = useState<SupplierDraft>(() => value ? {
     name: value.name, country: value.country ?? "", contactName: value.contactName ?? "",
     email: value.email ?? "", phone: value.phone ?? "", website: value.website ?? "",
-    paymentTerms: value.paymentTerms ?? "", defaultLeadTimeDays: String(value.defaultLeadTimeDays),
+    paymentTerms: value.paymentTerms ?? "", paymentTermDays: value.paymentTermDays === null ? "" : String(value.paymentTermDays),
+    defaultLeadTimeDays: String(value.defaultLeadTimeDays),
     notes: value.notes ?? "", status: value.status,
   } : emptySupplier());
   const [error, setError] = useState("");
@@ -96,6 +97,7 @@ function SupplierModal({ value, onClose, onSaved }: {
       phone: optional(draft.phone),
       website: optional(draft.website),
       paymentTerms: optional(draft.paymentTerms),
+      paymentTermDays: draft.paymentTermDays.trim() === "" ? null : Number(draft.paymentTermDays),
       defaultLeadTimeDays: Number(draft.defaultLeadTimeDays),
       notes: optional(draft.notes),
     };
@@ -126,6 +128,7 @@ function SupplierModal({ value, onClose, onSaved }: {
               <div className="field field-full"><label htmlFor="supplier-website">Website</label><input id="supplier-website" type="url" placeholder="https://" value={draft.website} onChange={(e) => set("website", e.target.value)} maxLength={300} /></div>
               <div className="field"><label htmlFor="supplier-lead">Typical lead time (days)</label><input id="supplier-lead" type="number" min="0" max="1000000" step="1" value={draft.defaultLeadTimeDays} onChange={(e) => set("defaultLeadTimeDays", e.target.value)} required /></div>
               <div className="field"><label htmlFor="supplier-terms">Default payment terms</label><input id="supplier-terms" value={draft.paymentTerms} onChange={(e) => set("paymentTerms", e.target.value)} maxLength={300} placeholder="e.g. 30% deposit" /></div>
+              <div className="field"><label htmlFor="supplier-terms-days">Payment terms (days)</label><input id="supplier-terms-days" type="number" min="0" max="1000000" step="1" value={draft.paymentTermDays} onChange={(e) => set("paymentTermDays", e.target.value)} /><span className="field-hint">Counted from the purchase order date. Free-text terms are not interpreted.</span></div>
               <div className="field"><label htmlFor="supplier-status">Status</label><select id="supplier-status" value={draft.status} onChange={(e) => set("status", e.target.value as SupplierStatus)}><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
               <div className="field field-full"><label htmlFor="supplier-notes">Internal notes</label><textarea id="supplier-notes" value={draft.notes ?? ""} onChange={(e) => set("notes", e.target.value)} maxLength={5000} /></div>
               {error && <div className="alert alert-error field-full" role="alert"><AlertCircle /><span>{error}</span></div>}

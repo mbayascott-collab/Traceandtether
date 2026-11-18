@@ -27,6 +27,12 @@ const nonNegativeInteger = z.preprocess(
   (value) => (typeof value === "string" && value.trim() !== "" ? Number(value) : value),
   z.number().int().min(0).max(1_000_000),
 );
+const nullableNonNegativeInteger = z.preprocess(
+  (value) => value === "" || value === undefined || value === null
+    ? null
+    : typeof value === "string" ? Number(value) : value,
+  z.number().int().min(0).max(1_000_000).nullable(),
+);
 
 export const productInputSchema = z
   .object({
@@ -89,6 +95,7 @@ export const supplierInputSchema = z
     phone: nullableText(60),
     website: nullableText(300).refine((value) => value === null || z.string().url().safeParse(value).success, "Enter a website including https://."),
     paymentTerms: nullableText(300),
+    paymentTermDays: nullableNonNegativeInteger,
     defaultLeadTimeDays: nonNegativeInteger,
     notes: nullableText(5_000),
     status: z.enum(["active", "inactive"]),
@@ -268,6 +275,7 @@ export const customerInputSchema = z.object({
     z.string().trim().email().max(254).nullable()),
   phone: nullableText(60),
   address: nullableText(5_000),
+  paymentTermDays: nullableNonNegativeInteger,
   notes: nullableText(5_000),
   status: z.enum(["active", "inactive"]),
 }).strict();

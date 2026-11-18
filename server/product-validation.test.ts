@@ -76,14 +76,28 @@ test("validates supplier contacts, URLs, and non-negative lead times", () => {
     phone: null,
     website: "https://supplier.example",
     paymentTerms: null,
+    paymentTermDays: "30",
     defaultLeadTimeDays: "18",
     notes: null,
     status: "active",
   };
   assert.equal(supplierInputSchema.parse(supplier).name, "Pearl River Supply");
+  assert.equal(supplierInputSchema.parse({ ...supplier, paymentTermDays: "" }).paymentTermDays, null);
+  assert.equal(supplierInputSchema.safeParse({ ...supplier, paymentTermDays: "-1" }).success, false);
   assert.equal(supplierInputSchema.safeParse({ ...supplier, email: "not-an-email" }).success, false);
   assert.equal(supplierInputSchema.safeParse({ ...supplier, website: "not-a-url" }).success, false);
   assert.equal(supplierInputSchema.safeParse({ ...supplier, defaultLeadTimeDays: "-1" }).success, false);
+});
+
+test("validates customer payment-term days without requiring them", () => {
+  const customer = {
+    name: "Example customer", contactPerson: null, contactPersonPhone: null, email: null,
+    phone: null, address: null, paymentTermDays: "", notes: null, status: "active",
+  };
+  assert.equal(customerInputSchema.parse(customer).paymentTermDays, null);
+  assert.equal(customerInputSchema.parse({ ...customer, paymentTermDays: "14" }).paymentTermDays, 14);
+  assert.equal(customerInputSchema.safeParse({ ...customer, paymentTermDays: "-2" }).success, false);
+  assert.equal(customerInputSchema.safeParse({ ...customer, paymentTermDays: "1.5" }).success, false);
 });
 
 test("validates customer quote lines, prices, and duplicate products", () => {

@@ -175,7 +175,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         name: String(d.get("name")), contactPerson: String(d.get("contactPerson") || "") || null,
         contactPersonPhone: String(d.get("contactPersonPhone") || "") || null,
         email: String(d.get("email") || "") || null, phone: String(d.get("phone") || "") || null,
-        address: String(d.get("address") || "") || null, notes: String(d.get("notes") || "") || null,
+        address: String(d.get("address") || "") || null,
+        paymentTermDays: String(d.get("paymentTermDays") ?? "") === "" ? null : Number(d.get("paymentTermDays")),
+        notes: String(d.get("notes") || "") || null,
         status: String(d.get("status") || "active") as "active" | "inactive",
       }, editingCustomer?.id))}>
         <h2>{editingCustomer ? "Edit customer" : "Add customer"}</h2><label>Name<input name="name" required maxLength={160} defaultValue={editingCustomer?.name ?? ""} /></label>
@@ -183,6 +185,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Contact person's phone<input name="contactPersonPhone" maxLength={60} defaultValue={editingCustomer?.contactPersonPhone ?? ""} /></label>
         <label>Email<input name="email" type="email" defaultValue={editingCustomer?.email ?? ""} /></label>
         <label>Phone<input name="phone" defaultValue={editingCustomer?.phone ?? ""} /></label><label>Delivery address<input name="address" defaultValue={editingCustomer?.address ?? ""} /></label><label>Notes<input name="notes" defaultValue={editingCustomer?.notes ?? ""} /></label>
+        <label>Payment terms (days)<input name="paymentTermDays" type="number" min="0" max="1000000" step="1" defaultValue={editingCustomer?.paymentTermDays ?? ""} /><span className="field-hint">Counted from the latest delivery. Leave blank when no day-based term is set.</span></label>
         <label>Status<select name="status" defaultValue={editingCustomer?.status ?? "active"}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
         <button className="button button-primary">{editingCustomer ? "Save changes" : "Save customer"}</button>{editingCustomer && <button type="button" onClick={() => setEditingCustomer(null)}>Cancel edit</button>}
       </form>

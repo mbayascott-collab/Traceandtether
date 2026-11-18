@@ -178,6 +178,7 @@ export const suppliers = pgTable(
     phone: varchar("phone", { length: 60 }),
     website: varchar("website", { length: 300 }),
     paymentTerms: varchar("payment_terms", { length: 300 }),
+    paymentTermDays: integer("payment_term_days"),
     defaultLeadTimeDays: integer("default_lead_time_days").notNull().default(0),
     notes: text("notes"),
     status: supplierStatus("status").notNull().default("active"),
@@ -187,6 +188,7 @@ export const suppliers = pgTable(
   (table) => [
     uniqueIndex("suppliers_name_lower_unique").on(sql`lower(${table.name})`),
     check("suppliers_lead_time_nonnegative", sql`${table.defaultLeadTimeDays} >= 0`),
+    check("suppliers_payment_term_days_nonnegative", sql`${table.paymentTermDays} is null or ${table.paymentTermDays} >= 0`),
   ],
 );
 
@@ -332,6 +334,7 @@ export const customers = pgTable(
     email: varchar("email", { length: 254 }),
     phone: varchar("phone", { length: 60 }),
     address: text("address"),
+    paymentTermDays: integer("payment_term_days"),
     notes: text("notes"),
     status: customerStatus("status").notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -340,6 +343,7 @@ export const customers = pgTable(
   (table) => [
     index("customers_name_idx").on(table.name),
     index("customers_status_idx").on(table.status),
+    check("customers_payment_term_days_nonnegative", sql`${table.paymentTermDays} is null or ${table.paymentTermDays} >= 0`),
   ],
 );
 

@@ -6,7 +6,7 @@ import {
   accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementLines,
   paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
-import { paymentAging } from "../shared/payment-aging";
+import { effectivePaymentDueDate, paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
@@ -286,7 +286,10 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .leftJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
         .leftJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .orderBy(desc(businessPayments.paymentDate), desc(businessPayments.createdAt)),
-      db.select({ order: salesOrders, customerName: customers.name, customerEmail: customers.email }).from(salesOrders)
+      db.select({
+        order: salesOrders, customerName: customers.name, customerEmail: customers.email,
+        customerPaymentTermDays: customers.paymentTermDays,
+      }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id))
         .where(inArray(salesOrders.status, ["partially_fulfilled", "fulfilled", "cancelled"])),
       db.select().from(salesOrderLines),
@@ -296,7 +299,9 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       }).from(salesDeliveryLines)
         .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
         .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
-      db.select({ order: purchaseOrders, supplierName: suppliers.name }).from(purchaseOrders)
+      db.select({
+        order: purchaseOrders, supplierName: suppliers.name, supplierPaymentTermDays: suppliers.paymentTermDays,
+      }).from(purchaseOrders)
         .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(ne(purchaseOrders.status, "cancelled")),
     ]);
@@ -324,7 +329,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       if (!latest || row.deliveryDate > latest) latestDeliveryDate.set(row.orderId, row.deliveryDate);
     }
     const ordersWithDelivery = new Set(deliveryRows.map((row) => row.orderId));
-    const invoices = eligibleOrders.map(({ order, customerName, customerEmail }) => {
+    const invoices = eligibleOrders.map(({ order, customerName, customerEmail, customerPaymentTermDays }) => {
       const total = ordersWithDelivery.has(order.id)
         ? deliveredTotals.get(order.id) ?? 0n
         : order.status === "fulfilled"
@@ -332,7 +337,8 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
             .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
           : 0n;
       const outstanding = total - (paidSales.get(order.id) ?? 0n);
-      const dueDate = order.dueDate ?? latestDeliveryDate.get(order.id) ?? order.orderDate;
+      const sourceDate = latestDeliveryDate.get(order.id) ?? order.orderDate;
+      const dueDate = effectivePaymentDueDate(order.dueDate, sourceDate, customerPaymentTermDays);
       return {
         orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, customerEmail,
         totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
@@ -352,10 +358,10 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string;
       outstandingZmw: string; dueDate: string; overdueDays: number; agingBucket: string;
     }> = [];
-    for (const { order, supplierName } of openPurchaseOrders) {
+    for (const { order, supplierName, supplierPaymentTermDays } of openPurchaseOrders) {
       const total = await payableForPurchaseOrder(db, order.id, order.orderNumber, accountMap);
       const paid = paidPurchases.get(order.id) ?? 0n;
-      const dueDate = order.dueDate ?? order.orderedAt;
+      const dueDate = effectivePaymentDueDate(order.dueDate, order.orderedAt, supplierPaymentTermDays);
       if (total > paid) bills.push({
         orderId: order.id, orderNumber: order.orderNumber, partyName: supplierName,
         totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid),
@@ -384,7 +390,9 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .where(eq(salesOrders.id, orderId.data)).for("update").limit(1);
       if (!order) return { error: "Customer order not found.", status: 404 as const };
 
-      const [customer] = await tx.select({ name: customers.name, email: customers.email })
+      const [customer] = await tx.select({
+        name: customers.name, email: customers.email, paymentTermDays: customers.paymentTermDays,
+      })
         .from(customers).where(eq(customers.id, order.customerId)).limit(1);
       if (!customer?.email) {
         return { error: "Add a saved email address to this customer before sending a reminder.", status: 400 as const };
@@ -422,7 +430,9 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         (latest, line) => !latest || line.deliveryDate > latest ? line.deliveryDate : latest,
         null,
       );
-      const dueDate = order.dueDate ?? latestDeliveryDate ?? order.orderDate;
+      const dueDate = effectivePaymentDueDate(
+        order.dueDate, latestDeliveryDate ?? order.orderDate, customer.paymentTermDays,
+      );
       if (dueDate >= today) {
         return { error: "This balance is not overdue. A reminder can only be sent after its due date.", status: 409 as const };
       }
