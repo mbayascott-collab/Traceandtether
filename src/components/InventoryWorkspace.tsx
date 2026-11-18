@@ -132,11 +132,15 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Reference<input name="reference" /></label><label>Reason<input name="reason" required maxLength={500} /></label>
         <button className="button button-primary">Save adjustment</button>
       </form>
-      <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createOpeningStock({
-        productId: Number(d.get("productId")), locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),
-        unitCostZmw: String(d.get("unitCostZmw")), effectiveAt: String(d.get("effectiveAt")),
-        memo: String(d.get("memo")), reference: String(d.get("reference") || "") || null,
-      }))} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); }}>
+      <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => {
+        const evidence = d.get("evidence");
+        return createOpeningStock({
+          productId: Number(d.get("productId")), locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),
+          unitCostZmw: String(d.get("unitCostZmw")), effectiveAt: String(d.get("effectiveAt")),
+          memo: String(d.get("memo")), reference: String(d.get("reference") || "") || null,
+          evidence: evidence instanceof File && evidence.size > 0 ? evidence : null,
+        });
+      })} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); }}>
         <h2>Add stock you already have</h2>
         <p className="report-footnote field-full">Enter the counted quantity and reviewed average landed cost per unit in ZMW for this location. The stock value is recorded against opening balance equity, not sales income. Use this once per product at each location; later changes belong in stock adjustments.</p>
         <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku} · currently {p.onHand}</option>)}</select></label>
@@ -147,6 +151,8 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
         <label>Memo<input name="memo" maxLength={500} defaultValue="Reviewed opening stock" required /></label>
         <label>Reference<input name="reference" maxLength={120} placeholder="Opening count or source note" /></label>
+        <label>Count worksheet or photo<input name="evidence" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" /></label>
+        <p className="report-footnote field-full">Optional: attach one PDF or photo, up to 5 MB. The file is saved with the opening entry and cannot be replaced or removed.</p>
         <button className="button button-primary">Record opening stock</button>
       </form>
       <MovementTable movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock")} />
@@ -155,5 +161,5 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
 }
 
 function MovementTable({ movements }: { movements: InventoryMovement[] }) {
-  return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Reference</th></tr></thead><tbody>{movements.map((m) => <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{m.reference || "—"}</td></tr>)}{!movements.length && <tr><td colSpan={7}>No stock movements yet.</td></tr>}</tbody></table></div>;
+  return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{m.reference || "—"}</td><td>{m.evidenceFileName ? <a href={`/api/inventory/movements/${m.id}/opening-evidence`} target="_blank" rel="noreferrer">{m.evidenceFileName}</a> : "—"}</td></tr>)}{!movements.length && <tr><td colSpan={8}>No stock movements yet.</td></tr>}</tbody></table></div>;
 }

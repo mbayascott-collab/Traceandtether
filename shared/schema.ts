@@ -522,6 +522,9 @@ export const inventoryMovements = pgTable(
     reason: varchar("reason", { length: 500 }).notNull(),
     reference: varchar("reference", { length: 120 }),
     sourceKey: varchar("source_key", { length: 160 }),
+    evidenceFileName: varchar("evidence_file_name", { length: 255 }),
+    evidenceMimeType: varchar("evidence_mime_type", { length: 80 }),
+    evidenceData: bytea("evidence_data"),
     reservationId: integer("reservation_id").references(() => inventoryReservations.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -530,6 +533,10 @@ export const inventoryMovements = pgTable(
     uniqueIndex("inventory_movements_source_key_unique").on(table.sourceKey),
     check("inventory_movements_delta_nonzero", sql`${table.quantityDelta} <> 0`),
     check("inventory_movements_reason_nonempty", sql`length(trim(${table.reason})) > 0`),
+    check(
+      "inventory_movements_evidence_complete",
+      sql`(${table.evidenceFileName} is null and ${table.evidenceMimeType} is null and ${table.evidenceData} is null) or (${table.evidenceFileName} is not null and ${table.evidenceMimeType} is not null and ${table.evidenceData} is not null)`,
+    ),
   ],
 );
 
