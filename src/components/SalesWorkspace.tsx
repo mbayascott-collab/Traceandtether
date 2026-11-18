@@ -257,11 +257,38 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           <p><strong>Status:</strong> {customer.status}</p>
           {customer.notes && <p><strong>Notes:</strong> {customer.notes}</p>}
           <h3>Past purchases</h3><p className="report-footnote">Only items already delivered are counted as purchases.</p>
-          <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Status</th></tr></thead>
+          <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Delivery notes and proof</th><th>Status</th></tr></thead>
             <tbody>{purchases.map((order) => <tr key={order.id}>
               <td>{order.orderNumber}</td><td>{new Date(order.orderDate).toLocaleDateString("en-ZM")}</td>
               <td>{order.lines.filter((line) => line.deliveredQuantity > 0).map((line) => `${line.productName} × ${line.deliveredQuantity}`).join(", ")}</td>
-              <td>{zmw(order.deliveredZmw)}</td><td>{order.status.replace("_", " ")}</td>
+              <td>{zmw(order.deliveredZmw)}</td>
+              <td>{order.deliveries.length ? order.deliveries.map((delivery) => <div key={delivery.id} className="delivery-actions">
+                <button
+                  type="button"
+                  className="button button-secondary button-small"
+                  onClick={() => setDeliveryPrint({ order, delivery })}
+                >{delivery.deliveryNumber}</button>
+                {delivery.receipt ? <div>
+                  <span><strong>Received by:</strong> {delivery.receipt.receivedBy}</span>
+                  <small>{new Date(delivery.receipt.receivedAt).toLocaleString("en-ZM", { dateStyle: "medium", timeStyle: "short" })}</small>
+                  {!!delivery.receipt.proofs.length && <ul>
+                    {delivery.receipt.proofs.map((proof, index) => <li key={proof.id ?? `legacy-${index}`}>
+                      <a
+                        href={proof.id === null
+                          ? salesDeliveryReceiptProofUrl(delivery.id)
+                          : salesDeliveryReceiptProofFileUrl(delivery.id, proof.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >{proof.fileName}</a>
+                    </li>)}
+                  </ul>}
+                </div> : <small>No receipt details saved.</small>}
+              </div>) : order.status === "fulfilled" ? <button
+                type="button"
+                className="button button-secondary button-small"
+                onClick={() => setDeliveryPrint({ order, delivery: null })}
+              >Delivery note</button> : <span>No delivery note recorded.</span>}</td>
+              <td>{order.status.replace("_", " ")}</td>
             </tr>)}</tbody>
           </table>
           {!purchases.length && <p className="report-footnote">This customer has no delivered purchases yet.</p>}
@@ -450,7 +477,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>
       </div>;
     })()}
-    {mode === "orders" && deliveryPrint && (() => {
+    {deliveryPrint && (() => {
       const { order, delivery } = deliveryPrint;
       const customer = customers.find((item) => item.id === order.customerId);
       const noteRef = delivery?.deliveryNumber ?? deliveryNoteNumber(order);
