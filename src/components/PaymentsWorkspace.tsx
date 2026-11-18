@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { BusinessPayment, PaymentDirection, PaymentOption, PaymentOverview } from "../lib/api";
+import PaymentReconciliation from "./PaymentReconciliation";
 
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const today = () => new Date().toISOString().slice(0, 10);
@@ -156,5 +157,6 @@ export default function PaymentsWorkspace() {
       </table>
       {!data.payments.length && <p className="report-footnote">No payments recorded yet.</p>}
     </div>
+    <PaymentReconciliation />
   </section>;
 }

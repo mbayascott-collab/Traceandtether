@@ -1,10 +1,10 @@
-import { and, desc, eq, inArray, ne, sql, sum } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, ne, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, purchaseOrders,
-  salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
+  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementLines,
+  purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
@@ -20,6 +20,50 @@ const dueDateInputSchema = z.object({
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
   }, "Enter a valid due date."),
 });
+const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+  && new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value;
+const reconciliationRangeSchema = z.object({
+  accountId: z.coerce.number().int().positive(),
+  from: z.string().refine(validDate, "Choose a valid start date."),
+  to: z.string().refine(validDate, "Choose a valid end date."),
+}).refine((value) => value.from <= value.to, "Start date must be on or before end date.");
+const statementLinesSchema = z.object({
+  accountId: z.number().int().positive(),
+  from: z.string().refine(validDate, "Choose a valid start date."),
+  to: z.string().refine(validDate, "Choose a valid end date."),
+  lines: z.array(z.object({
+    transactionDate: z.string().refine(validDate, "Enter a valid transaction date."),
+    flow: z.enum(["in", "out"]),
+    amountZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/, "Enter a valid positive amount."),
+    description: z.string().trim().max(240).optional().default(""),
+    reference: z.string().trim().max(120).optional().default(""),
+  })).min(1).max(500),
+}).refine((value) => value.from <= value.to, "Start date must be on or before end date.")
+  .refine((value) => value.lines.every((line) => line.transactionDate >= value.from && line.transactionDate <= value.to),
+    "Every statement date must be within the selected date range.");
+const reconciliationMatchSchema = z.object({
+  lineId: z.number().int().positive(),
+  paymentId: z.number().int().positive().nullable(),
+});
+const RECONCILIATION_ACCOUNT_KEYS = new Set(["cash_on_hand", "bank_account", "mobile_money", "other_funds"]);
+
+function accountMethod(systemKey: string | null) {
+  if (systemKey === "cash_on_hand") return "cash";
+  if (systemKey === "bank_account") return "bank_transfer";
+  if (systemKey === "mobile_money") return "mobile_money";
+  if (systemKey === "other_funds") return "other";
+  return null;
+}
+
+function normalizeReference(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function isUniqueViolation(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { code?: unknown }).code === "23505";
+}
 
 async function payableForPurchaseOrder(tx: any, orderId: number, orderNumber: string, knownAccounts?: Map<string, typeof accountingAccounts.$inferSelect>) {
   const accountsByKey = knownAccounts ?? await ensureAccountingAccounts(tx);
@@ -56,12 +100,152 @@ function paymentMatchesRequest(payment: typeof businessPayments.$inferSelect, in
     && (payment.notes ?? null) === (input.notes ?? null);
 }
 
-function isUniqueViolation(error: unknown) {
-  return typeof error === "object" && error !== null && "code" in error
-    && (error as { code?: unknown }).code === "23505";
-}
-
 export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
+  app.get("/api/payments/reconciliation/accounts", owner, async (_req, res) => {
+    const accountsByKey = await ensureAccountingAccounts(db);
+    res.json({
+      accounts: [...accountsByKey.values()]
+        .filter((account) => account.active && RECONCILIATION_ACCOUNT_KEYS.has(account.systemKey ?? ""))
+        .sort((a, b) => a.code.localeCompare(b.code))
+        .map(({ id, code, name, systemKey }) => ({ id, code, name, systemKey })),
+    });
+  });
+
+  app.get("/api/payments/reconciliation", owner, async (req, res) => {
+    const parsed = reconciliationRangeSchema.safeParse({
+      accountId: req.query.accountId, from: req.query.from, to: req.query.to,
+    });
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Choose an account and date range.");
+    const { accountId, from, to } = parsed.data;
+    const accountsByKey = await ensureAccountingAccounts(db);
+    const account = [...accountsByKey.values()].find((item) => item.id === accountId && item.active);
+    const method = accountMethod(account?.systemKey ?? null);
+    if (!account || !method) return bad(res, "Choose an active cash, bank, mobile money, or other funds account.", 404);
+    const rangeStart = new Date(`${from}T00:00:00.000Z`);
+    const rangeEnd = new Date(`${to}T00:00:00.000Z`);
+    rangeStart.setUTCDate(rangeStart.getUTCDate() - 7);
+    rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 7);
+    const paymentFrom = rangeStart.toISOString().slice(0, 10);
+    const paymentTo = rangeEnd.toISOString().slice(0, 10);
+    const [statementRows, paymentRows, allMatchedRows] = await Promise.all([
+      db.select({
+        line: paymentStatementLines,
+        payment: businessPayments,
+        orderNumber: sql<string | null>`coalesce(${salesOrders.orderNumber}, ${purchaseOrders.orderNumber})`,
+        partyName: sql<string | null>`coalesce(${customers.name}, ${suppliers.name})`,
+      }).from(paymentStatementLines)
+        .leftJoin(businessPayments, eq(paymentStatementLines.matchedPaymentId, businessPayments.id))
+        .leftJoin(salesOrders, eq(businessPayments.salesOrderId, salesOrders.id))
+        .leftJoin(customers, eq(salesOrders.customerId, customers.id))
+        .leftJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
+        .leftJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(and(
+          eq(paymentStatementLines.accountId, accountId),
+          gte(paymentStatementLines.transactionDate, from),
+          lte(paymentStatementLines.transactionDate, to),
+        ))
+        .orderBy(desc(paymentStatementLines.transactionDate), desc(paymentStatementLines.id)),
+      db.select({
+        payment: businessPayments, orderNumber: sql<string | null>`coalesce(${salesOrders.orderNumber}, ${purchaseOrders.orderNumber})`,
+        partyName: sql<string | null>`coalesce(${customers.name}, ${suppliers.name})`,
+      }).from(businessPayments)
+        .leftJoin(salesOrders, eq(businessPayments.salesOrderId, salesOrders.id))
+        .leftJoin(customers, eq(salesOrders.customerId, customers.id))
+        .leftJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
+        .leftJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(and(
+          eq(businessPayments.method, method),
+          gte(businessPayments.paymentDate, paymentFrom),
+          lte(businessPayments.paymentDate, paymentTo),
+        ))
+        .orderBy(desc(businessPayments.paymentDate), desc(businessPayments.id)),
+      db.select({ paymentId: paymentStatementLines.matchedPaymentId }).from(paymentStatementLines)
+        .where(sql`${paymentStatementLines.matchedPaymentId} is not null`),
+    ]);
+    const lineKeys = new Map<string, number>();
+    const lineCounts = new Map<number, number>();
+    for (const { line } of statementRows) {
+      const key = `${line.transactionDate}|${line.flow}|${line.amountZmw}|${normalizeReference(line.reference)}`;
+      lineKeys.set(key, (lineKeys.get(key) ?? 0) + 1);
+    }
+    for (const { line } of statementRows) {
+      const key = `${line.transactionDate}|${line.flow}|${line.amountZmw}|${normalizeReference(line.reference)}`;
+      lineCounts.set(line.id, lineKeys.get(key) ?? 0);
+    }
+    const paymentKeys = new Map<string, number>();
+    for (const { payment } of paymentRows) {
+      const key = `${payment.paymentDate}|${payment.method}|${payment.amountZmw}|${normalizeReference(payment.reference)}`;
+      paymentKeys.set(key, (paymentKeys.get(key) ?? 0) + 1);
+    }
+    const matchedIds = new Set(allMatchedRows.map(({ paymentId }) => paymentId).filter((id): id is number => id !== null));
+    res.json({
+      account: { id: account.id, code: account.code, name: account.name },
+      lines: statementRows.map(({ line, payment, orderNumber, partyName }) => ({
+        ...line,
+        duplicateLike: (lineCounts.get(line.id) ?? 0) > 1,
+        matchedPayment: payment ? {
+          id: payment.id, paymentNumber: payment.paymentNumber, paymentDate: payment.paymentDate,
+          amountZmw: payment.amountZmw, method: payment.method, direction: payment.direction,
+          reference: payment.reference, orderNumber: orderNumber ?? "—", partyName: partyName ?? "—",
+        } : null,
+      })),
+      payments: paymentRows.map(({ payment, orderNumber, partyName }) => ({
+        ...payment,
+        orderNumber: orderNumber ?? "—", partyName: partyName ?? "—",
+        matched: matchedIds.has(payment.id),
+        duplicateLike: (paymentKeys.get(`${payment.paymentDate}|${payment.method}|${payment.amountZmw}|${normalizeReference(payment.reference)}`) ?? 0) > 1,
+      })),
+      from, to,
+    });
+  });
+
+  app.post("/api/payments/reconciliation/lines", owner, async (req, res) => {
+    const parsed = statementLinesSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the statement lines.");
+    const input = parsed.data;
+    const accountsByKey = await ensureAccountingAccounts(db);
+    const account = [...accountsByKey.values()].find((item) => item.id === input.accountId && item.active);
+    if (!account || !RECONCILIATION_ACCOUNT_KEYS.has(account.systemKey ?? "")) {
+      return bad(res, "Choose an active cash, bank, mobile money, or other funds account.", 404);
+    }
+    if (input.lines.some((line) => cents(line.amountZmw) <= 0n)) return bad(res, "Enter amounts greater than zero.");
+    const inserted = await db.insert(paymentStatementLines).values(input.lines.map((line) => ({
+      accountId: input.accountId,
+      transactionDate: line.transactionDate,
+      flow: line.flow,
+      amountZmw: formatCents(cents(line.amountZmw)),
+      description: line.description,
+      reference: line.reference || null,
+    }))).returning({ id: paymentStatementLines.id });
+    res.status(201).json({ added: inserted.length });
+  });
+
+  app.put("/api/payments/reconciliation/match", owner, async (req, res) => {
+    const parsed = reconciliationMatchSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the match details.");
+    const { lineId, paymentId } = parsed.data;
+    const [line] = await db.select().from(paymentStatementLines).where(eq(paymentStatementLines.id, lineId)).limit(1);
+    if (!line) return bad(res, "Statement line not found.", 404);
+    if (paymentId === null) {
+      await db.update(paymentStatementLines).set({ matchedPaymentId: null }).where(eq(paymentStatementLines.id, lineId));
+      return res.json({ ok: true });
+    }
+    const accountsByKey = await ensureAccountingAccounts(db);
+    const account = [...accountsByKey.values()].find((item) => item.id === line.accountId);
+    const method = accountMethod(account?.systemKey ?? null);
+    const [payment] = await db.select().from(businessPayments).where(eq(businessPayments.id, paymentId)).limit(1);
+    if (!payment || !method || payment.method !== method) {
+      return bad(res, "That payment does not use the selected cash, bank, or mobile money account.", 400);
+    }
+    try {
+      await db.update(paymentStatementLines).set({ matchedPaymentId: paymentId }).where(eq(paymentStatementLines.id, lineId));
+    } catch (error) {
+      if (isUniqueViolation(error)) return bad(res, "That payment is already matched to another statement line.", 409);
+      throw error;
+    }
+    res.json({ ok: true });
+  });
+
   app.get("/api/payments", owner, async (_req, res) => {
     const accountMap = await ensureAccountingAccounts(db);
     const [paymentRows, eligibleOrders, orderLines, deliveryRows, openPurchaseOrders] = await Promise.all([

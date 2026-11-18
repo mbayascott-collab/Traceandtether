@@ -221,7 +221,7 @@ export default function AccountingWorkspace() {
       <button className="button button-primary" onClick={() => setRange({ from, to })}>Run reports</button>
     </section>
     <div className="notice-strip" style={{ marginBottom: 16 }}>
-      These reports include entries already recorded in the app. Opening stock, tax treatment, bank reconciliation, and accountant review still need to be completed before relying on this as a full year-end filing.
+      These reports include entries already recorded in the app. Compare bank and mobile money statements on the <a href="/payments">Payments page</a>; statement matching does not change journals. Opening stock, tax treatment, and accountant review still need to be completed before relying on this as a full year-end filing.
     </div>
     {loading ? <div className="panel panel-body">Loading reports…</div> : data && <>
       <section className="metric-grid" style={{ marginBottom: 16 }}>

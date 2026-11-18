@@ -42,6 +42,7 @@ export const customerQuoteStatus = pgEnum("customer_quote_status", ["draft", "se
 export const accountingAccountType = pgEnum("accounting_account_type", ["asset", "liability", "equity", "income", "expense"]);
 export const paymentDirection = pgEnum("payment_direction", ["customer_receipt", "supplier_payment"]);
 export const paymentMethod = pgEnum("payment_method", ["cash", "bank_transfer", "mobile_money", "other"]);
+export const statementFlow = pgEnum("statement_flow", ["in", "out"]);
 export const marketingCampaignStatus = pgEnum("marketing_campaign_status", ["draft", "active", "paused", "completed", "cancelled"]);
 export const marketingContentStatus = pgEnum("marketing_content_status", ["planned", "in_progress", "ready", "published", "cancelled"]);
 export const appRole = pgEnum("app_role", [
@@ -590,6 +591,26 @@ export const businessPayments = pgTable(
       "business_payments_order_matches_direction",
       sql`(${table.direction} = 'customer_receipt' and ${table.salesOrderId} is not null and ${table.purchaseOrderId} is null) or (${table.direction} = 'supplier_payment' and ${table.purchaseOrderId} is not null and ${table.salesOrderId} is null)`,
     ),
+  ],
+);
+
+export const paymentStatementLines = pgTable(
+  "payment_statement_lines",
+  {
+    id: serial("id").primaryKey(),
+    accountId: integer("account_id").notNull().references(() => accountingAccounts.id, { onDelete: "restrict" }),
+    transactionDate: date("transaction_date").notNull(),
+    flow: statementFlow("flow").notNull(),
+    amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
+    description: varchar("description", { length: 240 }).notNull().default(""),
+    reference: varchar("reference", { length: 120 }),
+    matchedPaymentId: integer("matched_payment_id").references(() => businessPayments.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("payment_statement_lines_account_date_idx").on(table.accountId, table.transactionDate),
+    uniqueIndex("payment_statement_lines_matched_payment_unique").on(table.matchedPaymentId),
+    check("payment_statement_lines_positive_amount", sql`${table.amountZmw} > 0`),
   ],
 );
 
