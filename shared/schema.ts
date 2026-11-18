@@ -679,6 +679,30 @@ export const businessPayments = pgTable(
   ],
 );
 
+export const paymentReminders = pgTable(
+  "payment_reminders",
+  {
+    id: serial("id").primaryKey(),
+    salesOrderId: integer("sales_order_id").notNull().references(() => salesOrders.id, { onDelete: "restrict" }),
+    recipientEmail: varchar("recipient_email", { length: 254 }).notNull(),
+    outstandingZmw: numeric("outstanding_zmw", { precision: 14, scale: 2 }).notNull(),
+    dueDate: date("due_date").notNull(),
+    note: varchar("note", { length: 1000 }).notNull().default(""),
+    status: varchar("status", { length: 16 }).notNull(),
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    sendError: text("send_error"),
+    providerMessageId: varchar("provider_message_id", { length: 255 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("payment_reminders_order_created_idx").on(table.salesOrderId, table.createdAt),
+    uniqueIndex("payment_reminders_provider_message_unique").on(table.providerMessageId),
+    check("payment_reminders_positive_outstanding", sql`${table.outstandingZmw} > 0`),
+    check("payment_reminders_status", sql`${table.status} in ('sending', 'sent', 'failed')`),
+  ],
+);
+
 export const paymentStatementLines = pgTable(
   "payment_statement_lines",
   {

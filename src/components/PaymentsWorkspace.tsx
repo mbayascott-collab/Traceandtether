@@ -20,6 +20,9 @@ export default function PaymentsWorkspace() {
   const [reload, setReload] = useState(0);
   const [dueDateDrafts, setDueDateDrafts] = useState<Record<string, string>>({});
   const [savingDueDate, setSavingDueDate] = useState("");
+  const [reminderDraft, setReminderDraft] = useState<PaymentOption | null>(null);
+  const [reminderNote, setReminderNote] = useState("");
+  const [sendingReminder, setSendingReminder] = useState("");
   const pendingAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const options = direction === "customer_receipt" ? data.invoices : data.bills;
   const pendingBalances = [
@@ -60,6 +63,34 @@ export default function PaymentsWorkspace() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the due date.");
     } finally { setSavingDueDate(""); }
+  }
+
+  function prepareReminder(item: PaymentOption) {
+    setReminderDraft(item);
+    setReminderNote("");
+    setError("");
+    setNotice("");
+  }
+
+  async function sendReminder() {
+    if (!reminderDraft) return;
+    const key = String(reminderDraft.orderId);
+    setSendingReminder(key); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/payments/${reminderDraft.orderId}/reminder`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: reminderNote }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not send the reminder.");
+      setNotice(`Payment reminder sent to ${result.reminder.recipientEmail}.`);
+      setReminderDraft(null);
+      setReminderNote("");
+      setReload((value) => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not send the reminder.");
+      setReload((value) => value + 1);
+    } finally { setSendingReminder(""); }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -130,7 +161,7 @@ export default function PaymentsWorkspace() {
       <table className="aging-summary"><thead><tr><th>Not due</th><th>1–30 days overdue</th><th>31–60 days overdue</th><th>Over 60 days overdue</th></tr></thead>
         <tbody><tr>{agingTotals.map(({ bucket, amountCents }) => <td key={bucket}><strong>{money((amountCents / 100).toFixed(2))}</strong></td>)}</tr></tbody>
       </table>
-      <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th><th>Aging</th><th>Due date</th></tr></thead>
+      <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th><th>Aging</th><th>Due date</th><th>Reminder</th></tr></thead>
         <tbody>{pendingBalances.map((item) => <tr key={`${item.balanceType}-${item.orderId}`}>
           <td>{item.balanceType}</td><td>{item.partyName}</td><td>{item.orderNumber}</td>
           <td>{money(item.totalZmw)}</td><td>{money(item.paidZmw)}</td><td><strong>{money(item.outstandingZmw)}</strong></td>
@@ -142,6 +173,21 @@ export default function PaymentsWorkspace() {
             <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
               onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
           </div></td>
+          <td>{item.direction === "customer_receipt" && item.overdueDays > 0 ? <div className="form-grid">
+            <button type="button" className="button button-secondary button-small"
+              disabled={!item.customerEmail || sendingReminder === String(item.orderId)}
+              title={!item.customerEmail ? "Add a saved email address to this customer before sending." : undefined}
+              onClick={() => prepareReminder(item)}>
+              {item.lastReminder?.status === "sent" ? "Prepare another" : "Prepare reminder"}
+            </button>
+            {item.lastReminder && <small className="report-footnote">
+              {item.lastReminder.status === "sent"
+                ? `Sent ${item.lastReminder.sentAt ? new Date(item.lastReminder.sentAt).toLocaleString("en-ZM") : ""}`
+                : item.lastReminder.status === "sending"
+                  ? `Sending · started ${new Date(item.lastReminder.attemptedAt).toLocaleString("en-ZM")}`
+                  : `Last attempt failed${item.lastReminder.error ? `: ${item.lastReminder.error}` : ""}`}
+            </small>}
+          </div> : "—"}</td>
         </tr>)}</tbody>
       </table>
       {!pendingBalances.length && <p className="report-footnote">There are no unpaid customer or supplier balances.</p>}
@@ -158,5 +204,49 @@ export default function PaymentsWorkspace() {
       {!data.payments.length && <p className="report-footnote">No payments recorded yet.</p>}
     </div>
     <PaymentReconciliation />
+    {reminderDraft && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !sendingReminder) setReminderDraft(null);
+    }}>
+      <section className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="payment-reminder-title">
+        <div className="modal-header">
+          <div><p className="eyebrow">Customer follow-up</p><h2 id="payment-reminder-title">Review payment reminder</h2>
+            <p>This email will only be sent after you choose Send reminder.</p></div>
+          <button type="button" className="icon-button" aria-label="Close" disabled={Boolean(sendingReminder)} onClick={() => setReminderDraft(null)}>×</button>
+        </div>
+        <div className="modal-body form-grid">
+          <label>To<input readOnly value={reminderDraft.customerEmail ?? ""} /></label>
+          <div className="notice-strip">
+            <span><strong>Order:</strong> {reminderDraft.orderNumber}<br />
+              <strong>Still owed:</strong> {money(reminderDraft.outstandingZmw)}<br />
+              <strong>Due date:</strong> {reminderDraft.dueDate}</span>
+          </div>
+          <label>Personal message (optional)<textarea rows={4} maxLength={1000} value={reminderNote}
+            onChange={(event) => setReminderNote(event.target.value)} placeholder="Add a short note for the customer." /></label>
+          <label>Email preview<textarea readOnly rows={8} value={[
+            `Dear ${reminderDraft.partyName},`,
+            "",
+            `This is a reminder that payment for order ${reminderDraft.orderNumber} is overdue.`,
+            `Amount still owed: ${money(reminderDraft.outstandingZmw)}`,
+            `Due date: ${reminderDraft.dueDate}`,
+            ...(reminderNote.trim() ? ["", reminderNote.trim()] : []),
+            "",
+            "Please let us know if you have already made this payment.",
+            "",
+            "Kind regards,",
+            "Trace and Tether Craft Studio Limited",
+          ].join("\n")} /></label>
+          <p className="report-footnote">The reminder will include the order number, remaining balance, and due date. The app records whether the email was sent.</p>
+        </div>
+        <div className="modal-footer">
+          <span className="modal-footer-note">No reminder is sent automatically.</span>
+          <div className="modal-footer-actions">
+            <button type="button" className="button button-secondary" disabled={Boolean(sendingReminder)} onClick={() => setReminderDraft(null)}>Cancel</button>
+            <button type="button" className="button button-primary" disabled={Boolean(sendingReminder)} onClick={() => void sendReminder()}>
+              {sendingReminder ? "Sending…" : "Send reminder"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>}
   </section>;
 }

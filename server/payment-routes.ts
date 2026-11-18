@@ -4,13 +4,14 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, paymentStatementLines,
-  purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
+  paymentReminders, purchaseOrders, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
+import { sendPaymentReminderEmail } from "./payment-reminder-email";
 
 const bad = (res: import("express").Response, message: string, status = 400) => res.status(status).json({ error: message });
 const dueDateInputSchema = z.object({
@@ -20,6 +21,9 @@ const dueDateInputSchema = z.object({
     const parsed = new Date(`${value}T00:00:00.000Z`);
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
   }, "Enter a valid due date."),
+});
+const paymentReminderInputSchema = z.object({
+  note: z.string().trim().max(1000).optional().default(""),
 });
 const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
   && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
@@ -282,7 +286,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .leftJoin(purchaseOrders, eq(businessPayments.purchaseOrderId, purchaseOrders.id))
         .leftJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .orderBy(desc(businessPayments.paymentDate), desc(businessPayments.createdAt)),
-      db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
+      db.select({ order: salesOrders, customerName: customers.name, customerEmail: customers.email }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id))
         .where(inArray(salesOrders.status, ["partially_fulfilled", "fulfilled", "cancelled"])),
       db.select().from(salesOrderLines),
@@ -298,6 +302,12 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     ]);
 
     const payments = await db.select().from(businessPayments);
+    const reminderRows = await db.select().from(paymentReminders)
+      .orderBy(desc(paymentReminders.attemptedAt), desc(paymentReminders.id));
+    const latestReminderByOrder = new Map<number, typeof paymentReminders.$inferSelect>();
+    for (const reminder of reminderRows) {
+      if (!latestReminderByOrder.has(reminder.salesOrderId)) latestReminderByOrder.set(reminder.salesOrderId, reminder);
+    }
     const paidSales = new Map<number, bigint>();
     const paidPurchases = new Map<number, bigint>();
     for (const payment of payments) {
@@ -314,7 +324,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       if (!latest || row.deliveryDate > latest) latestDeliveryDate.set(row.orderId, row.deliveryDate);
     }
     const ordersWithDelivery = new Set(deliveryRows.map((row) => row.orderId));
-    const invoices = eligibleOrders.map(({ order, customerName }) => {
+    const invoices = eligibleOrders.map(({ order, customerName, customerEmail }) => {
       const total = ordersWithDelivery.has(order.id)
         ? deliveredTotals.get(order.id) ?? 0n
         : order.status === "fulfilled"
@@ -324,9 +334,17 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       const outstanding = total - (paidSales.get(order.id) ?? 0n);
       const dueDate = order.dueDate ?? latestDeliveryDate.get(order.id) ?? order.orderDate;
       return {
-        orderId: order.id, orderNumber: order.orderNumber, partyName: customerName,
+        orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, customerEmail,
         totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
-        outstandingZmw: formatCents(outstanding), dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
+        outstandingZmw: formatCents(outstanding), dueDate,
+        lastReminder: latestReminderByOrder.has(order.id) ? (() => {
+          const reminder = latestReminderByOrder.get(order.id)!;
+          return {
+            status: reminder.status, attemptedAt: reminder.attemptedAt, sentAt: reminder.sentAt,
+            recipientEmail: reminder.recipientEmail, error: reminder.sendError,
+          };
+        })() : null,
+        ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
 
@@ -352,6 +370,130 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       })),
       invoices, bills,
     });
+  });
+
+  app.post("/api/payments/:orderId/reminder", owner, async (req, res) => {
+    const orderId = z.coerce.number().int().positive().safeParse(req.params.orderId);
+    if (!orderId.success) return bad(res, "Choose a valid customer order.");
+    const parsed = paymentReminderInputSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the reminder message.");
+
+    const today = new Date().toISOString().slice(0, 10);
+    const claim = await db.transaction(async (tx) => {
+      const [order] = await tx.select().from(salesOrders)
+        .where(eq(salesOrders.id, orderId.data)).for("update").limit(1);
+      if (!order) return { error: "Customer order not found.", status: 404 as const };
+
+      const [customer] = await tx.select({ name: customers.name, email: customers.email })
+        .from(customers).where(eq(customers.id, order.customerId)).limit(1);
+      if (!customer?.email) {
+        return { error: "Add a saved email address to this customer before sending a reminder.", status: 400 as const };
+      }
+      if (!z.string().email().safeParse(customer.email).success) {
+        return { error: "The customer's saved email address is invalid. Update it before sending a reminder.", status: 400 as const };
+      }
+
+      const deliveryRows = await tx.select({
+        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+        deliveryDate: salesDeliveries.deliveryDate,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
+        .where(eq(salesDeliveries.salesOrderId, order.id));
+      const deliveredTotal = deliveryRows.reduce(
+        (total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n,
+      );
+      const orderTotal = deliveryRows.length > 0
+        ? deliveredTotal
+        : order.status === "fulfilled"
+          ? (await tx.select().from(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id)))
+            .reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
+          : 0n;
+      const [paidRow] = await tx.select({ total: sum(businessPayments.amountZmw) })
+        .from(businessPayments)
+        .where(and(
+          eq(businessPayments.direction, "customer_receipt"),
+          eq(businessPayments.salesOrderId, order.id),
+        ));
+      const outstanding = orderTotal - cents(String(paidRow?.total ?? "0.00"));
+      if (outstanding <= 0n) return { error: "This customer order has no amount left to pay.", status: 409 as const };
+
+      const latestDeliveryDate = deliveryRows.reduce<string | null>(
+        (latest, line) => !latest || line.deliveryDate > latest ? line.deliveryDate : latest,
+        null,
+      );
+      const dueDate = order.dueDate ?? latestDeliveryDate ?? order.orderDate;
+      if (dueDate >= today) {
+        return { error: "This balance is not overdue. A reminder can only be sent after its due date.", status: 409 as const };
+      }
+
+      const [activeAttempt] = await tx.select().from(paymentReminders)
+        .where(and(
+          eq(paymentReminders.salesOrderId, order.id),
+          eq(paymentReminders.status, "sending"),
+        ))
+        .orderBy(desc(paymentReminders.attemptedAt))
+        .for("update")
+        .limit(1);
+      if (activeAttempt) {
+        const isStale = Date.now() - activeAttempt.attemptedAt.getTime() > 5 * 60 * 1000;
+        if (!isStale) {
+          return { error: "A reminder is already being sent for this order. Wait for it to finish.", status: 409 as const };
+        }
+        const staleError = "The previous send did not finish. Check Gmail Sent before trying again.";
+        const [failedAttempt] = await tx.update(paymentReminders).set({
+          status: "failed", sendError: staleError,
+        }).where(eq(paymentReminders.id, activeAttempt.id)).returning();
+        await recordBusinessAudit(tx, {
+          entityType: "payment_reminder", entityId: failedAttempt.id,
+          recordLabel: order.orderNumber, actor: res.locals.actor, action: "updated",
+          changedFields: ["status", "sendError"],
+        });
+        return { error: `${staleError} If it is not there, try sending again.`, status: 409 as const };
+      }
+
+      const attemptedAt = new Date();
+      const [reminder] = await tx.insert(paymentReminders).values({
+        salesOrderId: order.id, recipientEmail: customer.email,
+        outstandingZmw: formatCents(outstanding), dueDate,
+        note: parsed.data.note, status: "sending", attemptedAt,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "payment_reminder", entityId: reminder.id,
+        recordLabel: order.orderNumber, actor: res.locals.actor, action: "created",
+        changedFields: ["salesOrderId", "recipientEmail", "outstandingZmw", "dueDate", "note", "status", "attemptedAt"],
+      });
+      return {
+        reminder, content: {
+          orderNumber: order.orderNumber, customerName: customer.name, customerEmail: customer.email,
+          outstandingZmw: reminder.outstandingZmw, dueDate: reminder.dueDate, note: reminder.note,
+        },
+      };
+    });
+    if ("error" in claim) return res.status(claim.status ?? 400).json({ error: claim.error });
+
+    const outcome = await sendPaymentReminderEmail(claim.content);
+    const sentAt = outcome.ok ? new Date() : null;
+    const [reminder] = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(paymentReminders).set({
+        status: outcome.ok ? "sent" : "failed",
+        sentAt,
+        sendError: outcome.ok ? null : outcome.error,
+        providerMessageId: outcome.ok ? outcome.messageId : null,
+      }).where(and(
+        eq(paymentReminders.id, claim.reminder.id),
+        eq(paymentReminders.status, "sending"),
+      )).returning();
+      if (!updated) throw new Error("The payment reminder result could not be saved.");
+      await recordBusinessAudit(tx, {
+        entityType: "payment_reminder", entityId: updated.id,
+        recordLabel: claim.content.orderNumber, actor: res.locals.actor, action: "updated",
+        changedFields: ["status", "sentAt", "sendError", "providerMessageId"],
+      });
+      return [updated];
+    });
+    if (!outcome.ok) return res.status(502).json({ error: outcome.error, reminder });
+    res.json({ reminder });
   });
 
   app.put("/api/payments/due-date", owner, async (req, res) => {

@@ -281,6 +281,13 @@
       "when": 1795002668468,
       "tag": "0039_customer_quote_email_delivery_events",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1795003074465,
+      "tag": "0040_payment_reminders",
+      "breakpoints": true
     }
   ]
 }
