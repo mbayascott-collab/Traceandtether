@@ -455,7 +455,8 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const deliveriesById = new Map<number, {
         id: number; deliveryNumber: string; deliveryDate: string;
         receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null } | null;
-        lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[];
+        lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string }[];
+        totalZmw: string;
       }>();
       for (const row of orderDeliveries) {
         const receipt = receiptByDelivery.get(row.delivery.id);
@@ -465,11 +466,15 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
             receivedBy: receipt.receivedBy, receivedAt: receipt.receivedAt,
             proofFileName: receipt.proofFileName, proofMimeType: receipt.proofMimeType,
           } : null,
-          lines: [],
+          lines: [], totalZmw: "0.00",
         };
+        const lineTotal = cents(row.orderLine.unitPriceZmw) * BigInt(row.deliveryLine.quantity);
         delivery.lines.push({
-          salesOrderLineId: row.orderLine.id, productName: row.productName, sku: row.sku, quantity: row.deliveryLine.quantity,
+          salesOrderLineId: row.orderLine.id, productName: row.productName, sku: row.sku,
+          quantity: row.deliveryLine.quantity, unitPriceZmw: row.orderLine.unitPriceZmw,
+          lineTotalZmw: money(lineTotal),
         });
+        delivery.totalZmw = money(cents(delivery.totalZmw) + lineTotal);
         deliveriesById.set(row.delivery.id, delivery);
       }
       return {

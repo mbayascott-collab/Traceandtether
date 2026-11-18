@@ -58,7 +58,10 @@ export interface SalesOrderLine {
   stockLocations: { id: number; name: string; available: number }[];
 }
 export interface SalesDeliveryReceipt { receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null; }
-export interface SalesDelivery { id: number; deliveryNumber: string; deliveryDate: string; receipt: SalesDeliveryReceipt | null; lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[]; }
+export interface SalesDelivery {
+  id: number; deliveryNumber: string; deliveryDate: string; totalZmw: string; receipt: SalesDeliveryReceipt | null;
+  lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string }[];
+}
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "partially_fulfilled" | "fulfilled" | "cancelled"; orderDate: string; confirmedAt?: string | null; fulfilledAt: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; deliveredZmw: string; deliveries: SalesDelivery[]; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
 export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }

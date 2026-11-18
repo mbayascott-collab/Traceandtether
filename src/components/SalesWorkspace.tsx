@@ -37,7 +37,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [orderActionErrors, setOrderActionErrors] = useState<Record<number, string>>({});
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   const [stockLocationChoices, setStockLocationChoices] = useState<Record<string, number | "auto">>({});
-  const [invoiceOrder, setInvoiceOrder] = useState<SalesOrder | null>(null);
+  const [invoicePrint, setInvoicePrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
   const [deliveryFormOrder, setDeliveryFormOrder] = useState<SalesOrder | null>(null);
   const [deliveryRequestKey, setDeliveryRequestKey] = useState("");
   const [deliverySubmitting, setDeliverySubmitting] = useState(false);
@@ -274,7 +274,10 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                 {delivery.receipt ? "Edit receipt" : "Record receipt"}
               </button>
             </span>)}
-           {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
+            {o.deliveries.map((delivery) => <button key={`invoice-${delivery.id}`} className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
+              Invoice {delivery.deliveryNumber} / PDF
+            </button>)}
+            {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery: null })}>Order invoice / PDF</button>}
            {o.status === "fulfilled" && !o.deliveries.length && <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery: null })}>Delivery note</button>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
         </td></tr>)}</tbody></table></div>
@@ -312,43 +315,51 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>
       </form>
     </div>}
-    {mode === "orders" && invoiceOrder && (() => {
-      const customer = customers.find((item) => item.id === invoiceOrder.customerId);
-      const invoiceRef = invoiceNumber(invoiceOrder);
-      const date = invoiceOrder.fulfilledAt || invoiceOrder.orderDate;
+    {mode === "orders" && invoicePrint && (() => {
+      const { order, delivery } = invoicePrint;
+      const customer = customers.find((item) => item.id === order.customerId);
+      const invoiceRef = delivery
+        ? `INV-${delivery.deliveryNumber.replace(/^DN-/, "")}`
+        : invoiceNumber(order);
+      const date = delivery?.deliveryDate ?? order.fulfilledAt ?? order.orderDate;
+      const invoiceLines = delivery
+        ? delivery.lines.map((line) => ({ ...line, id: line.salesOrderLineId }))
+        : order.lines;
+      const invoiceTotal = delivery?.totalZmw ?? order.totalZmw;
       return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="invoice-preview-title">
         <div className="quote-preview-panel">
           <div className="quote-preview-toolbar">
             <div><strong id="invoice-preview-title">Invoice preview</strong><span>Choose “Save as PDF” in the print window.</span></div>
-            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setInvoiceOrder(null)}>Close</button></div>
+            <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setInvoicePrint(null)}>Close</button></div>
           </div>
           <article className="customer-quote-document" id="sales-invoice-print">
             <header className="customer-quote-document-header">
               <div className="customer-quote-document-brand"><img src={companyLogo} alt={`${companyName} logo`} /><div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}<br />{companyPhone}</small></div></div>
               <div className="customer-quote-document-title">
-                <div><span className="customer-quote-document-kicker">SALES INVOICE</span><h1>{invoiceRef}</h1></div>
+                <div><span className="customer-quote-document-kicker">{delivery ? "DELIVERY INVOICE" : "SALES INVOICE"}</span><h1>{invoiceRef}</h1></div>
                 <div className="customer-quote-document-meta">
                   <div><span>Invoice date</span><strong>{documentDate(date)}</strong></div>
-                  <div><span>Sales order</span><strong>{invoiceOrder.orderNumber}</strong></div>
+                  <div><span>Sales order</span><strong>{order.orderNumber}</strong></div>
+                  {delivery && <div><span>Delivery</span><strong>{delivery.deliveryNumber}</strong></div>}
                 </div>
               </div>
             </header>
             <section className="customer-quote-document-customer">
-              <span>INVOICE FOR</span><strong>{invoiceOrder.customerName}</strong>
+              <span>INVOICE FOR</span><strong>{order.customerName}</strong>
               {customer?.email && <p>{customer.email}</p>}
               {customer?.phone && <p>{customer.phone}</p>}
               {customer?.address && <p><b>Billing address:</b> {customer.address}</p>}
-              {invoiceOrder.deliveryAddress && <p><b>Delivery address:</b> {invoiceOrder.deliveryAddress}</p>}
+              {order.deliveryAddress && <p><b>Delivery address:</b> {order.deliveryAddress}</p>}
             </section>
             <table className="customer-quote-document-table">
               <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Qty</th><th className="quote-number-cell">Unit price</th><th className="quote-number-cell">Amount</th></tr></thead>
-              <tbody>{invoiceOrder.lines.map((line) => <tr key={line.id}>
+              <tbody>{invoiceLines.map((line) => <tr key={line.id}>
                 <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td><td className="quote-number-cell">{zmw(line.unitPriceZmw)}</td><td className="quote-number-cell">{zmw(line.lineTotalZmw)}</td>
               </tr>)}</tbody>
             </table>
-            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoiceOrder.totalZmw)}</strong></div>
-            {invoiceOrder.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{invoiceOrder.notes}</p></section>}
-            <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoiceRef} · Sales order: {invoiceOrder.orderNumber}</footer>
+            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoiceTotal)}</strong></div>
+            {order.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{order.notes}</p></section>}
+            <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoiceRef} · Sales order: {order.orderNumber}{delivery ? ` · Delivery: ${delivery.deliveryNumber}` : ""}</footer>
           </article>
         </div>
       </div>;
