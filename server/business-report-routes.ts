@@ -11,6 +11,7 @@ import { allocateLandedCosts } from "../shared/landed-cost";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
 import { supplierDeliveryMetrics } from "./supplier-analytics";
+import { calculateSalesActivity } from "./sales-analytics";
 
 const cents = (value: string) => {
   const [whole, fraction = ""] = value.split(".");
@@ -125,6 +126,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
         customerId: salesOrders.customerId, customerName: customers.name,
         productId: salesOrderLines.productId, quantity: salesDeliveryLines.quantity, price: salesOrderLines.unitPriceZmw,
+        orderStatus: salesOrders.status,
       }).from(salesDeliveryLines)
         .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
         .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id))
@@ -135,35 +137,9 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
         .where(eq(accountingAccounts.systemKey, "cost_of_goods_sold")),
     ]);
-    const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
-    const revenue = new Map<number, bigint>(), units = new Map<number, number>();
-    const monthlySales = new Map<string, bigint>();
-    const customerActivity = new Map<number, { name: string; revenue: bigint; orderIds: Set<number> }>();
-    const periodOrderIds = new Set<number>();
-    const recordCustomerSale = (orderId: number, customerId: number, customerName: string, date: string, amount: bigint) => {
-      const month = date.slice(0, 7);
-      monthlySales.set(month, (monthlySales.get(month) ?? 0n) + amount);
-      periodOrderIds.add(orderId);
-      const customer = customerActivity.get(customerId) ?? { name: customerName, revenue: 0n, orderIds: new Set<number>() };
-      customer.revenue += amount;
-      customer.orderIds.add(orderId);
-      customerActivity.set(customerId, customer);
-    };
-    for (const row of deliveryRows) {
-      if ((fromDate && row.deliveryDate < fromDate) || (toDate && row.deliveryDate > toDate)) continue;
-      const amount = cents(row.price) * BigInt(row.quantity);
-      revenue.set(row.productId, (revenue.get(row.productId) ?? 0n) + amount);
-      units.set(row.productId, (units.get(row.productId) ?? 0) + row.quantity);
-      recordCustomerSale(row.orderId, row.customerId, row.customerName, row.deliveryDate, amount);
-    }
-    for (const line of lines) {
-      const order = orders.find((item) => item.id === line.salesOrderId);
-      if (!order || order.status !== "fulfilled" || ordersWithDeliveries.has(order.id) || (fromDate && order.orderDate < fromDate) || (toDate && order.orderDate > toDate)) continue;
-      const amount = cents(line.unitPriceZmw) * BigInt(line.quantity);
-      revenue.set(line.productId, (revenue.get(line.productId) ?? 0n) + amount);
-      units.set(line.productId, (units.get(line.productId) ?? 0) + line.quantity);
-      recordCustomerSale(order.id, order.customerId, order.customerName, order.orderDate, amount);
-    }
+    const activity = calculateSalesActivity({ fromDate, toDate, orders, lines, deliveries: deliveryRows });
+    const revenue = new Map(activity.products.map((product) => [product.productId, product.revenue]));
+    const units = new Map(activity.products.map((product) => [product.productId, product.units]));
     const costs = new Map<number, bigint>();
     for (const line of costLines) {
       if (line.productId == null || (fromDate && line.entryDate < fromDate) || (toDate && line.entryDate > toDate)) continue;
@@ -195,24 +171,9 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     });
     const totalsAreComplete = missingCostProducts === 0;
     const totalActualProfit = totalsAreComplete ? totalRevenue - totalRecordedCost : null;
-    const customersWithSales = [...customerActivity.entries()].map(([customerId, activity]) => ({
-      customerId, name: activity.name, salesZmw: from(activity.revenue), orders: activity.orderIds.size,
-    })).sort((a, b) => {
-      const left = cents(a.salesZmw), right = cents(b.salesZmw);
-      return left === right ? 0 : left > right ? -1 : 1;
-    });
-    const firstMonth = fromDate ? fromDate.slice(0, 7) : [...monthlySales.keys()].sort()[0];
-    const lastMonth = toDate ? toDate.slice(0, 7) : [...monthlySales.keys()].sort().at(-1);
-    const salesByMonth: { month: string; salesZmw: string }[] = [];
-    if (firstMonth && lastMonth) {
-      const cursor = new Date(`${firstMonth}-01T00:00:00Z`);
-      const end = new Date(`${lastMonth}-01T00:00:00Z`);
-      while (cursor <= end) {
-        const month = cursor.toISOString().slice(0, 7);
-        salesByMonth.push({ month, salesZmw: from(monthlySales.get(month) ?? 0n) });
-        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-      }
-    }
+    const customersWithSales = activity.customers.map((customer) => ({
+      customerId: customer.customerId, name: customer.name, salesZmw: from(customer.revenue), orders: customer.orders,
+    }));
     res.json({
       period: { from: fromDate || null, to: toDate || null },
       totals: {
@@ -223,12 +184,9 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         productsMissingRecordedCost: missingCostProducts, productsMissingEstimatedCost: missingEstimateProducts,
       },
       products: rows,
-      salesByMonth,
+      salesByMonth: activity.salesByMonth.map((month) => ({ month: month.month, salesZmw: from(month.revenue) })),
       customerSummary: {
-        customersWithSales: customersWithSales.length,
-        repeatCustomers: customersWithSales.filter((customer) => customer.orders > 1).length,
-        fulfilledOrders: periodOrderIds.size,
-        unitsDelivered: [...units.values()].reduce((sum, quantity) => sum + quantity, 0),
+        ...activity.summary,
       },
       topCustomers: customersWithSales.slice(0, 10),
     });
