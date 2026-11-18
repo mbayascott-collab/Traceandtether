@@ -197,8 +197,8 @@ export default function AccountingWorkspace() {
         <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={recordOpeningBalances}>
           <p className="notice-strip" style={{ gridColumn: "1 / -1", margin: 0 }}>
             Enter balances as of one date. Use 0 where there is no balance. Customer and supplier amounts are totals.
-            Stock is entered separately. The system calculates a temporary balancing amount that must be reviewed
-            when opening stock is recorded.
+            Enter stock separately for each product using the reviewed quantity and average cost on the
+            <a href="/stock-adjustments"> Stock adjustments page</a>. These opening entries are one-time and locked after saving.
           </p>
           <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
           <label>Cash on hand (ZMW)<input name="cashOnHandZmw" type="number" min="0" step="0.01" defaultValue="0.00" required /></label>

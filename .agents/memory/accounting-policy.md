@@ -3,7 +3,7 @@ name: Accounting policy
 description: Inventory costing and recognition rules confirmed for automated accounting.
 ---
 
-Use weighted-average inventory costing. Record unpaid sales as receivables and unpaid purchases/import costs as payables; keep journal values in ZMW using the recorded exchange rates.
+Use weighted-average inventory costing. Record unpaid sales as receivables and unpaid purchases/import costs as payables; keep journal values in ZMW using the recorded exchange rates. Opening inventory is recorded separately against opening balance equity, not added to the owner's explicitly entered equity balance.
 
 For orders delivered in several batches, record each delivery as its own sale and receivable for the quantities delivered. Customer payments may be recorded later against the order balance.
 

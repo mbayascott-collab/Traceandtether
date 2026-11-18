@@ -8,6 +8,14 @@ import {
 } from "../lib/api";
 
 type Mode = "overview" | "receipts" | "reservations" | "adjustments";
+const money = (value: string) => {
+  const [whole, fraction = ""] = value.split(".");
+  const amount = BigInt(whole);
+  const absolute = amount < 0n ? -amount : amount;
+  const cents = fraction.padEnd(2, "0").slice(0, 2);
+  return `ZMW ${amount < 0n ? "-" : ""}${absolute.toLocaleString("en-ZM")}.${cents}`;
+};
+
 export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
@@ -17,12 +25,21 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
+  const [openingQuantity, setOpeningQuantity] = useState("");
+  const [openingUnitCost, setOpeningUnitCost] = useState("");
   const heading = mode === "overview" ? "Inventory" : mode === "receipts" ? "Stock receipts" : mode === "reservations" ? "Reservations" : "Stock adjustments";
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const filteredInventory = inventory.filter((product) =>
     product.name.toLocaleLowerCase().includes(normalizedSearch) ||
     product.sku.toLocaleLowerCase().includes(normalizedSearch)
   );
+  const openingValueCents = (() => {
+    if (!/^\d+$/.test(openingQuantity) || !/^\d+(?:\.\d{0,2})?$/.test(openingUnitCost)) return null;
+    const [whole, fraction = ""] = openingUnitCost.split(".");
+    return BigInt(openingQuantity) * (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0")));
+  })();
+  const openingValue = openingValueCents === null ? null
+    : `ZMW ${(openingValueCents / 100n).toLocaleString("en-ZM")}.${String(openingValueCents % 100n).padStart(2, "0")}`;
 
   useEffect(() => {
     let alive = true;
@@ -50,7 +67,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label className="search-field"><Search aria-hidden="true" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name or SKU" aria-label="Search inventory by product name or SKU" /></label>
         <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>
       </div>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={6}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Average cost</th><th>Stock value</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{money(p.averageUnitCostZmw)}</td><td>{money(p.stockValueZmw)}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={8}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
       <MovementTable movements={movements} />
     </>}
     {mode === "receipts" && <div className="panel data-table-wrap"><p>Post received shipment quantities into stock. Posting is incremental and cannot be duplicated.</p><table><thead><tr><th>Order / shipment</th><th>Supplier</th><th>Product</th><th>Received</th><th>Already in stock</th><th>To post</th><th /></tr></thead><tbody>{receipts.map((r) => <tr key={r.id}><td>{r.orderNumber} · {r.shipmentReference || "shipment"}</td><td>{r.supplierName}</td><td>{r.productName} · {r.sku}</td><td>{r.quantityReceived}</td><td>{r.quantityStocked}</td><td>{r.quantityToPost}</td><td><button className="button button-primary" onClick={() => run(() => postInventoryReceipt(r.id))}>Post receipt</button></td></tr>)}{!receipts.length && <tr><td colSpan={7}>No received shipment quantities are waiting to be posted.</td></tr>}</tbody></table></div>}
@@ -77,15 +94,19 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       </form>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createOpeningStock({
         productId: Number(d.get("productId")), quantity: Number(d.get("quantity")),
-        unitCostZmw: String(d.get("unitCostZmw")), reference: String(d.get("reference") || "") || null,
-      }))}>
+        unitCostZmw: String(d.get("unitCostZmw")), effectiveAt: String(d.get("effectiveAt")),
+        memo: String(d.get("memo")), reference: String(d.get("reference") || "") || null,
+      }))} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); }}>
         <h2>Add stock you already have</h2>
-        <p className="report-footnote field-full">Enter the extra quantity and its average landed cost per unit in ZMW. The value is recorded as opening stock, not sales income. Use this once per product; later changes belong in stock adjustments.</p>
+        <p className="report-footnote field-full">Enter the counted quantity and reviewed average landed cost per unit in ZMW. The stock value is recorded against opening balance equity, not sales income. Use this once per product; later changes belong in stock adjustments.</p>
         <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku} · currently {p.onHand}</option>)}</select></label>
-        <label>Quantity to add<input name="quantity" type="number" min="1" max="1000000" step="1" required /></label>
-        <label>Average cost per unit (ZMW)<input name="unitCostZmw" type="number" min="0.01" step="0.01" required /></label>
+        <label>Quantity to add<input name="quantity" type="number" min="1" max="1000000" step="1" value={openingQuantity} onChange={(event) => setOpeningQuantity(event.target.value)} required /></label>
+        <label>Average cost per unit (ZMW)<input name="unitCostZmw" type="number" min="0.01" step="0.01" value={openingUnitCost} onChange={(event) => setOpeningUnitCost(event.target.value)} required /></label>
+        <p className="report-footnote field-full" aria-live="polite">Calculated opening stock value: {openingValue ?? "Enter a quantity and unit cost"}</p>
+        <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
+        <label>Memo<input name="memo" maxLength={500} defaultValue="Reviewed opening stock" required /></label>
         <label>Reference<input name="reference" maxLength={120} placeholder="Opening count or source note" /></label>
-        <button className="button button-primary">Add opening stock</button>
+        <button className="button button-primary">Record opening stock</button>
       </form>
       <MovementTable movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock")} />
     </>}

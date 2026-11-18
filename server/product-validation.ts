@@ -230,6 +230,11 @@ export const openingStockInputSchema = z.object({
   quantity: positiveInteger,
   unitCostZmw: z.string().trim().regex(/^\d{1,10}(?:\.\d{1,2})?$/, "Enter a unit cost in ZMW with up to two decimals.")
     .refine((value) => toMinorUnits(value)! > 0n, "Unit cost must be greater than ZMW 0.00."),
+  effectiveAt: validDate,
+  memo: z.preprocess(
+    (value) => value === "" || value === undefined ? null : value,
+    z.string().trim().min(3).max(500).nullable(),
+  ),
   reference: nullableText(120),
 }).strict().superRefine((input, context) => {
   if (toMinorUnits(input.unitCostZmw)! * BigInt(input.quantity) > 99_999_999_999_999n) {

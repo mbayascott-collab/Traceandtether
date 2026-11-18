@@ -31,7 +31,10 @@ export interface LandedCostOrder extends PurchaseOrder {
   allocations: { expenseId: number; lineId: number; amountZmw: string }[];
   lines: (PurchaseOrderLine & { allocatedExpensesZmw: string; purchaseUnitCostZmw: string; landedUnitCostZmw: string })[];
 }
-export interface InventoryItem { id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number; }
+export interface InventoryItem {
+  id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number;
+  stockValueZmw: string; averageUnitCostZmw: string;
+}
 export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; createdAt: string; }
 export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
@@ -372,7 +375,9 @@ export async function fulfillReservation(id: number): Promise<void> {
 export async function createInventoryAdjustment(input: { productId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
   await request("/api/inventory/adjustments", { method: "POST", body: JSON.stringify(input) });
 }
-export async function createOpeningStock(input: { productId: number; quantity: number; unitCostZmw: string; reference: string | null }): Promise<void> {
+export async function createOpeningStock(input: {
+  productId: number; quantity: number; unitCostZmw: string; effectiveAt: string; memo: string; reference: string | null;
+}): Promise<void> {
   await request("/api/inventory/opening-stock", { method: "POST", body: JSON.stringify(input) });
 }
 export async function fetchCustomers(): Promise<Customer[]> {

@@ -161,6 +161,15 @@ test("validates reservation quantities and non-zero reasoned stock adjustments",
 test("validates opening stock quantity and positive ZMW average cost", () => {
   const opening = { productId: 1, quantity: 4, unitCostZmw: "25.50", reference: "First count" };
   assert.equal(openingStockInputSchema.safeParse(opening).success, true);
+  assert.equal(openingStockInputSchema.safeParse({
+    ...opening, effectiveAt: "2026-11-18", memo: "Counted stock on hand",
+  }).success, true);
+  assert.equal(openingStockInputSchema.safeParse({
+    ...opening, effectiveAt: "2026-02-30", memo: "Counted stock on hand",
+  }).success, false);
+  assert.equal(openingStockInputSchema.safeParse({
+    ...opening, effectiveAt: "2026-11-18", memo: "  ",
+  }).success, false);
   assert.equal(openingStockInputSchema.safeParse({ ...opening, quantity: 0 }).success, false);
   assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "0" }).success, false);
   assert.equal(openingStockInputSchema.safeParse({ ...opening, unitCostZmw: "-1" }).success, false);

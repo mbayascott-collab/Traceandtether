@@ -5,11 +5,14 @@ import {
   inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
-  importExpenses, inventoryMovements, inventoryReservations, products, purchaseOrderLines, purchaseOrders,
+  importExpenses, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
   shipmentLines, shipments, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
-import { accountBalance, cents, formatCents, postJournal } from "./accounting-posting";
+import {
+  accountBalance, buildOpeningStockLines, cents, ensureAccountingAccounts, formatCents,
+  journalLinesAreBalanced, postJournal, weightedAverageUnitCostCents,
+} from "./accounting-posting";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 async function balance(tx: any, productId: number) {
@@ -25,17 +28,34 @@ function getId(value: unknown) {
 
 export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/inventory", owner, async (_req, res) => {
-    const [items, movements, reservations] = await Promise.all([
+    const accounts = await ensureAccountingAccounts(db);
+    const inventoryAccount = accounts.get("inventory");
+    if (!inventoryAccount) throw new Error("The inventory account is unavailable.");
+    const [items, movements, reservations, inventoryLines] = await Promise.all([
       db.select({ id: products.id, name: products.name, sku: products.sku, unit: products.unit, status: products.status }).from(products).orderBy(asc(products.name)),
       db.select({ productId: inventoryMovements.productId, delta: inventoryMovements.quantityDelta }).from(inventoryMovements),
       db.select({ productId: inventoryReservations.productId, quantity: inventoryReservations.quantity }).from(inventoryReservations).where(eq(inventoryReservations.status, "active")),
+      db.select({
+        productId: journalLines.productId, debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+      }).from(journalLines).where(eq(journalLines.accountId, inventoryAccount.id)),
     ]);
     const onHand = new Map<number, number>(), reserved = new Map<number, number>();
+    const stockValue = new Map<number, bigint>();
     movements.forEach((row) => onHand.set(row.productId, (onHand.get(row.productId) ?? 0) + row.delta));
     reservations.forEach((row) => reserved.set(row.productId, (reserved.get(row.productId) ?? 0) + row.quantity));
+    inventoryLines.forEach((row) => {
+      if (row.productId === null) return;
+      stockValue.set(row.productId,
+        (stockValue.get(row.productId) ?? 0n) + cents(row.debitZmw) - cents(row.creditZmw));
+    });
     res.json({ inventory: items.map((item) => {
       const stock = onHand.get(item.id) ?? 0, held = reserved.get(item.id) ?? 0;
-      return { ...item, onHand: stock, reserved: held, available: stock - held };
+      const value = stockValue.get(item.id) ?? 0n;
+      return {
+        ...item, onHand: stock, reserved: held, available: stock - held,
+        stockValueZmw: formatCents(value),
+        averageUnitCostZmw: formatCents(weightedAverageUnitCostCents(value, stock)),
+      };
     }) });
   });
 
@@ -242,17 +262,17 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         .where(and(eq(inventoryMovements.productId, product.id), eq(inventoryMovements.kind, "opening_stock"))).limit(1);
       if (existing) return { error: "Opening stock was already recorded for this product. Use a stock adjustment for later changes.", status: 409 };
       const totalValue = cents(parsed.data.unitCostZmw) * BigInt(parsed.data.quantity);
+      const lines = buildOpeningStockLines(product.id, formatCents(totalValue));
+      if (!journalLinesAreBalanced(lines)) throw new Error("Opening stock journal is not balanced.");
+      const effectiveAt = parsed.data.effectiveAt || new Date().toISOString().slice(0, 10);
+      const memo = parsed.data.memo || `Opening stock for ${product.name}`;
       const movement = (await tx.insert(inventoryMovements).values({
         productId: product.id, kind: "opening_stock", quantityDelta: parsed.data.quantity,
-        reason: "Opening stock recorded", reference: parsed.data.reference, sourceKey: `opening-stock:${product.id}`,
+        reason: memo, reference: parsed.data.reference, sourceKey: `opening-stock:${product.id}`,
       }).returning())[0]!;
       await postJournal(tx, {
         sourceKey: `opening-stock:${product.id}`, sourceType: "opening_stock", sourceId: movement.id,
-        memo: `Opening stock for ${product.name}`,
-        lines: [
-          { accountKey: "inventory", productId: product.id, debitZmw: formatCents(totalValue), description: "Existing stock opening value" },
-          { accountKey: "owner_equity", creditZmw: formatCents(totalValue), description: "Opening inventory balance" },
-        ],
+        memo, entryDate: effectiveAt, lines,
       });
       return { movement };
     });

@@ -47,6 +47,11 @@ export function formatCents(value: bigint): string {
   return `${negative ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`;
 }
 
+export function weightedAverageUnitCostCents(inventoryValueCents: bigint, onHand: number): bigint {
+  if (!Number.isSafeInteger(onHand) || onHand <= 0) return 0n;
+  return (inventoryValueCents + BigInt(Math.floor(onHand / 2))) / BigInt(onHand);
+}
+
 export function journalLinesAreBalanced(lines: PostingLine[]) {
   const debit = lines.reduce((sum, line) => sum + cents(line.debitZmw ?? "0.00"), 0n);
   const credit = lines.reduce((sum, line) => sum + cents(line.creditZmw ?? "0.00"), 0n);
@@ -120,16 +125,32 @@ export function buildOpeningBalanceLines(input: {
     lines.push({
       accountKey: "opening_balance_equity",
       creditZmw: formatCents(difference),
-      description: "Temporary balancing amount; review after opening stock is recorded",
+      description: "Balancing amount for opening assets and liabilities",
     });
   } else if (difference < 0n) {
     lines.push({
       accountKey: "opening_balance_equity",
       debitZmw: formatCents(-difference),
-      description: "Temporary balancing amount; review after opening stock is recorded",
+      description: "Balancing amount for opening assets and liabilities",
     });
   }
   return lines;
+}
+
+export function buildOpeningStockLines(productId: number, totalValueZmw: string): PostingLine[] {
+  return [
+    {
+      accountKey: "inventory",
+      productId,
+      debitZmw: totalValueZmw,
+      description: "Reviewed value of existing stock",
+    },
+    {
+      accountKey: "opening_balance_equity",
+      creditZmw: totalValueZmw,
+      description: "Existing stock opening balance",
+    },
+  ];
 }
 
 export async function ensureAccountingAccounts(tx: any) {

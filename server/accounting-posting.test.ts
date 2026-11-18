@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildOpeningBalanceLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
-  operatingExpenseAccountKey,
+  buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  operatingExpenseAccountKey, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
@@ -22,7 +22,7 @@ test("accepts only positive balanced journal lines", () => {
   assert.equal(journalLinesAreBalanced([]), false);
 });
 
-test("opening balances balance with a temporary equity offset", () => {
+test("opening balances balance with a clearly described opening equity offset", () => {
   const lines = buildOpeningBalanceLines({
     cashOnHandZmw: "30.00",
     bankZmw: "50.00",
@@ -42,7 +42,7 @@ test("opening balances balance with a temporary equity offset", () => {
   assert.deepEqual(lines.at(-1), {
     accountKey: "opening_balance_equity",
     creditZmw: "35.50",
-    description: "Temporary balancing amount; review after opening stock is recorded",
+    description: "Balancing amount for opening assets and liabilities",
   });
 });
 
@@ -59,6 +59,21 @@ test("opening balance equity can have a debit balance when credits exceed assets
   });
   assert.equal(journalLinesAreBalanced(lines), true);
   assert.equal(lines.at(-1)?.debitZmw, "5.00");
+});
+
+test("opening stock debits product inventory and credits opening balance equity", () => {
+  const lines = buildOpeningStockLines(42, "102.00");
+  assert.equal(journalLinesAreBalanced(lines), true);
+  assert.deepEqual(lines.map((line) => [line.accountKey, line.productId, line.debitZmw, line.creditZmw]), [
+    ["inventory", 42, "102.00", undefined],
+    ["opening_balance_equity", undefined, undefined, "102.00"],
+  ]);
+});
+
+test("rounds the current weighted-average cost in exact ZMW cents", () => {
+  assert.equal(weightedAverageUnitCostCents(100n, 3), 33n);
+  assert.equal(weightedAverageUnitCostCents(101n, 2), 51n);
+  assert.equal(weightedAverageUnitCostCents(100n, 0), 0n);
 });
 
 test("maps each payment method to its own balance account", () => {
