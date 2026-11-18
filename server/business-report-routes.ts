@@ -23,6 +23,8 @@ const validDate = (value: string) => {
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 };
+const reportDateParam = (value: unknown): string | null =>
+  value === undefined ? "" : typeof value === "string" && value.length > 0 ? value : null;
 
 export function registerBusinessReportRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/business-dashboard", owner, async (_req, res) => {
@@ -106,9 +108,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
   });
 
   app.get("/api/profitability", owner, async (req, res) => {
-    const fromDate = typeof req.query.from === "string" ? req.query.from : "";
-    const toDate = typeof req.query.to === "string" ? req.query.to : "";
-    if ((fromDate && !validDate(fromDate)) || (toDate && !validDate(toDate)) || (fromDate && toDate && fromDate > toDate)) {
+    const fromDate = reportDateParam(req.query.from);
+    const toDate = reportDateParam(req.query.to);
+    if (fromDate === null || toDate === null
+      || (fromDate !== "" && !validDate(fromDate))
+      || (toDate !== "" && !validDate(toDate))
+      || (fromDate !== "" && toDate !== "" && fromDate > toDate)) {
       return res.status(400).json({ error: "Choose a valid date range." });
     }
     const [allProducts, orders, lines, deliveryRows, costLines] = await Promise.all([
