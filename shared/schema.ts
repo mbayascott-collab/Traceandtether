@@ -16,6 +16,61 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
+
+export const auditEntityTypes = [
+  "product",
+  "category",
+  "supplier",
+  "supplier_quote",
+  "customer",
+  "sales_order",
+  "customer_quote",
+  "sales_delivery",
+  "inventory_movement",
+  "inventory_reservation",
+  "inventory_location",
+  "purchase_order",
+  "shipment",
+  "import_expense",
+  "business_expense",
+  "journal_entry",
+  "payment",
+  "payment_statement_line",
+  "landed_cost_adjustment",
+  "marketing_campaign",
+  "marketing_content",
+  "marketing_expense",
+  "marketing_customer_group",
+] as const;
+
+const auditDateSchema = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }, "Enter a valid date.");
+
+const auditPageSchema = z.string()
+  .regex(/^[1-9]\d*$/)
+  .transform(Number)
+  .pipe(z.number().int().min(1).max(1_000_000));
+
+export const auditLogQuerySchema = z.object({
+  entityType: z.enum(auditEntityTypes).optional(),
+  actor: z.string().trim().min(1).max(320).email().optional(),
+  from: auditDateSchema.optional(),
+  to: auditDateSchema.optional(),
+  page: auditPageSchema.default(() => 1),
+  pageSize: z.string()
+    .regex(/^[1-9]\d*$/)
+    .transform(Number)
+    .pipe(z.number().int().min(1).max(250))
+    .default(() => 50),
+}).strict().refine((filters) => !filters.from || !filters.to || filters.from <= filters.to, {
+  message: "The start date must be on or before the end date.",
+  path: ["to"],
+});
 
 export const productStatus = pgEnum("product_status", ["draft", "active", "inactive"]);
 export const categoryStatus = pgEnum("category_status", ["active", "inactive"]);
@@ -164,6 +219,7 @@ export const businessAuditLogs = pgTable(
   (table) => [
     index("business_audit_logs_created_idx").on(table.createdAt),
     index("business_audit_logs_entity_idx").on(table.entityType, table.entityId, table.createdAt),
+    index("business_audit_logs_actor_created_idx").on(table.actorEmail, table.createdAt, table.id),
   ],
 );
 

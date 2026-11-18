@@ -1,10 +1,10 @@
 import { clerkClient, getAuth } from "@clerk/express";
 import type { RequestHandler } from "express";
-import { and, asc, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, lt, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
 import {
-  appUserAccess, appUsers, businessAuditLogs, productCategories, products, supplierQuotes, suppliers,
+  appUserAccess, appUsers, auditLogQuerySchema, businessAuditLogs, productCategories, products, supplierQuotes, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
@@ -129,20 +129,43 @@ export function registerApiRoutes(app: import("express").Express) {
   });
 
   app.get("/api/audit-logs", requireBusinessAccess, async (req, res) => {
-    const parsed = z.object({
-      entityType: z.string().trim().min(1).max(48).optional(),
-      limit: z.string().regex(/^\d+$/).default("250"),
-    }).safeParse(req.query);
+    const parsed = auditLogQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: "Choose a valid audit history filter." });
+      res.status(400).json({ error: validationMessage(parsed.error) });
       return;
     }
-    const limit = Math.min(500, Math.max(1, Number(parsed.data.limit)));
-    const entries = await db.select().from(businessAuditLogs)
-      .where(parsed.data.entityType ? eq(businessAuditLogs.entityType, parsed.data.entityType) : undefined)
-      .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id))
-      .limit(limit);
-    res.json({ entries });
+    const { entityType, actor, from, to, page, pageSize } = parsed.data;
+    const conditions: SQL[] = [];
+    if (entityType) conditions.push(eq(businessAuditLogs.entityType, entityType));
+    if (actor) {
+      const escapedActor = actor.replace(/[\\%_]/g, "\\$&");
+      conditions.push(ilike(businessAuditLogs.actorEmail, escapedActor));
+    }
+    if (from) conditions.push(gte(businessAuditLogs.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    if (to) {
+      const through = new Date(`${to}T00:00:00.000Z`);
+      through.setUTCDate(through.getUTCDate() + 1);
+      conditions.push(lt(businessAuditLogs.createdAt, through));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const offset = (page - 1) * pageSize;
+    const [entries, [{ total }]] = await Promise.all([
+      db.select().from(businessAuditLogs)
+        .where(where)
+        .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id))
+        .limit(pageSize)
+        .offset(offset),
+      db.select({ total: count() }).from(businessAuditLogs).where(where),
+    ]);
+    res.json({
+      entries,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    });
   });
 
   app.post("/api/user-access", requireBusinessAccess, requireAccessManager(), async (req, res) => {

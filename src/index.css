@@ -3222,19 +3222,39 @@ textarea:focus-visible {
 .audit-filter {
   display: grid;
   gap: 6px;
-  min-width: 190px;
+  min-width: 170px;
+  flex: 1 1 170px;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 650;
 }
 
-.audit-filter select {
+.audit-filter select,
+.audit-filter input {
   min-height: 38px;
   padding: 7px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: #fffefa;
   color: var(--text);
+}
+
+.audit-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.audit-filter-actions {
+  display: flex;
+  flex: 1 1 190px;
+  gap: 8px;
+}
+
+.audit-filter-actions .button {
+  flex: 1;
 }
 
 .audit-error {
@@ -3244,6 +3264,10 @@ textarea:focus-visible {
 
 @media (max-width: 700px) {
   .audit-filter {
+    width: 100%;
+  }
+
+  .audit-filter-actions {
     width: 100%;
   }
 }

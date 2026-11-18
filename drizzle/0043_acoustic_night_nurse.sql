@@ -1,0 +1,1 @@
+CREATE INDEX "business_audit_logs_actor_created_idx" ON "business_audit_logs" USING btree ("actor_email","created_at","id");
