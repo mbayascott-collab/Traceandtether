@@ -62,7 +62,10 @@ export interface CustomerQuoteInput { customerId: number; validUntil: string | n
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
 export type PaymentDirection = "customer_receipt" | "supplier_payment";
 export type PaymentMethod = "cash" | "bank_transfer" | "mobile_money" | "other";
-export interface PaymentOption { orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string; }
+export interface PaymentOption {
+  orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string;
+  dueDate: string; overdueDays: number; agingBucket: "not_due" | "1_30_days" | "31_60_days" | "over_60_days";
+}
 export interface BusinessPayment { id: number; paymentNumber: string; direction: PaymentDirection; amountZmw: string; paymentDate: string; method: PaymentMethod; reference: string | null; notes: string | null; orderNumber: string; partyName: string; }
 export interface PaymentOverview { payments: BusinessPayment[]; invoices: PaymentOption[]; bills: PaymentOption[]; }
 

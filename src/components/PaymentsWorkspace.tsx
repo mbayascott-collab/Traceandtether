@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { BusinessPayment, PaymentDirection, PaymentOverview } from "../lib/api";
+import type { BusinessPayment, PaymentDirection, PaymentOption, PaymentOverview } from "../lib/api";
 
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const today = () => new Date().toISOString().slice(0, 10);
+const agingLabels = {
+  not_due: "Not due",
+  "1_30_days": "1–30 days",
+  "31_60_days": "31–60 days",
+  over_60_days: "Over 60 days",
+} as const;
 
 export default function PaymentsWorkspace() {
   const [data, setData] = useState<PaymentOverview>({ payments: [], invoices: [], bills: [] });
@@ -11,12 +17,20 @@ export default function PaymentsWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
+  const [dueDateDrafts, setDueDateDrafts] = useState<Record<string, string>>({});
+  const [savingDueDate, setSavingDueDate] = useState("");
   const pendingAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const options = direction === "customer_receipt" ? data.invoices : data.bills;
   const pendingBalances = [
-    ...data.invoices.map((item) => ({ ...item, balanceType: "Customer owes us" })),
-    ...data.bills.map((item) => ({ ...item, balanceType: "We owe supplier" })),
+    ...data.invoices.map((item) => ({ ...item, direction: "customer_receipt" as const, balanceType: "Customer owes us" })),
+    ...data.bills.map((item) => ({ ...item, direction: "supplier_payment" as const, balanceType: "We owe supplier" })),
   ].sort((a, b) => Number(b.outstandingZmw) - Number(a.outstandingZmw));
+  const agingTotals = (["not_due", "1_30_days", "31_60_days", "over_60_days"] as const).map((bucket) => ({
+    bucket,
+    amountCents: pendingBalances.reduce((total, item) => item.agingBucket === bucket
+      ? total + Math.round(Number(item.outstandingZmw) * 100)
+      : total, 0),
+  }));
 
   useEffect(() => {
     let active = true;
@@ -29,6 +43,23 @@ export default function PaymentsWorkspace() {
     });
     return () => { active = false; };
   }, [reload]);
+
+  async function saveDueDate(direction: PaymentDirection, item: PaymentOption) {
+    const key = `${direction}-${item.orderId}`;
+    setSavingDueDate(key); setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/payments/due-date", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ direction, orderId: item.orderId, dueDate: dueDateDrafts[key] || item.dueDate }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save the due date.");
+      setNotice(`Due date saved for ${item.orderNumber}.`);
+      setReload((value) => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the due date.");
+    } finally { setSavingDueDate(""); }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -94,11 +125,22 @@ export default function PaymentsWorkspace() {
     </div>
     <div className="panel data-table-wrap">
       <h2>Pending payments</h2>
-      <p className="report-footnote">These balances are still unpaid. Customer balances include goods already delivered.</p>
-      <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th></tr></thead>
+      <p className="report-footnote">These balances are still unpaid. Customer balances include goods already delivered. Aging is based on the due date.</p>
+      <table className="aging-summary"><thead><tr><th>Not due</th><th>1–30 days overdue</th><th>31–60 days overdue</th><th>Over 60 days overdue</th></tr></thead>
+        <tbody><tr>{agingTotals.map(({ bucket, amountCents }) => <td key={bucket}><strong>{money((amountCents / 100).toFixed(2))}</strong></td>)}</tr></tbody>
+      </table>
+      <table><thead><tr><th>Type</th><th>Customer / supplier</th><th>Order</th><th>Total</th><th>Paid</th><th>Still owed</th><th>Aging</th><th>Due date</th></tr></thead>
         <tbody>{pendingBalances.map((item) => <tr key={`${item.balanceType}-${item.orderId}`}>
           <td>{item.balanceType}</td><td>{item.partyName}</td><td>{item.orderNumber}</td>
           <td>{money(item.totalZmw)}</td><td>{money(item.paidZmw)}</td><td><strong>{money(item.outstandingZmw)}</strong></td>
+          <td>{agingLabels[item.agingBucket]}{item.overdueDays > 0 ? ` · ${item.overdueDays} days` : ""}</td>
+          <td><div className="form-grid payment-due-date">
+            <input aria-label={`Due date for ${item.orderNumber}`} type="date"
+              value={dueDateDrafts[`${item.direction}-${item.orderId}`] ?? item.dueDate}
+              onChange={(event) => setDueDateDrafts((drafts) => ({ ...drafts, [`${item.direction}-${item.orderId}`]: event.target.value }))} />
+            <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
+              onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
+          </div></td>
         </tr>)}</tbody>
       </table>
       {!pendingBalances.length && <p className="report-footnote">There are no unpaid customer or supplier balances.</p>}

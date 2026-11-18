@@ -3,5 +3,6 @@
 - [Inventory ledger](inventory-ledger.md) — Derive on-hand from append-only movements; keep reservations separate and post shipment receipts explicitly.
 - [Online shop rollout](online-shop-rollout.md) — Use manual order requests until Shopify funding is available; Shopify remains a later storefront/checkout option.
 - [Accounting policy](accounting-policy.md) — Use weighted-average inventory costing and accrual posting for unpaid sales and supplier costs.
+- [Payment aging defaults](payment-aging-defaults.md) — Use known transaction dates as due-date defaults; do not infer payment terms.
 - [Company identity](company-identity.md) — Use the corrected legal name on customer-facing documents.
 - [Future system tutorial](future-system-tutorial.md) — The user plans to request a guide to using this system later in the project.

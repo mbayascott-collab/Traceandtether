@@ -6,11 +6,20 @@ import {
   accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines, purchaseOrders,
   salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
+import { paymentAging } from "../shared/payment-aging";
 import { db } from "./db";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
 
 const bad = (res: import("express").Response, message: string, status = 400) => res.status(status).json({ error: message });
+const dueDateInputSchema = z.object({
+  direction: z.enum(["customer_receipt", "supplier_payment"]),
+  orderId: z.number().int().positive(),
+  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "Enter a valid due date."),
+});
 
 async function payableForPurchaseOrder(tx: any, orderId: number, orderNumber: string, knownAccounts?: Map<string, typeof accountingAccounts.$inferSelect>) {
   const accountsByKey = knownAccounts ?? await ensureAccountingAccounts(tx);
@@ -70,7 +79,8 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         .where(inArray(salesOrders.status, ["partially_fulfilled", "fulfilled", "cancelled"])),
       db.select().from(salesOrderLines),
       db.select({
-        orderId: salesDeliveries.salesOrderId, quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+        orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
       }).from(salesDeliveryLines)
         .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
         .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
@@ -89,8 +99,11 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     }
 
     const deliveredTotals = new Map<number, bigint>();
+    const latestDeliveryDate = new Map<number, string>();
     for (const row of deliveryRows) {
       deliveredTotals.set(row.orderId, (deliveredTotals.get(row.orderId) ?? 0n) + cents(row.unitPriceZmw) * BigInt(row.quantity));
+      const latest = latestDeliveryDate.get(row.orderId);
+      if (!latest || row.deliveryDate > latest) latestDeliveryDate.set(row.orderId, row.deliveryDate);
     }
     const ordersWithDelivery = new Set(deliveryRows.map((row) => row.orderId));
     const invoices = eligibleOrders.map(({ order, customerName }) => {
@@ -101,16 +114,26 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
             .reduce((acc, line) => acc + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)
           : 0n;
       const outstanding = total - (paidSales.get(order.id) ?? 0n);
-      return { orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n), outstandingZmw: formatCents(outstanding) };
+      const dueDate = order.dueDate ?? latestDeliveryDate.get(order.id) ?? order.orderDate;
+      return {
+        orderId: order.id, orderNumber: order.orderNumber, partyName: customerName,
+        totalZmw: formatCents(total), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
+        outstandingZmw: formatCents(outstanding), dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
+      };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
 
-    const bills: Array<{ orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string }> = [];
+    const bills: Array<{
+      orderId: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string;
+      outstandingZmw: string; dueDate: string; overdueDays: number; agingBucket: string;
+    }> = [];
     for (const { order, supplierName } of openPurchaseOrders) {
       const total = await payableForPurchaseOrder(db, order.id, order.orderNumber, accountMap);
       const paid = paidPurchases.get(order.id) ?? 0n;
+      const dueDate = order.dueDate ?? order.orderedAt;
       if (total > paid) bills.push({
         orderId: order.id, orderNumber: order.orderNumber, partyName: supplierName,
         totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid),
+        dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       });
     }
 
@@ -121,6 +144,17 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
       })),
       invoices, bills,
     });
+  });
+
+  app.put("/api/payments/due-date", owner, async (req, res) => {
+    const parsed = dueDateInputSchema.safeParse(req.body);
+    if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the due date.");
+    const { direction, orderId, dueDate } = parsed.data;
+    const updated = direction === "customer_receipt"
+      ? await db.update(salesOrders).set({ dueDate, updatedAt: new Date() }).where(eq(salesOrders.id, orderId)).returning({ id: salesOrders.id })
+      : await db.update(purchaseOrders).set({ dueDate, updatedAt: new Date() }).where(eq(purchaseOrders.id, orderId)).returning({ id: purchaseOrders.id });
+    if (!updated.length) return bad(res, "Order not found.", 404);
+    res.json({ ok: true, dueDate });
   });
 
   app.post("/api/payments", owner, async (req, res) => {
