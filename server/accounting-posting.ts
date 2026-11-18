@@ -51,6 +51,31 @@ export function formatCents(value: bigint): string {
   return `${negative ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`;
 }
 
+export function buildDeliveryCostTotals(
+  deliveries: { deliveryId: number; orderId: number; deliveryDate: string; productId: number }[],
+  costLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
+  inRange: (date: string) => boolean,
+) {
+  const costByDeliveryProduct = new Map<string, bigint>();
+  for (const line of costLines) {
+    if (line.productId == null) continue;
+    const key = `${line.deliveryId}:${line.productId}`;
+    costByDeliveryProduct.set(key, (costByDeliveryProduct.get(key) ?? 0n) + cents(line.debitZmw));
+  }
+  const productCostByOrder = new Map<number, bigint>();
+  const ordersMissingCost = new Set<number>();
+  for (const delivery of deliveries) {
+    if (!inRange(delivery.deliveryDate)) continue;
+    const productCost = costByDeliveryProduct.get(`${delivery.deliveryId}:${delivery.productId}`) ?? 0n;
+    if (productCost > 0n) {
+      productCostByOrder.set(delivery.orderId, (productCostByOrder.get(delivery.orderId) ?? 0n) + productCost);
+    } else {
+      ordersMissingCost.add(delivery.orderId);
+    }
+  }
+  return { productCostByOrder, ordersMissingCost };
+}
+
 export function weightedAverageUnitCostCents(inventoryValueCents: bigint, onHand: number): bigint {
   if (!Number.isSafeInteger(onHand) || onHand <= 0) return 0n;
   return (inventoryValueCents + BigInt(Math.floor(onHand / 2))) / BigInt(onHand);

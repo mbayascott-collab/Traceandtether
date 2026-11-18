@@ -1,12 +1,12 @@
-import { asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
-import { customers, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
+import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
-import { cents, formatCents, postJournal } from "./accounting-posting";
+import { buildDeliveryCostTotals, cents, formatCents, postJournal } from "./accounting-posting";
 
 const bad = (res: import("express").Response, error: z.ZodError) => res.status(400).json({ error: error.issues[0]?.message ?? "Check the submitted details." });
 const ratio = (numerator: bigint, denominator: bigint) => {
@@ -219,7 +219,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
     };
     if (!validDay(from) || !validDay(to) || (from && to && from > to)) return res.status(400).json({ error: "Choose a valid report date range." });
-    const [campaigns, expenses, attributions, orders, lines, allCustomers, deliveryRows] = await Promise.all([
+    const [campaigns, expenses, attributions, orders, lines, allCustomers, deliveryRows, costLines] = await Promise.all([
       db.select().from(marketingCampaigns),
       db.select().from(marketingExpenses),
       db.select().from(marketingAttributions),
@@ -227,17 +227,31 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       db.select().from(salesOrderLines),
       db.select().from(customers),
       db.select({
-        orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
-        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+        deliveryId: salesDeliveries.id, orderId: salesDeliveries.salesOrderId, deliveryDate: salesDeliveries.deliveryDate,
+        productId: salesOrderLines.productId, quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
       }).from(salesDeliveryLines)
         .innerJoin(salesDeliveries, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
         .innerJoin(salesOrderLines, eq(salesDeliveryLines.salesOrderLineId, salesOrderLines.id)),
+      db.select({
+        deliveryId: journalEntries.sourceId, productId: journalLines.productId, debitZmw: journalLines.debitZmw,
+      }).from(journalEntries)
+        .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .where(and(
+          eq(journalEntries.sourceType, "sales_delivery_cogs"),
+          eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
+        )),
     ]);
     const revenueByOrder = new Map<number, bigint>();
     const revenueByOrderInRange = new Map<number, bigint>();
     const deliveredInRange = new Set<number>();
     const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
     const inRange = (date: string) => (!from || date >= from) && (!to || date <= to);
+    const { productCostByOrder, ordersMissingCost } = buildDeliveryCostTotals(
+      deliveryRows,
+      costLines.filter((line): line is typeof line & { deliveryId: number } => line.deliveryId !== null),
+      inRange,
+    );
     for (const row of deliveryRows) {
       const value = cents(row.unitPriceZmw) * BigInt(row.quantity);
       revenueByOrder.set(row.orderId, (revenueByOrder.get(row.orderId) ?? 0n) + value);
@@ -254,10 +268,13 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       if (inRange(order.orderDate)) {
         deliveredInRange.add(order.id);
         revenueByOrderInRange.set(order.id, (revenueByOrderInRange.get(order.id) ?? 0n) + value);
+        ordersMissingCost.add(order.id);
       }
     }
     const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row]));
-    const campaignTotals = new Map(campaigns.map((c) => [c.id, { orderCount: 0, revenue: 0n, spend: 0n }]));
+    const campaignTotals = new Map(campaigns.map((c) => [c.id, {
+      orderCount: 0, revenue: 0n, productCost: 0n, spend: 0n, missingCostOrderNumbers: new Set<string>(),
+    }]));
     let unattributedRevenue = 0n, unattributedOrders = 0, generalSpend = 0n;
     let campaignLinkOrders = 0, ordersWithoutCampaignLinks = 0;
     for (const order of orders) {
@@ -270,7 +287,12 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         if (campaignId == null) { unattributedRevenue += revenue; unattributedOrders += 1; }
         else {
           const stat = campaignTotals.get(campaignId);
-          if (stat) { stat.orderCount += 1; stat.revenue += revenue; }
+          if (stat) {
+            stat.orderCount += 1;
+            stat.revenue += revenue;
+            stat.productCost += productCostByOrder.get(order.id) ?? 0n;
+            if (ordersMissingCost.has(order.id)) stat.missingCostOrderNumbers.add(order.orderNumber);
+          }
         }
       }
     }
@@ -288,7 +310,11 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       const stat = campaignTotals.get(campaign.id)!;
       return {
         id: campaign.id, name: campaign.name, status: campaign.status, orderCount: stat.orderCount,
-        attributedRevenueZmw: formatCents(stat.revenue), spendZmw: formatCents(stat.spend),
+        attributedRevenueZmw: formatCents(stat.revenue), productCostZmw: formatCents(stat.productCost),
+        spendZmw: formatCents(stat.spend),
+        missingCostOrders: [...stat.missingCostOrderNumbers].sort(),
+        netContributionZmw: stat.missingCostOrderNumbers.size === 0
+          ? formatCents(stat.revenue - stat.productCost - stat.spend) : null,
         revenueToSpend: ratio(stat.revenue, stat.spend),
       };
     }).sort((a, b) => cents(b.attributedRevenueZmw) > cents(a.attributedRevenueZmw) ? 1 : cents(b.attributedRevenueZmw) < cents(a.attributedRevenueZmw) ? -1 : 0);
@@ -317,18 +343,26 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       };
     });
     const attributedRevenue = campaignRows.reduce((total, row) => total + cents(row.attributedRevenueZmw), 0n);
+    const attributedProductCost = campaignRows.reduce((total, row) => total + cents(row.productCostZmw), 0n);
     const campaignSpend = campaignRows.reduce((total, row) => total + cents(row.spendZmw), 0n);
     const totalSpend = campaignSpend + generalSpend;
+    const ordersMissingProductCost = campaignRows.flatMap((row) =>
+      row.missingCostOrders.map((orderNumber) => ({ orderNumber, campaignName: row.name })),
+    );
     res.json({
       period: { from: from || null, to: to || null },
       totals: {
         spendZmw: formatCents(totalSpend), attributedRevenueZmw: formatCents(attributedRevenue),
+        productCostZmw: formatCents(attributedProductCost),
+        netContributionZmw: ordersMissingProductCost.length === 0
+          ? formatCents(attributedRevenue - attributedProductCost - totalSpend) : null,
+        missingCostOrders: ordersMissingProductCost.length,
         attributedOrders: campaignRows.reduce((total, row) => total + row.orderCount, 0),
         campaignLinkOrders, ordersWithoutCampaignLinks,
         unattributedRevenueZmw: formatCents(unattributedRevenue), unattributedOrders,
         revenueToSpend: ratio(attributedRevenue, totalSpend),
       },
-      campaigns: campaignRows, segments,
+      campaigns: campaignRows, ordersMissingProductCost, segments,
     });
   });
 }

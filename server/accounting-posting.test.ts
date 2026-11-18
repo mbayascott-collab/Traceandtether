@@ -1,13 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   operatingExpenseAccountKey, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
 test("parses and formats ZMW using exact minor units", () => {
   assert.equal(cents("123456.78"), 12_345_678n);
   assert.equal(formatCents(12_345_678n), "123456.78");
+});
+
+test("sums delivery costs in exact cents and flags deliveries without recorded cost", () => {
+  const result = buildDeliveryCostTotals(
+    [
+      { deliveryId: 10, orderId: 1, deliveryDate: "2026-11-05", productId: 4 },
+      { deliveryId: 11, orderId: 1, deliveryDate: "2026-11-06", productId: 5 },
+      { deliveryId: 12, orderId: 2, deliveryDate: "2026-10-31", productId: 4 },
+    ],
+    [
+      { deliveryId: 10, productId: 4, debitZmw: "12.34" },
+      { deliveryId: 10, productId: 4, debitZmw: "0.01" },
+    ],
+    (date) => date >= "2026-11-01",
+  );
+  assert.equal(result.productCostByOrder.get(1), 1_235n);
+  assert.deepEqual([...result.ordersMissingCost], [1]);
+  assert.equal(result.productCostByOrder.has(2), false);
 });
 
 test("accepts only positive balanced journal lines", () => {
