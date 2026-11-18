@@ -487,6 +487,21 @@ export const salesDeliveryReceipts = pgTable(
   ],
 );
 
+export const salesDeliveryReceiptProofs = pgTable(
+  "sales_delivery_receipt_proofs",
+  {
+    id: serial("id").primaryKey(),
+    deliveryId: integer("delivery_id").notNull().references(() => salesDeliveries.id, { onDelete: "restrict" }),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    mimeType: varchar("mime_type", { length: 80 }).notNull(),
+    data: bytea("data").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("sales_delivery_receipt_proofs_delivery_idx").on(table.deliveryId),
+  ],
+);
+
 export const salesDeliveryLines = pgTable(
   "sales_delivery_lines",
   {

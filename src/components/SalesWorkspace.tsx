@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
@@ -109,10 +109,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   async function submitReceipt(event: FormEvent<HTMLFormElement>, delivery: SalesDelivery) {
     event.preventDefault();
     if (receiptSubmitting) return;
-    const form = new FormData(event.currentTarget);
-    const file = form.get("proofFile");
-    if (file instanceof File && file.size > 5 * 1024 * 1024) {
-      setError("The signed proof must be 5 MB or smaller.");
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const files = form.getAll("proofFiles").filter((value): value is File => value instanceof File && value.size > 0);
+    if (files.some((file) => file.size > 5 * 1024 * 1024)) {
+      setError("Each signed proof file must be 5 MB or smaller.");
       return;
     }
     const receivedAtValue = String(form.get("receivedAt") || "");
@@ -122,17 +123,35 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       return;
     }
     setError(""); setNotice(""); setReceiptSubmitting(true);
+    let savedReceipt: Awaited<ReturnType<typeof saveSalesDeliveryReceipt>> | null = null;
+    const savedProofs = [...(delivery.receipt?.proofs ?? [])];
     try {
-      await saveSalesDeliveryReceipt(delivery.id, {
+      savedReceipt = await saveSalesDeliveryReceipt(delivery.id, {
         receivedBy: String(form.get("receivedBy") || "").trim(),
         receivedAt: receivedAt.toISOString(),
-        file: file instanceof File && file.size ? file : null,
       });
+      for (const file of files) {
+        const proof = await addSalesDeliveryReceiptProof(delivery.id, file);
+        savedProofs.push(proof);
+        setReceiptDelivery((current) => current?.delivery.id === delivery.id
+          ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
+          : current);
+      }
       setReceiptDelivery(null);
       setNotice("Delivery receipt saved.");
       setReload((value) => value + 1);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
+      if (savedReceipt) {
+        setReceiptDelivery((current) => current?.delivery.id === delivery.id
+          ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
+          : current);
+        const proofInput = formElement.elements.namedItem("proofFiles");
+        if (proofInput instanceof HTMLInputElement) proofInput.value = "";
+        const detail = cause instanceof Error ? cause.message : "Could not upload a proof file.";
+        setError(`Receipt details and ${savedProofs.length - (delivery.receipt?.proofs.length ?? 0)} proof file(s) were saved. ${detail} Select only files that are not listed below and save again.`);
+      } else {
+        setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
+      }
     } finally {
       setReceiptSubmitting(false);
     }
@@ -341,14 +360,20 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <p>{receiptDelivery.order.customerName} · {receiptDelivery.order.orderNumber}</p>
         <label>Received by<input name="receivedBy" required maxLength={120} defaultValue={receiptDelivery.delivery.receipt?.receivedBy ?? ""} /></label>
         <label>Date and time received<input name="receivedAt" type="datetime-local" required defaultValue={localDateTime(receiptDelivery.delivery.receipt?.receivedAt)} /></label>
-        <label>Signed proof (PDF or image, up to 5 MB)
-          <input name="proofFile" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" />
+        <label>Signed proof files (PDF or image, up to 5 MB each)
+          <input name="proofFiles" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp" />
         </label>
-        {receiptDelivery.delivery.receipt?.proofFileName && <p>
-          Saved proof: <a href={salesDeliveryReceiptProofUrl(receiptDelivery.delivery.id)} target="_blank" rel="noreferrer">
-            {receiptDelivery.delivery.receipt.proofFileName}
-          </a>. Choosing another file replaces it.
-        </p>}
+        {!!receiptDelivery.delivery.receipt?.proofs.length && <div>
+          <strong>Saved signed proof files</strong>
+          <ul>{receiptDelivery.delivery.receipt.proofs.map((proof, index) => <li key={proof.id ?? `legacy-${index}`}>
+            <a
+              href={proof.id === null
+                ? salesDeliveryReceiptProofUrl(receiptDelivery.delivery.id)
+                : salesDeliveryReceiptProofFileUrl(receiptDelivery.delivery.id, proof.id)}
+              target="_blank" rel="noreferrer"
+            >{proof.fileName}</a>
+          </li>)}</ul>
+        </div>}
         <p className="report-footnote">Receipt details and signed proof are stored with this delivery note, separately from invoices and payments.</p>
         <div className="modal-footer-actions">
           <button type="button" className="button button-secondary" disabled={receiptSubmitting} onClick={() => setReceiptDelivery(null)}>Cancel</button>
@@ -471,9 +496,17 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                 ? <div><span>Received by</span><strong>{delivery.receipt.receivedBy}</strong><span>{new Date(delivery.receipt.receivedAt).toLocaleString("en-ZM", { dateStyle: "medium", timeStyle: "short" })}</span></div>
                 : <div><span>Received by</span><span>Name and signature</span><span>Date</span></div>}
             </section>
-            {delivery?.receipt?.proofFileName && <p className="report-footnote">
-              Signed proof saved: <a href={salesDeliveryReceiptProofUrl(delivery.id)} target="_blank" rel="noreferrer">{delivery.receipt.proofFileName}</a>
-            </p>}
+            {!!delivery?.receipt?.proofs.length && <section className="customer-quote-document-notes">
+              <span>SIGNED DELIVERY PROOF</span>
+              <ul>{delivery.receipt.proofs.map((proof, index) => <li key={proof.id ?? `legacy-${index}`}>
+                <a
+                  href={proof.id === null
+                    ? salesDeliveryReceiptProofUrl(delivery.id)
+                    : salesDeliveryReceiptProofFileUrl(delivery.id, proof.id)}
+                  target="_blank" rel="noreferrer"
+                >{proof.fileName}</a>
+              </li>)}</ul>
+            </section>}
             <footer className="customer-quote-document-footer">Please check the items and quantities above when receiving this delivery. This note does not serve as an invoice or payment receipt.</footer>
           </article>
         </div>

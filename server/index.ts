@@ -35,6 +35,10 @@ app.use(
   express.raw({ type: "application/octet-stream", limit: "5mb" }),
 );
 app.use(
+  "/api/sales-deliveries/:id/receipt-proofs",
+  express.raw({ type: "application/octet-stream", limit: "5mb" }),
+);
+app.use(
   "/api/inventory/opening-stock",
   express.raw({ type: "application/octet-stream", limit: "5mb" }),
 );

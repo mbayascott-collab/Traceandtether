@@ -7,7 +7,7 @@ import {
 } from "./product-validation";
 import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
-  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, cents as accountingCents, formatCents, postJournal } from "./accounting-posting";
@@ -389,7 +389,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows, receiptRows, locations, movementBalances, reservationBalances, orderReservations, returnRows] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows, receiptProofRows, locations, movementBalances, reservationBalances, orderReservations, returnRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -411,6 +411,12 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         proofFileName: salesDeliveryReceipts.proofFileName,
         proofMimeType: salesDeliveryReceipts.proofMimeType,
       }).from(salesDeliveryReceipts),
+      db.select({
+        id: salesDeliveryReceiptProofs.id,
+        deliveryId: salesDeliveryReceiptProofs.deliveryId,
+        fileName: salesDeliveryReceiptProofs.fileName,
+        mimeType: salesDeliveryReceiptProofs.mimeType,
+      }).from(salesDeliveryReceiptProofs),
       db.select({ id: inventoryLocations.id, name: inventoryLocations.name })
         .from(inventoryLocations).where(eq(inventoryLocations.active, true)).orderBy(asc(inventoryLocations.name)),
       db.select({
@@ -442,6 +448,19 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     ]);
     const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
     const receiptByDelivery = new Map(receiptRows.map((receipt) => [receipt.deliveryId, receipt]));
+    const proofsByDelivery = new Map<number, { id: number | null; fileName: string; mimeType: string }[]>();
+    for (const receipt of receiptRows) {
+      if (receipt.proofFileName && receipt.proofMimeType) {
+        proofsByDelivery.set(receipt.deliveryId, [{
+          id: null, fileName: receipt.proofFileName, mimeType: receipt.proofMimeType,
+        }]);
+      }
+    }
+    for (const proof of receiptProofRows) {
+      const proofs = proofsByDelivery.get(proof.deliveryId) ?? [];
+      proofs.push({ id: proof.id, fileName: proof.fileName, mimeType: proof.mimeType });
+      proofsByDelivery.set(proof.deliveryId, proofs);
+    }
     const onHandByProductLocation = new Map(movementBalances.map((row) => [
       `${row.productId}:${row.locationId}`, Number(row.quantity ?? 0),
     ]));
@@ -485,7 +504,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const attribution = attributionByOrder.get(order.id);
       const deliveriesById = new Map<number, {
         id: number; deliveryNumber: string; deliveryDate: string;
-        receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null } | null;
+        receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null; proofs: { id: number | null; fileName: string; mimeType: string }[] } | null;
         lines: { salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string; quantity: number; returnedQuantity: number; returns: { quantity: number; reason: string; createdAt: Date; locationName: string | null }[]; unitPriceZmw: string; lineTotalZmw: string }[];
         totalZmw: string;
       }>();
@@ -496,6 +515,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
           receipt: receipt ? {
             receivedBy: receipt.receivedBy, receivedAt: receipt.receivedAt,
             proofFileName: receipt.proofFileName, proofMimeType: receipt.proofMimeType,
+            proofs: proofsByDelivery.get(row.delivery.id) ?? [],
           } : null,
           lines: [], totalZmw: "0.00",
         };
@@ -1057,8 +1077,60 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       receipt: {
         receivedBy: saved.receivedBy, receivedAt: saved.receivedAt,
         proofFileName: saved.proofFileName, proofMimeType: saved.proofMimeType,
+        proofs: saved.proofFileName && saved.proofMimeType
+          ? [{ id: null, fileName: saved.proofFileName, mimeType: saved.proofMimeType }]
+          : [],
       },
     });
+  });
+  app.post("/api/sales-deliveries/:id/receipt-proofs", owner, async (req, res) => {
+    const deliveryId = idOf(req.params.id);
+    if (!deliveryId) return bad(res, "Invalid delivery note.");
+    const fileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
+    if (!fileName || fileName.length > 255) return bad(res, "Choose a valid signed proof file.");
+    const file = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const proof = inspectDeliveryProof(file, fileName);
+    if ("error" in proof) return bad(res, proof.error ?? "Invalid proof file.");
+    const [delivery] = await db.select({
+      id: salesDeliveries.id, deliveryNumber: salesDeliveries.deliveryNumber,
+    }).from(salesDeliveries).where(eq(salesDeliveries.id, deliveryId)).limit(1);
+    if (!delivery) return res.status(404).json({ error: "Delivery note not found." });
+    const [receipt] = await db.select({ id: salesDeliveryReceipts.id })
+      .from(salesDeliveryReceipts).where(eq(salesDeliveryReceipts.deliveryId, deliveryId)).limit(1);
+    if (!receipt) return res.status(409).json({ error: "Save the delivery recipient and receipt time before adding signed proof." });
+
+    const saved = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(salesDeliveryReceiptProofs).values({
+        deliveryId, fileName: proof.fileName, mimeType: proof.mimeType, data: file,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_delivery_receipt", entityId: receipt.id,
+        recordLabel: `${delivery.deliveryNumber} · ${proof.fileName}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["proof"],
+      });
+      return created;
+    });
+    res.status(201).json({ proof: { id: saved.id, fileName: saved.fileName, mimeType: saved.mimeType } });
+  });
+  app.get("/api/sales-deliveries/:id/receipt-proofs/:proofId", owner, async (req, res) => {
+    const deliveryId = idOf(req.params.id);
+    const proofId = idOf(req.params.proofId);
+    if (!deliveryId || !proofId) return bad(res, "Invalid delivery proof.");
+    const [proof] = await db.select({
+      fileName: salesDeliveryReceiptProofs.fileName,
+      mimeType: salesDeliveryReceiptProofs.mimeType,
+      data: salesDeliveryReceiptProofs.data,
+    }).from(salesDeliveryReceiptProofs).where(and(
+      eq(salesDeliveryReceiptProofs.id, proofId),
+      eq(salesDeliveryReceiptProofs.deliveryId, deliveryId),
+    )).limit(1);
+    if (!proof) return res.status(404).json({ error: "Signed proof not found for this delivery note." });
+    const downloadName = proof.fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Type", proof.mimeType);
+    res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+    res.send(proof.data);
   });
   app.get("/api/sales-deliveries/:id/receipt-proof", owner, async (req, res) => {
     const deliveryId = idOf(req.params.id);

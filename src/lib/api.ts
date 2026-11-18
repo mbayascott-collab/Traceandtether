@@ -57,7 +57,11 @@ export interface SalesOrderLine {
   unitPriceZmw: string; lineTotalZmw: string; stockLocationId: number | null; stockLocationName: string | null;
   stockLocations: { id: number; name: string; available: number }[];
 }
-export interface SalesDeliveryReceipt { receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null; }
+export interface SalesDeliveryReceiptProof { id: number | null; fileName: string; mimeType: string; }
+export interface SalesDeliveryReceipt {
+  receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null;
+  proofs: SalesDeliveryReceiptProof[];
+}
 export interface SalesDelivery {
   id: number; deliveryNumber: string; deliveryDate: string; totalZmw: string; receipt: SalesDeliveryReceipt | null;
   lines: {
@@ -521,24 +525,39 @@ export async function recordSalesReturn(
 }
 export async function saveSalesDeliveryReceipt(
   deliveryId: number,
-  input: { receivedBy: string; receivedAt: string; file: File | null },
-): Promise<void> {
+  input: { receivedBy: string; receivedAt: string },
+): Promise<SalesDeliveryReceipt> {
   const query = new URLSearchParams({
     receivedBy: input.receivedBy,
     receivedAt: input.receivedAt,
-    fileName: input.file?.name ?? "",
   });
   const response = await fetch(`/api/sales-deliveries/${deliveryId}/receipt-proof?${query}`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/octet-stream" },
-    body: input.file ?? new Blob([]),
+    body: new Blob([]),
   });
-  const body = await response.json().catch(() => ({})) as { error?: string };
-  if (!response.ok) throw new ApiError(body.error ?? "The receipt details could not be saved.", response.status);
+  const body = await response.json().catch(() => ({})) as { error?: string; receipt?: SalesDeliveryReceipt };
+  if (!response.ok || !body.receipt) throw new ApiError(body.error ?? "The receipt details could not be saved.", response.status);
+  return body.receipt;
 }
 export function salesDeliveryReceiptProofUrl(deliveryId: number): string {
   return `/api/sales-deliveries/${deliveryId}/receipt-proof`;
+}
+export async function addSalesDeliveryReceiptProof(deliveryId: number, file: File): Promise<SalesDeliveryReceiptProof> {
+  const query = new URLSearchParams({ fileName: file.name });
+  const response = await fetch(`/api/sales-deliveries/${deliveryId}/receipt-proofs?${query}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string; proof?: SalesDeliveryReceiptProof };
+  if (!response.ok || !body.proof) throw new ApiError(body.error ?? "The signed proof could not be added.", response.status);
+  return body.proof;
+}
+export function salesDeliveryReceiptProofFileUrl(deliveryId: number, proofId: number): string {
+  return `/api/sales-deliveries/${deliveryId}/receipt-proofs/${proofId}`;
 }
 
 export async function updateSupplierQuote(id: number, input: SupplierQuoteInput): Promise<void> {
