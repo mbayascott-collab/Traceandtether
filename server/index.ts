@@ -30,6 +30,10 @@ app.use(
   })),
 );
 
+app.use(
+  "/api/sales-deliveries/:id/receipt-proof",
+  express.raw({ type: "application/octet-stream", limit: "5mb" }),
+);
 app.use(express.json({ limit: "64kb" }));
 registerApiRoutes(app);
 

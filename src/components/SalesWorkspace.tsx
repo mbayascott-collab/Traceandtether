@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, setSalesOrderAttribution, updateSalesOrderStatus,
+  createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchMarketingCampaigns, fetchProducts, fetchSalesOrders, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type MarketingCampaignOption, type Product, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 
@@ -32,6 +32,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [deliveryRequestKey, setDeliveryRequestKey] = useState("");
   const [deliverySubmitting, setDeliverySubmitting] = useState(false);
   const [deliveryPrint, setDeliveryPrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
+  const [receiptDelivery, setReceiptDelivery] = useState<{ order: SalesOrder; delivery: SalesDelivery } | null>(null);
+  const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   useEffect(() => {
     let alive = true;
     Promise.all([fetchCustomers(), fetchSalesOrders(), fetchProducts({ page: 1, pageSize: 100 }), fetchMarketingCampaigns()])
@@ -84,6 +86,41 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     } finally {
       setDeliverySubmitting(false);
     }
+  }
+  async function submitReceipt(event: FormEvent<HTMLFormElement>, delivery: SalesDelivery) {
+    event.preventDefault();
+    if (receiptSubmitting) return;
+    const form = new FormData(event.currentTarget);
+    const file = form.get("proofFile");
+    if (file instanceof File && file.size > 5 * 1024 * 1024) {
+      setError("The signed proof must be 5 MB or smaller.");
+      return;
+    }
+    const receivedAtValue = String(form.get("receivedAt") || "");
+    const receivedAt = new Date(receivedAtValue);
+    if (!Number.isFinite(receivedAt.getTime())) {
+      setError("Enter a valid date and time the delivery was received.");
+      return;
+    }
+    setError(""); setNotice(""); setReceiptSubmitting(true);
+    try {
+      await saveSalesDeliveryReceipt(delivery.id, {
+        receivedBy: String(form.get("receivedBy") || "").trim(),
+        receivedAt: receivedAt.toISOString(),
+        file: file instanceof File && file.size ? file : null,
+      });
+      setReceiptDelivery(null);
+      setNotice("Delivery receipt saved.");
+      setReload((value) => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
+    } finally {
+      setReceiptSubmitting(false);
+    }
+  }
+  function localDateTime(value?: string | null) {
+    const date = value ? new Date(value) : new Date();
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   }
   function removeOrder(order: SalesOrder) {
     const quoteNote = order.notes?.match(/Created from (CQ-\d{4}-[A-Z0-9]+)/)?.[1];
@@ -181,7 +218,12 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "confirm"), "Order confirmed; stock reserved.", o.id)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
           {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => { setDeliveryRequestKey(window.crypto.randomUUID()); setDeliveryFormOrder(o); }}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
-           {o.deliveries.map((delivery) => <button key={delivery.id} className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery })}>{delivery.deliveryNumber}</button>)}
+            {o.deliveries.map((delivery) => <span key={delivery.id} className="delivery-actions">
+              <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery })}>{delivery.deliveryNumber}</button>
+              <button className="button button-secondary button-small" onClick={() => setReceiptDelivery({ order: o, delivery })}>
+                {delivery.receipt ? "Edit receipt" : "Record receipt"}
+              </button>
+            </span>)}
            {o.status === "fulfilled" && <button className="button button-secondary button-small" onClick={() => setInvoiceOrder(o)}>Invoice / PDF</button>}
            {o.status === "fulfilled" && !o.deliveries.length && <button className="button button-secondary button-small" onClick={() => setDeliveryPrint({ order: o, delivery: null })}>Delivery note</button>}
           {orderActionErrors[o.id] && <small className="order-action-error" role="alert">{orderActionErrors[o.id]}</small>}
@@ -197,6 +239,27 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
         </label>)}
         <div className="modal-footer-actions"><button type="button" className="button button-secondary" disabled={deliverySubmitting} onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary" disabled={deliverySubmitting}>{deliverySubmitting ? "Saving…" : "Save delivery"}</button></div>
+      </form>
+    </div>}
+    {mode === "orders" && receiptDelivery && <div className="modal-backdrop" role="presentation">
+      <form className="modal form-grid delivery-entry-form" onSubmit={(event) => submitReceipt(event, receiptDelivery.delivery)}>
+        <h2>Delivery receipt · {receiptDelivery.delivery.deliveryNumber}</h2>
+        <p>{receiptDelivery.order.customerName} · {receiptDelivery.order.orderNumber}</p>
+        <label>Received by<input name="receivedBy" required maxLength={120} defaultValue={receiptDelivery.delivery.receipt?.receivedBy ?? ""} /></label>
+        <label>Date and time received<input name="receivedAt" type="datetime-local" required defaultValue={localDateTime(receiptDelivery.delivery.receipt?.receivedAt)} /></label>
+        <label>Signed proof (PDF or image, up to 5 MB)
+          <input name="proofFile" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" />
+        </label>
+        {receiptDelivery.delivery.receipt?.proofFileName && <p>
+          Saved proof: <a href={salesDeliveryReceiptProofUrl(receiptDelivery.delivery.id)} target="_blank" rel="noreferrer">
+            {receiptDelivery.delivery.receipt.proofFileName}
+          </a>. Choosing another file replaces it.
+        </p>}
+        <p className="report-footnote">Receipt details and signed proof are stored with this delivery note, separately from invoices and payments.</p>
+        <div className="modal-footer-actions">
+          <button type="button" className="button button-secondary" disabled={receiptSubmitting} onClick={() => setReceiptDelivery(null)}>Cancel</button>
+          <button className="button button-primary" disabled={receiptSubmitting}>{receiptSubmitting ? "Saving…" : "Save receipt"}</button>
+        </div>
       </form>
     </div>}
     {mode === "orders" && invoiceOrder && (() => {
@@ -282,8 +345,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             {order.notes && <section className="customer-quote-document-notes"><span>ORDER NOTES</span><p>{order.notes}</p></section>}
             <section className="delivery-note-signatures" aria-label="Delivery confirmation">
               <div><span>Delivered by</span><span>Name and signature</span><span>Date</span></div>
-              <div><span>Received by</span><span>Name and signature</span><span>Date</span></div>
+              {delivery?.receipt
+                ? <div><span>Received by</span><strong>{delivery.receipt.receivedBy}</strong><span>{new Date(delivery.receipt.receivedAt).toLocaleString("en-ZM", { dateStyle: "medium", timeStyle: "short" })}</span></div>
+                : <div><span>Received by</span><span>Name and signature</span><span>Date</span></div>}
             </section>
+            {delivery?.receipt?.proofFileName && <p className="report-footnote">
+              Signed proof saved: <a href={salesDeliveryReceiptProofUrl(delivery.id)} target="_blank" rel="noreferrer">{delivery.receipt.proofFileName}</a>
+            </p>}
             <footer className="customer-quote-document-footer">Please check the items and quantities above when receiving this delivery. This note does not serve as an invoice or payment receipt.</footer>
           </article>
         </div>

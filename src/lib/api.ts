@@ -52,7 +52,8 @@ export interface InventoryReservation { id: number; productId: number; productNa
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
 export interface Customer { id: number; name: string; contactPerson: string | null; contactPersonPhone: string | null; email: string | null; phone: string | null; address: string | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine { id: number; productId: number; productName: string; sku: string; quantity: number; deliveredQuantity: number; remainingQuantity: number; unitPriceZmw: string; lineTotalZmw: string; }
-export interface SalesDelivery { id: number; deliveryNumber: string; deliveryDate: string; lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[]; }
+export interface SalesDeliveryReceipt { receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null; }
+export interface SalesDelivery { id: number; deliveryNumber: string; deliveryDate: string; receipt: SalesDeliveryReceipt | null; lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[]; }
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "partially_fulfilled" | "fulfilled" | "cancelled"; orderDate: string; confirmedAt?: string | null; fulfilledAt: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; deliveredZmw: string; deliveries: SalesDelivery[]; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
 export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
@@ -463,6 +464,27 @@ export async function updateSalesOrderStatus(id: number, action: "confirm" | "fu
 }
 export async function createSalesDelivery(id: number, input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }): Promise<void> {
   await request(`/api/sales-orders/${id}/deliveries`, { method: "POST", body: JSON.stringify(input) });
+}
+export async function saveSalesDeliveryReceipt(
+  deliveryId: number,
+  input: { receivedBy: string; receivedAt: string; file: File | null },
+): Promise<void> {
+  const query = new URLSearchParams({
+    receivedBy: input.receivedBy,
+    receivedAt: input.receivedAt,
+    fileName: input.file?.name ?? "",
+  });
+  const response = await fetch(`/api/sales-deliveries/${deliveryId}/receipt-proof?${query}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: input.file ?? new Blob([]),
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string };
+  if (!response.ok) throw new ApiError(body.error ?? "The receipt details could not be saved.", response.status);
+}
+export function salesDeliveryReceiptProofUrl(deliveryId: number): string {
+  return `/api/sales-deliveries/${deliveryId}/receipt-proof`;
 }
 
 export async function updateSupplierQuote(id: number, input: SupplierQuoteInput): Promise<void> {

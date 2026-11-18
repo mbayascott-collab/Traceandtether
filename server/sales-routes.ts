@@ -5,13 +5,14 @@ import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderInputSchema,
 } from "./product-validation";
 import {
-  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders,
+  customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, marketingAttributions, marketingCampaigns, products, salesDeliveryLines, salesDeliveries, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, formatCents, postJournal } from "./accounting-posting";
 import { publicShopProtection } from "./public-shop-protection";
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
+import { inspectDeliveryProof } from "./delivery-proof";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
 const idOf = (value: unknown) => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
@@ -303,7 +304,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -318,8 +319,16 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         .innerJoin(salesOrderLines, eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId))
         .innerJoin(products, eq(products.id, salesOrderLines.productId))
         .orderBy(desc(salesDeliveries.deliveryDate)),
+      db.select({
+        deliveryId: salesDeliveryReceipts.deliveryId,
+        receivedBy: salesDeliveryReceipts.receivedBy,
+        receivedAt: salesDeliveryReceipts.receivedAt,
+        proofFileName: salesDeliveryReceipts.proofFileName,
+        proofMimeType: salesDeliveryReceipts.proofMimeType,
+      }).from(salesDeliveryReceipts),
     ]);
     const attributionByOrder = new Map(attributions.map((item) => [item.salesOrderId, item]));
+    const receiptByDelivery = new Map(receiptRows.map((receipt) => [receipt.deliveryId, receipt]));
     res.json({ orders: orders.map(({ order, customerName }) => {
       const orderDeliveries = deliveryRows.filter(({ delivery }) => delivery.salesOrderId === order.id);
       const deliveredByLine = new Map<number, number>();
@@ -336,10 +345,20 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
           };
         });
       const attribution = attributionByOrder.get(order.id);
-      const deliveriesById = new Map<number, { id: number; deliveryNumber: string; deliveryDate: string; lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[] }>();
+      const deliveriesById = new Map<number, {
+        id: number; deliveryNumber: string; deliveryDate: string;
+        receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null } | null;
+        lines: { salesOrderLineId: number; productName: string; sku: string; quantity: number }[];
+      }>();
       for (const row of orderDeliveries) {
+        const receipt = receiptByDelivery.get(row.delivery.id);
         const delivery = deliveriesById.get(row.delivery.id) ?? {
-          id: row.delivery.id, deliveryNumber: row.delivery.deliveryNumber, deliveryDate: row.delivery.deliveryDate, lines: [],
+          id: row.delivery.id, deliveryNumber: row.delivery.deliveryNumber, deliveryDate: row.delivery.deliveryDate,
+          receipt: receipt ? {
+            receivedBy: receipt.receivedBy, receivedAt: receipt.receivedAt,
+            proofFileName: receipt.proofFileName, proofMimeType: receipt.proofMimeType,
+          } : null,
+          lines: [],
         };
         delivery.lines.push({
           salesOrderLineId: row.orderLine.id, productName: row.productName, sku: row.sku, quantity: row.deliveryLine.quantity,
@@ -600,6 +619,83 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction((tx) => recordDelivery(tx, id, parsed.data, res.locals.actor));
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.status(201).json(result);
+  });
+  app.post("/api/sales-deliveries/:id/receipt-proof", owner, async (req, res) => {
+    const deliveryId = idOf(req.params.id);
+    if (!deliveryId) return bad(res, "Invalid delivery note.");
+
+    const receivedBy = typeof req.query.receivedBy === "string" ? req.query.receivedBy.trim() : "";
+    const receivedAtValue = typeof req.query.receivedAt === "string" ? req.query.receivedAt : "";
+    const fileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
+    if (!receivedBy || receivedBy.length > 120 || /[\u0000-\u001f\u007f]/.test(receivedBy)) {
+      return bad(res, "Enter the name of the person who received the delivery.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(receivedAtValue)) {
+      return bad(res, "Enter a valid date and time the delivery was received.");
+    }
+    const receivedAt = new Date(receivedAtValue);
+    if (
+      !Number.isFinite(receivedAt.getTime())
+      || (receivedAtValue.includes(".")
+        ? receivedAt.toISOString() !== receivedAtValue
+        : receivedAt.toISOString().replace(".000Z", "Z") !== receivedAtValue)
+    ) return bad(res, "Enter a valid date and time the delivery was received.");
+    if (fileName.length > 255) return bad(res, "The proof file name is too long.");
+
+    const file = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const proof = file.length ? inspectDeliveryProof(file, fileName) : null;
+    if (proof && "error" in proof) return bad(res, proof.error ?? "Invalid proof file.");
+
+    const [delivery] = await db.select({
+      id: salesDeliveries.id, deliveryNumber: salesDeliveries.deliveryNumber,
+    }).from(salesDeliveries).where(eq(salesDeliveries.id, deliveryId)).limit(1);
+    if (!delivery) return res.status(404).json({ error: "Delivery note not found." });
+
+    const saved = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(salesDeliveryReceipts)
+        .where(eq(salesDeliveryReceipts.deliveryId, deliveryId)).for("update").limit(1);
+      const values = {
+        deliveryId, receivedBy, receivedAt,
+        proofFileName: proof && !("error" in proof) ? proof.fileName : existing?.proofFileName ?? null,
+        proofMimeType: proof && !("error" in proof) ? proof.mimeType : existing?.proofMimeType ?? null,
+        proofData: proof && !("error" in proof) ? file : existing?.proofData ?? null,
+        updatedAt: new Date(),
+      };
+      const [receipt] = existing
+        ? await tx.update(salesDeliveryReceipts).set(values).where(eq(salesDeliveryReceipts.id, existing.id)).returning()
+        : await tx.insert(salesDeliveryReceipts).values(values).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "sales_delivery_receipt", entityId: receipt.id,
+        recordLabel: `${delivery.deliveryNumber} · received by ${receipt.receivedBy}`,
+        actor: res.locals.actor, action: existing ? "updated" : "created",
+        changedFields: ["receivedBy", "receivedAt", ...(proof && !("error" in proof) ? ["proof"] : [])],
+      });
+      return receipt;
+    });
+    res.json({
+      receipt: {
+        receivedBy: saved.receivedBy, receivedAt: saved.receivedAt,
+        proofFileName: saved.proofFileName, proofMimeType: saved.proofMimeType,
+      },
+    });
+  });
+  app.get("/api/sales-deliveries/:id/receipt-proof", owner, async (req, res) => {
+    const deliveryId = idOf(req.params.id);
+    if (!deliveryId) return bad(res, "Invalid delivery note.");
+    const [receipt] = await db.select({
+      proofFileName: salesDeliveryReceipts.proofFileName,
+      proofMimeType: salesDeliveryReceipts.proofMimeType,
+      proofData: salesDeliveryReceipts.proofData,
+    }).from(salesDeliveryReceipts).where(eq(salesDeliveryReceipts.deliveryId, deliveryId)).limit(1);
+    if (!receipt?.proofData || !receipt.proofFileName || !receipt.proofMimeType) {
+      return res.status(404).json({ error: "No signed proof is saved for this delivery note." });
+    }
+    const downloadName = receipt.proofFileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Type", receipt.proofMimeType);
+    res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+    res.send(receipt.proofData);
   });
   app.post("/api/sales-orders/:id/fulfill", owner, async (req, res) => {
     const id = idOf(req.params.id); if (!id) return bad(res, "Invalid sales order.");

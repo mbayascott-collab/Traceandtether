@@ -2,6 +2,7 @@ import {
   check,
   date,
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -397,6 +398,32 @@ export const salesDeliveries = pgTable(
     uniqueIndex("sales_deliveries_number_unique").on(table.deliveryNumber),
     uniqueIndex("sales_deliveries_idempotency_key_unique").on(table.idempotencyKey),
     index("sales_deliveries_order_date_idx").on(table.salesOrderId, table.deliveryDate),
+  ],
+);
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => "bytea",
+});
+
+export const salesDeliveryReceipts = pgTable(
+  "sales_delivery_receipts",
+  {
+    id: serial("id").primaryKey(),
+    deliveryId: integer("delivery_id").notNull().references(() => salesDeliveries.id, { onDelete: "restrict" }),
+    receivedBy: varchar("received_by", { length: 120 }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
+    proofFileName: varchar("proof_file_name", { length: 255 }),
+    proofMimeType: varchar("proof_mime_type", { length: 80 }),
+    proofData: bytea("proof_data"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_delivery_receipts_delivery_unique").on(table.deliveryId),
+    check(
+      "sales_delivery_receipts_proof_complete",
+      sql`(${table.proofFileName} is null and ${table.proofMimeType} is null and ${table.proofData} is null) or (${table.proofFileName} is not null and ${table.proofMimeType} is not null and ${table.proofData} is not null)`,
+    ),
   ],
 );
 
