@@ -158,6 +158,51 @@ test("year-end reports keep accumulated losses negative while the balance sheet 
   assert.equal(liabilitiesAndEquity, 950);
 });
 
+test("year-end reports keep earlier gains in accumulated earnings after a current-year loss", () => {
+  const profitablePriorYearThenLoss: FixtureLine[] = [
+    ...journal("2024-12-31", [
+      ["cash", "debit", "1000.00"], ["equity", "credit", "1000.00"],
+    ]),
+    ...journal("2025-06-30", [
+      ["cash", "debit", "400.00"], ["sales", "credit", "400.00"],
+    ]),
+    ...journal("2025-12-31", [
+      ["rent", "debit", "100.00"], ["cash", "credit", "100.00"],
+    ]),
+    ...journal("2026-03-31", [
+      ["cash", "debit", "100.00"], ["sales", "credit", "100.00"],
+    ]),
+    ...journal("2026-09-30", [
+      ["rent", "debit", "150.00"], ["cash", "credit", "150.00"],
+    ]),
+  ];
+  const reports = calculateAccountingReports(
+    accounts,
+    profitablePriorYearThenLoss,
+    "2026-01-01",
+    "2026-12-31",
+  );
+
+  assert.deepEqual(
+    [reports.totals.incomeZmw, reports.totals.expensesZmw, reports.totals.netIncomeZmw],
+    ["100.00", "150.00", "-50.00"],
+  );
+  assert.equal(reports.incomeStatement.find((row) => row.code === "4100")?.amountZmw, "100.00");
+  assert.equal(reports.incomeStatement.find((row) => row.code === "6300")?.amountZmw, "150.00");
+  assert.equal(reports.balanceSheet.at(-1)?.name, "Accumulated earnings (not closed)");
+  assert.equal(reports.balanceSheet.at(-1)?.amountZmw, "250.00");
+  assert.equal(reports.totals.trialDebitsZmw, reports.totals.trialCreditsZmw);
+
+  const assets = reports.balanceSheet
+    .filter((row) => row.type === "asset")
+    .reduce((sum, row) => sum + Number(row.amountZmw), 0);
+  const liabilitiesAndEquity = reports.balanceSheet
+    .filter((row) => row.type === "liability" || row.type === "equity")
+    .reduce((sum, row) => sum + Number(row.amountZmw), 0);
+  assert.equal(assets, 1250);
+  assert.equal(liabilitiesAndEquity, 1250);
+});
+
 test("opening-balance reversal remains in history while reports use the corrected replacement", () => {
   const openingAndCorrections: AccountingReportLine[] = [
     { accountId: 1, entryDate: "2025-12-31", debitZmw: "1000.00", creditZmw: "0.00" },
