@@ -42,8 +42,11 @@ export type PostingLine = {
 };
 
 export function cents(value: string): bigint {
-  const [whole, fraction = ""] = value.split(".");
-  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
+  const negative = value.startsWith("-");
+  const unsignedValue = negative ? value.slice(1) : value;
+  const [whole, fraction = ""] = unsignedValue.split(".");
+  const amount = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
+  return negative ? -amount : amount;
 }
 
 export function formatCents(value: bigint): string {

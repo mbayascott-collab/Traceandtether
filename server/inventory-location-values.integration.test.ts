@@ -59,10 +59,12 @@ test("inventory endpoint reconciles location values and quantities with ledger b
     const productsForTest = await db.insert(products).values([
       { sku: `LOC-1-${suffix}`, name: `Location reconciliation product one ${suffix}`, status: "active" },
       { sku: `LOC-2-${suffix}`, name: `Location reconciliation product two ${suffix}`, status: "active" },
+      { sku: `LOC-3-${suffix}`, name: `Location reconciliation zero-stock debit ${suffix}`, status: "active" },
+      { sku: `LOC-4-${suffix}`, name: `Location reconciliation zero-stock credit ${suffix}`, status: "active" },
     ]).returning();
     productIds.push(...productsForTest.map(({ id }) => id));
-    const [firstProduct, secondProduct] = productsForTest;
-    assert.ok(firstProduct && secondProduct);
+    const [firstProduct, secondProduct, zeroStockDebitProduct, zeroStockCreditProduct] = productsForTest;
+    assert.ok(firstProduct && secondProduct && zeroStockDebitProduct && zeroStockCreditProduct);
 
     const movements = await db.insert(inventoryMovements).values([
       { productId: firstProduct.id, locationId: locationA.id, kind: "opening_stock", quantityDelta: 1, reason: "Location value regression fixture", sourceKey: `location-value-${suffix}-1-a` },
@@ -95,6 +97,25 @@ test("inventory endpoint reconciles location values and quantities with ledger b
           lines: [
             { accountKey: "inventory", productId, debitZmw: amount, description: "Fixture inventory" },
             { accountKey: "opening_balance_equity", creditZmw: amount, description: "Fixture opening equity" },
+          ],
+        });
+        entryIds.push(entry.id);
+      }
+      for (const { productId, amount, label, debit } of [
+        { productId: zeroStockDebitProduct.id, amount: "0.07", label: "zero-stock-debit", debit: true },
+        { productId: zeroStockCreditProduct.id, amount: "0.03", label: "zero-stock-credit", debit: false },
+      ]) {
+        const entry = await postJournal(tx, {
+          sourceKey: `location-value-journal-${suffix}-${label}`,
+          sourceType: "inventory_location_regression",
+          sourceId: productId,
+          memo: "Zero-stock inventory value regression fixture",
+          lines: debit ? [
+            { accountKey: "inventory", productId, debitZmw: amount, description: "Residual inventory debit" },
+            { accountKey: "opening_balance_equity", creditZmw: amount, description: "Fixture opening equity" },
+          ] : [
+            { accountKey: "opening_balance_equity", debitZmw: amount, description: "Fixture opening equity" },
+            { accountKey: "inventory", productId, creditZmw: amount, description: "Residual inventory credit" },
           ],
         });
         entryIds.push(entry.id);
@@ -153,6 +174,8 @@ test("inventory endpoint reconciles location values and quantities with ledger b
     const expected = [
       { product: firstProduct, onHand: 6, quantities: [[locationA.id, 1], [locationB.id, 2], [inactiveLocation.id, 1], [null, 2]] as const },
       { product: secondProduct, onHand: 4, quantities: [[locationA.id, 2], [locationB.id, 1], [null, 1]] as const },
+      { product: zeroStockDebitProduct, onHand: 0, quantities: [] as const, residualValue: "0.07" },
+      { product: zeroStockCreditProduct, onHand: 0, quantities: [] as const, residualValue: "-0.03" },
     ];
     for (const fixture of expected) {
       const item = inventoryByProduct.get(fixture.product.id);
@@ -172,6 +195,18 @@ test("inventory endpoint reconciles location values and quantities with ledger b
         const location = item.locations.find((row: { id: number | null }) => row.id === locationId);
         assert.ok(location, `${fixture.product.name} must include location ${locationId ?? "Unassigned"}`);
         assert.equal(location.onHand, quantity, `${fixture.product.name} on-hand at location ${locationId ?? "Unassigned"}`);
+      }
+      if ("residualValue" in fixture) {
+        assert.ok(item.locations.every((location: { onHand: number }) => location.onHand === 0));
+        assert.deepEqual(
+          item.locations
+            .filter((location: { stockValueZmw: string }) => cents(location.stockValueZmw) !== 0n)
+            .map((location: { id: number | null; onHand: number; stockValueZmw: string }) => [
+            location.id, location.onHand, location.stockValueZmw,
+            ]),
+          [[null, 0, fixture.residualValue]],
+          `${fixture.product.name} must expose its complete residual balance once at Unassigned`,
+        );
       }
     }
   } finally {

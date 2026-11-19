@@ -213,6 +213,11 @@ test("rounds the current weighted-average cost in exact ZMW cents", () => {
   assert.equal(weightedAverageUnitCostCents(100n, 0), 0n);
 });
 
+test("parses negative ZMW values without losing the sign of cent-only balances", () => {
+  assert.equal(cents("-0.03"), -3n);
+  assert.equal(cents("-1.23"), -123n);
+});
+
 test("allocates pooled inventory value by location quantity and reconciles every cent", () => {
   const values = allocateInventoryValueByLocationCents(10n, [
     { locationId: 4, onHand: 1 },
