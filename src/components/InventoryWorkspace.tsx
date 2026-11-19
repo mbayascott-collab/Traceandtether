@@ -89,11 +89,19 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <p className="report-footnote field-full">{locations.map((location) => location.name).join(" · ") || "Main location will be created when stock is first recorded."}</p>
       </form>
       <section className="panel inventory-location-summary" aria-labelledby="inventory-location-totals-heading">
-        <h2 id="inventory-location-totals-heading">Total inventory value by location</h2>
-        <p className="report-footnote">Totals include all products, even when the product list is filtered. Locations without stock show ZMW 0.00.</p>
+        <h2 id="inventory-location-totals-heading">Inventory totals by location</h2>
+        <p className="report-footnote">Totals include all products, even when the product list is filtered. Locations without stock show zero units and ZMW 0.00.</p>
         {locationTotals.length
           ? <ul className="inventory-location-totals">{locationTotals.map((location) =>
-            <li key={location.id ?? "unassigned"}><span>{location.name}</span><strong>{money(location.stockValueZmw)}</strong></li>
+            <li key={location.id ?? "unassigned"}>
+              <h3>{location.name}</h3>
+              <div className="inventory-location-metrics">
+                <span>On hand <strong>{location.onHand}</strong></span>
+                <span>Reserved <strong>{location.reserved}</strong></span>
+                <span>Available <strong>{location.available}</strong></span>
+                <span>Value <strong>{money(location.stockValueZmw)}</strong></span>
+              </div>
+            </li>
           )}</ul>
           : <p>No stock locations are set up yet.</p>}
       </section>

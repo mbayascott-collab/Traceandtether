@@ -83,7 +83,11 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       stockValue.set(row.productId,
         (stockValue.get(row.productId) ?? 0n) + cents(row.debitZmw) - cents(row.creditZmw));
     });
-    const locationValueTotals = new Map<number | null, bigint>(locations.map((location) => [location.id, 0n]));
+    const locationTotalsById = new Map<number | null, {
+      id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueCents: bigint;
+    }>(locations.map((location) => [location.id, {
+      id: location.id, name: location.name, onHand: 0, reserved: 0, available: 0, stockValueCents: 0n,
+    }]));
     const inventory = items.map((item) => {
       const stock = onHand.get(item.id) ?? 0, held = reserved.get(item.id) ?? 0;
       const value = stockValue.get(item.id) ?? 0n;
@@ -105,17 +109,26 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         available: (byLocation.get(`${item.id}:${location.id}`) ?? 0) - (reservedByLocation.get(`${item.id}:${location.id}`) ?? 0),
         stockValueZmw: formatCents(valueByLocation.get(location.id) ?? 0n),
       }));
-      if (unassignedOnHand !== 0 || (valueByLocation.has(null) && (valueByLocation.get(null) ?? 0n) !== 0n)) {
+      const unassignedReserved = reservedByLocation.get(`${item.id}:null`) ?? 0;
+      if (unassignedOnHand !== 0 || unassignedReserved !== 0 || (valueByLocation.has(null) && (valueByLocation.get(null) ?? 0n) !== 0n)) {
         locationValues.push({
           id: null, name: "Unassigned",
           onHand: unassignedOnHand,
-          reserved: reservedByLocation.get(`${item.id}:null`) ?? 0,
-          available: unassignedOnHand - (reservedByLocation.get(`${item.id}:null`) ?? 0),
+          reserved: unassignedReserved,
+          available: unassignedOnHand - unassignedReserved,
           stockValueZmw: formatCents(valueByLocation.get(null) ?? 0n),
         });
       }
       for (const location of locationValues) {
-        locationValueTotals.set(location.id, (locationValueTotals.get(location.id) ?? 0n) + cents(location.stockValueZmw));
+        let total = locationTotalsById.get(location.id);
+        if (!total) {
+          total = { id: location.id, name: location.name, onHand: 0, reserved: 0, available: 0, stockValueCents: 0n };
+          locationTotalsById.set(location.id, total);
+        }
+        total.onHand += location.onHand;
+        total.reserved += location.reserved;
+        total.available += location.available;
+        total.stockValueCents += cents(location.stockValueZmw);
       }
       return {
         ...item, onHand: stock, reserved: held, available: stock - held,
@@ -124,12 +137,8 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         locations: locationValues,
       };
     });
-    const locationTotals = [...locationValueTotals.entries()]
-      .map(([id, value]) => ({
-        id,
-        name: id === null ? "Unassigned" : locations.find((location) => location.id === id)?.name ?? "Unknown",
-        stockValueZmw: formatCents(value),
-      }))
+    const locationTotals = [...locationTotalsById.values()]
+      .map(({ stockValueCents, ...location }) => ({ ...location, stockValueZmw: formatCents(stockValueCents) }))
       .sort((a, b) => a.name.localeCompare(b.name));
     res.json({ inventory, locationTotals });
   });

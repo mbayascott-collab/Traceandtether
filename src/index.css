@@ -2696,17 +2696,18 @@ textarea:focus-visible {
   list-style: none;
 }
 .inventory-location-totals li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
   color: var(--ink-soft);
   font-size: 11px;
 }
-.inventory-location-totals strong { color: var(--ink); font-size: 12px; white-space: nowrap; }
+.inventory-location-totals h3 { margin: 0; color: var(--ink); font-size: 12px; }
+.inventory-location-metrics { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; }
+.inventory-location-metrics span { display: flex; justify-content: space-between; gap: 10px; }
+.inventory-location-metrics strong { color: var(--ink); font-size: 12px; white-space: nowrap; }
 .cash-forecast-panel { overflow: hidden; }
 
 .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }

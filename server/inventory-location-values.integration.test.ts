@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
-  inventoryLocations, inventoryMovements, journalEntries, journalLines, products,
+  inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, products,
 } from "../shared/schema";
 import { cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 
@@ -51,6 +51,10 @@ test("inventory endpoint reconciles location values and quantities with ledger b
     locationIds.push(...locations.map(({ id }) => id));
     const [locationA, locationB, inactiveLocation] = locations;
     assert.ok(locationA && locationB && inactiveLocation);
+    const [emptyLocation] = await db.insert(inventoryLocations).values([
+      { name: `Location reconciliation empty ${suffix}` },
+    ]).returning();
+    locationIds.push(emptyLocation.id);
 
     const productsForTest = await db.insert(products).values([
       { sku: `LOC-1-${suffix}`, name: `Location reconciliation product one ${suffix}`, status: "active" },
@@ -70,6 +74,12 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       { productId: secondProduct.id, locationId: null, kind: "opening_stock", quantityDelta: 1, reason: "Location value regression fixture", sourceKey: `location-value-${suffix}-2-unassigned` },
     ]).returning();
     movementIds.push(...movements.map(({ id }) => id));
+    await db.insert(inventoryReservations).values([
+      { productId: firstProduct.id, locationId: locationA.id, quantity: 1, reason: "Location total regression fixture" },
+      { productId: secondProduct.id, locationId: locationA.id, quantity: 1, reason: "Location total regression fixture" },
+      { productId: firstProduct.id, locationId: locationB.id, quantity: 1, reason: "Location total regression fixture" },
+      { productId: secondProduct.id, locationId: null, quantity: 1, reason: "Location total regression fixture" },
+    ]);
 
     const inventoryAccount = await db.transaction(async (tx) => {
       const accountMap = await ensureAccountingAccounts(tx);
@@ -94,12 +104,33 @@ test("inventory endpoint reconciles location values and quantities with ledger b
     assert.ok(inventoryAccount);
 
     const response = await fetch(`${baseUrl}/api/inventory`);
-    const payload = await response.json() as { inventory: any[] };
+    const payload = await response.json() as { inventory: any[]; locationTotals: any[] };
     assert.equal(response.status, 200, JSON.stringify(payload));
     const inventoryByProduct = new Map(
       payload.inventory.filter((item) => productIds.includes(item.id)).map((item) => [item.id, item]),
     );
     assert.equal(inventoryByProduct.size, productsForTest.length);
+    const totalsByLocation = new Map(payload.locationTotals.map((total) => [total.id, total]));
+    assert.deepEqual(
+      [totalsByLocation.get(locationA.id)?.onHand, totalsByLocation.get(locationA.id)?.reserved, totalsByLocation.get(locationA.id)?.available],
+      [3, 2, 1],
+    );
+    assert.deepEqual(
+      [totalsByLocation.get(locationB.id)?.onHand, totalsByLocation.get(locationB.id)?.reserved, totalsByLocation.get(locationB.id)?.available],
+      [3, 1, 2],
+    );
+    assert.deepEqual(
+      [totalsByLocation.get(inactiveLocation.id)?.onHand, totalsByLocation.get(inactiveLocation.id)?.reserved, totalsByLocation.get(inactiveLocation.id)?.available],
+      [1, 0, 1],
+    );
+    assert.deepEqual(
+      [totalsByLocation.get(null)?.onHand, totalsByLocation.get(null)?.reserved, totalsByLocation.get(null)?.available],
+      [3, 1, 2],
+    );
+    assert.deepEqual(
+      [totalsByLocation.get(emptyLocation.id)?.onHand, totalsByLocation.get(emptyLocation.id)?.reserved, totalsByLocation.get(emptyLocation.id)?.available],
+      [0, 0, 0],
+    );
 
     const accountLines = await db.select({
       productId: journalLines.productId,
@@ -150,6 +181,7 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       await db.delete(journalLines).where(inArray(journalLines.journalEntryId, entryIds));
       await db.delete(journalEntries).where(inArray(journalEntries.id, entryIds));
     }
+    await db.delete(inventoryReservations).where(inArray(inventoryReservations.productId, productIds));
     if (movementIds.length) await db.delete(inventoryMovements).where(inArray(inventoryMovements.id, movementIds));
     if (productIds.length) await db.delete(products).where(inArray(products.id, productIds));
     if (locationIds.length) await db.delete(inventoryLocations).where(inArray(inventoryLocations.id, locationIds));
