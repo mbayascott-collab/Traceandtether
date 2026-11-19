@@ -267,8 +267,27 @@ test("validates delivery dates, positive quantities, and unique order lines", ()
   }), {
     idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
     deliveryDate: "2026-11-04",
-    lines: [{ salesOrderLineId: 4, quantity: 2 }],
+    lines: [{ salesOrderLineId: 4, quantity: 2, locationAllocations: [] }],
   });
+  assert.deepEqual(salesDeliveryInputSchema.parse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2, locationAllocations: [{ locationId: "3", quantity: "2" }] }],
+  }).lines[0], {
+    salesOrderLineId: 4, quantity: 2, locationAllocations: [{ locationId: 3, quantity: 2 }],
+  });
+  assert.equal(salesDeliveryInputSchema.safeParse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2, locationAllocations: [
+      { locationId: 3, quantity: 1 }, { locationId: 3, quantity: 1 },
+    ] }],
+  }).success, false);
+  assert.equal(salesDeliveryInputSchema.safeParse({
+    idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
+    deliveryDate: "2026-11-04",
+    lines: [{ salesOrderLineId: 4, quantity: 2, locationAllocations: [{ locationId: 0, quantity: 1 }] }],
+  }).success, false);
   assert.equal(salesDeliveryInputSchema.safeParse({
     idempotencyKey: "550e8400-e29b-41d4-a716-446655440000",
     deliveryDate: "2026-02-30",

@@ -48,7 +48,34 @@ export function chooseSalesStockAllocations(
 export function allocateReservationConsumption<T extends { id: number; locationId: number | null; quantity: number }>(
   reservations: T[],
   quantity: number,
+  requestedAllocations: { locationId: number; quantity: number }[] = [],
 ): { reservationId: number; locationId: number | null; quantity: number }[] | null {
+  if (requestedAllocations.length) {
+    if (requestedAllocations.reduce((total, allocation) => total + allocation.quantity, 0) !== quantity) return null;
+    const remainingByReservation = new Map(reservations.map((reservation) => [reservation.id, reservation.quantity]));
+    const consumption: { reservationId: number; locationId: number | null; quantity: number }[] = [];
+
+    for (const allocation of requestedAllocations) {
+      if (!Number.isSafeInteger(allocation.quantity) || allocation.quantity <= 0) return null;
+      let remaining = allocation.quantity;
+      const locationReservations = [...reservations]
+        .filter((reservation) => reservation.locationId === allocation.locationId)
+        .sort((left, right) => left.id - right.id);
+      for (const reservation of locationReservations) {
+        const available = Math.max(0, remainingByReservation.get(reservation.id) ?? 0);
+        const consumed = Math.min(available, remaining);
+        if (consumed > 0) {
+          consumption.push({ reservationId: reservation.id, locationId: reservation.locationId, quantity: consumed });
+          remainingByReservation.set(reservation.id, available - consumed);
+          remaining -= consumed;
+        }
+        if (remaining === 0) break;
+      }
+      if (remaining > 0) return null;
+    }
+    return consumption;
+  }
+
   let remaining = quantity;
   const consumption: { reservationId: number; locationId: number | null; quantity: number }[] = [];
   for (const reservation of [...reservations].sort((left, right) => left.id - right.id)) {

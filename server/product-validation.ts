@@ -360,12 +360,25 @@ export const salesDeliveryInputSchema = z.object({
   lines: z.array(z.object({
     salesOrderLineId: positiveInteger,
     quantity: positiveInteger,
+    locationAllocations: z.array(z.object({
+      locationId: positiveInteger,
+      quantity: positiveInteger,
+    }).strict()).max(100).optional().default([]),
   }).strict()).min(1).max(100),
 }).strict().superRefine((delivery, context) => {
   const lineIds = delivery.lines.map((line) => line.salesOrderLineId);
   if (new Set(lineIds).size !== lineIds.length) {
     context.addIssue({ code: "custom", path: ["lines"], message: "Each order line can appear only once in a delivery." });
   }
+  delivery.lines.forEach((line, index) => {
+    const locationIds = line.locationAllocations.map((allocation) => allocation.locationId);
+    if (new Set(locationIds).size !== locationIds.length) {
+      context.addIssue({
+        code: "custom", path: ["lines", index, "locationAllocations"],
+        message: "Choose each reserved stock location only once per delivery line.",
+      });
+    }
+  });
 });
 
 export const customerQuoteInputSchema = z.object({

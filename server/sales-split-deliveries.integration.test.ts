@@ -124,11 +124,22 @@ test("split sales deliveries keep each location linked and release undelivered r
     const firstDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
       idempotencyKey: randomUUID(),
       deliveryDate: "2026-11-17",
-      lines: [{ salesOrderLineId: line.id, quantity: 1 }],
+      lines: [{
+        salesOrderLineId: line.id, quantity: 1,
+        locationAllocations: [{ locationId: locations[2]!.id, quantity: 1 }],
+      }],
     }, 201);
-    const secondDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
+    await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
       idempotencyKey: randomUUID(),
       deliveryDate: "2026-11-18",
+      lines: [{
+        salesOrderLineId: line.id, quantity: 4,
+        locationAllocations: [{ locationId: locations[2]!.id, quantity: 4 }],
+      }],
+    }, 409);
+    const secondDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
+      idempotencyKey: randomUUID(),
+      deliveryDate: "2026-11-19",
       lines: [{ salesOrderLineId: line.id, quantity: 3 }],
     }, 201);
 
@@ -152,9 +163,9 @@ test("split sales deliveries keep each location linked and release undelivered r
         reservation.locationId,
       ]).sort((left, right) => Number(left[0]) - Number(right[0]) || Number(left[1]) - Number(right[1])),
       [
-        [deliveryLineIds[0], locations[0]!.id, 1, reservationsAfterConfirmation.find((item) => item.locationId === locations[0]!.id)!.id, locations[0]!.id],
-        [deliveryLineIds[1], locations[0]!.id, 1, reservationsAfterConfirmation.find((item) => item.locationId === locations[0]!.id)!.id, locations[0]!.id],
-        [deliveryLineIds[1], locations[1]!.id, 2, reservationsAfterConfirmation.find((item) => item.locationId === locations[1]!.id)!.id, locations[1]!.id],
+        [deliveryLineIds[0], locations[2]!.id, 1, reservationsAfterConfirmation.find((item) => item.locationId === locations[2]!.id)!.id, locations[2]!.id],
+        [deliveryLineIds[1], locations[0]!.id, 2, reservationsAfterConfirmation.find((item) => item.locationId === locations[0]!.id)!.id, locations[0]!.id],
+        [deliveryLineIds[1], locations[1]!.id, 1, reservationsAfterConfirmation.find((item) => item.locationId === locations[1]!.id)!.id, locations[1]!.id],
       ].sort((left, right) => Number(left[0]) - Number(right[0]) || Number(left[1]) - Number(right[1])),
       "fulfillment movements must retain both their saved reservation and delivery-line links",
     );
@@ -175,14 +186,14 @@ test("split sales deliveries keep each location linked and release undelivered r
         {
           id: firstDelivery.delivery.id,
           quantity: 1,
-          stockLocations: [[locations[0]!.id, locations[0]!.name, 1]],
+          stockLocations: [[locations[2]!.id, locations[2]!.name, 1]],
         },
         {
           id: secondDelivery.delivery.id,
           quantity: 3,
           stockLocations: [
-            [locations[0]!.id, locations[0]!.name, 1],
-            [locations[1]!.id, locations[1]!.name, 2],
+            [locations[0]!.id, locations[0]!.name, 2],
+            [locations[1]!.id, locations[1]!.name, 1],
           ],
         },
       ].sort((left, right) => left.id - right.id),
@@ -198,9 +209,9 @@ test("split sales deliveries keep each location linked and release undelivered r
         .sort((left, right) => left.locationId! - right.locationId!)
         .map((reservation) => [reservation.locationId, reservation.quantity, reservation.status]),
       [
-        [locations[0]!.id, 1, "fulfilled"],
-        [locations[1]!.id, 2, "released"],
-        [locations[2]!.id, 4, "released"],
+        [locations[0]!.id, 2, "fulfilled"],
+        [locations[1]!.id, 3, "released"],
+        [locations[2]!.id, 3, "released"],
       ].sort((left, right) => Number(left[0]) - Number(right[0])),
       "cancellation must release every still-active reservation while preserving fulfilled holds",
     );

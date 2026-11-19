@@ -34,3 +34,14 @@ test("rejects reuse of a delivery request key for different details", () => {
     lines: savedDelivery.lines,
   }), false);
 });
+
+test("rejects reuse of a delivery request key with a different custom location split", () => {
+  assert.equal(matchesDeliveryRequest({
+    ...savedDelivery,
+    lines: [{ salesOrderLineId: 21, quantity: 2, locationAllocations: [{ locationId: 3, quantity: 2 }] }],
+  }, {
+    salesOrderId: 12,
+    deliveryDate: "2026-11-18",
+    lines: [{ salesOrderLineId: 21, quantity: 2, locationAllocations: [{ locationId: 4, quantity: 2 }] }],
+  }), false);
+});

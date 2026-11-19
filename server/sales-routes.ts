@@ -62,10 +62,35 @@ async function stockBalance(tx: any, productId: number, locationId?: number) {
 }
 
 async function deliveryRequestResult(tx: any, existing: typeof salesDeliveries.$inferSelect, orderId: number,
-  input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }) {
-  const savedLines = await tx.select({
+  input: { deliveryDate: string; lines: { salesOrderLineId: number; quantity: number; locationAllocations?: { locationId: number; quantity: number }[] }[] }) {
+  const savedDeliveryLines = await tx.select({
+    id: salesDeliveryLines.id,
     salesOrderLineId: salesDeliveryLines.salesOrderLineId, quantity: salesDeliveryLines.quantity,
   }).from(salesDeliveryLines).where(eq(salesDeliveryLines.deliveryId, existing.id)).orderBy(asc(salesDeliveryLines.salesOrderLineId));
+  const savedFulfillment = savedDeliveryLines.length
+    ? await tx.select({
+      salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
+      locationId: inventoryMovements.locationId,
+      quantity: inventoryMovements.quantityDelta,
+    }).from(inventoryMovements).where(and(
+      eq(inventoryMovements.kind, "reservation_fulfillment"),
+      inArray(inventoryMovements.salesDeliveryLineId, savedDeliveryLines.map((line: { id: number }) => line.id)),
+    ))
+    : [];
+  const allocationsByDeliveryLine = new Map<number, { locationId: number; quantity: number }[]>();
+  for (const movement of savedFulfillment) {
+    if (movement.salesDeliveryLineId === null || movement.locationId === null) continue;
+    const allocations = allocationsByDeliveryLine.get(movement.salesDeliveryLineId) ?? [];
+    const existingLocation = allocations.find((allocation) => allocation.locationId === movement.locationId);
+    if (existingLocation) existingLocation.quantity -= movement.quantity;
+    else allocations.push({ locationId: movement.locationId, quantity: -movement.quantity });
+    allocationsByDeliveryLine.set(movement.salesDeliveryLineId, allocations);
+  }
+  const savedLines = savedDeliveryLines.map((line: { id: number; salesOrderLineId: number; quantity: number }) => ({
+    salesOrderLineId: line.salesOrderLineId,
+    quantity: line.quantity,
+    locationAllocations: allocationsByDeliveryLine.get(line.id) ?? [],
+  }));
   if (!matchesDeliveryRequest({
     salesOrderId: existing.salesOrderId, deliveryDate: existing.deliveryDate, lines: savedLines,
   }, {
@@ -79,7 +104,7 @@ async function deliveryRequestResult(tx: any, existing: typeof salesDeliveries.$
 }
 
 async function recordDelivery(tx: any, orderId: number,
-  input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }, actor: AuditActor) {
+  input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number; locationAllocations?: { locationId: number; quantity: number }[] }[] }, actor: AuditActor) {
   const [order] = await tx.select().from(salesOrders).where(eq(salesOrders.id, orderId)).for("update").limit(1);
   if (!order) return { error: "Sales order not found.", status: 404 };
   const [existingDelivery] = await tx.select().from(salesDeliveries)
@@ -113,9 +138,15 @@ async function recordDelivery(tx: any, orderId: number,
     const holds = await tx.select().from(inventoryReservations)
       .where(and(eq(inventoryReservations.salesOrderId, orderId), eq(inventoryReservations.productId, line.productId), eq(inventoryReservations.status, "active")))
       .orderBy(asc(inventoryReservations.id)).for("update");
-    const consumption = allocateReservationConsumption(holds, lineInput.quantity);
+    const locationAllocations = lineInput.locationAllocations ?? [];
+    const consumption = allocateReservationConsumption(holds, lineInput.quantity, locationAllocations);
     if (!consumption) {
-      return { error: `The reserved stock for product ${line.productId} is not enough for this delivery.`, status: 409 };
+      return {
+        error: locationAllocations.length
+          ? `The selected location quantities for product ${line.productId} must match the delivery quantity and stay within this order's remaining reservations.`
+          : `The reserved stock for product ${line.productId} is not enough for this delivery.`,
+        status: 409,
+      };
     }
     holdsByLine.set(lineInput.salesOrderLineId, { holds, consumption });
   }

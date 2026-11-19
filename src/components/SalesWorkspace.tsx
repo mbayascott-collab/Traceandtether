@@ -26,6 +26,20 @@ function suggestedStockAllocations(line: SalesOrder["lines"][number]) {
   const result = chooseSalesStockAllocations(line.stockLocations, line.quantity, null);
   return "error" in result ? [] : result.allocations;
 }
+function reservedDeliveryLocations(line: SalesOrder["lines"][number]) {
+  const byLocation = new Map<number, { locationId: number; locationName: string; quantity: number }>();
+  for (const reservation of line.stockReservations) {
+    if (reservation.status !== "active" || reservation.locationId === null) continue;
+    const existing = byLocation.get(reservation.locationId);
+    if (existing) existing.quantity += reservation.quantity;
+    else byLocation.set(reservation.locationId, {
+      locationId: reservation.locationId,
+      locationName: reservation.locationName || "Stock",
+      quantity: reservation.quantity,
+    });
+  }
+  return [...byLocation.values()].sort((left, right) => left.locationName.localeCompare(right.locationName));
+}
 export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
@@ -134,18 +148,33 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     event.preventDefault();
     if (deliverySubmitting) return;
     const form = new FormData(event.currentTarget);
-    const lines = order.lines.map((line) => ({
-      salesOrderLineId: line.id,
-      quantity: Number(form.get(`quantity-${line.id}`) || 0),
-    })).filter((line) => line.quantity > 0);
+    const lines = order.lines.map((line) => {
+      const locationAllocations = reservedDeliveryLocations(line).map((location) => ({
+        locationId: location.locationId,
+        quantity: Number(form.get(`location-${line.id}-${location.locationId}`) || 0),
+      })).filter((allocation) => allocation.quantity > 0);
+      return {
+        salesOrderLineId: line.id,
+        quantity: Number(form.get(`quantity-${line.id}`) || 0),
+        ...(locationAllocations.length ? { locationAllocations } : {}),
+      };
+    }).filter((line) => line.quantity > 0);
     if (!lines.length) { setError("Enter a quantity for at least one item."); return; }
+    if (lines.some((line) => line.locationAllocations
+      && line.locationAllocations.reduce((total, allocation) => total + allocation.quantity, 0) !== line.quantity)) {
+      setError("For each custom location split, assigned quantities must equal the delivery quantity.");
+      return;
+    }
     setError(""); setNotice("");
     setDeliverySubmitting(true);
     try {
       await createSalesDelivery(order.id, {
         idempotencyKey: String(form.get("idempotencyKey")),
         deliveryDate: String(form.get("deliveryDate")),
-        lines,
+        lines: lines.map((line) => ({
+          ...line,
+          locationAllocations: line.locationAllocations ?? [],
+        })),
       });
       setDeliveryFormOrder(null);
       setNotice("Delivery recorded. Stock and the customer balance have been updated.");
@@ -536,10 +565,29 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <h2>Record delivery · {deliveryFormOrder.orderNumber}</h2>
         <input type="hidden" name="idempotencyKey" value={deliveryRequestKey} />
         <label>Delivery date<input type="date" name="deliveryDate" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
-        {deliveryFormOrder.lines.filter((line) => line.remainingQuantity > 0).map((line) => <label key={line.id}>
-          {line.productName} · {line.sku} · {line.remainingQuantity} remaining · Stock location: {line.stockLocationName || "Not recorded"}
-          <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
-        </label>)}
+        {deliveryFormOrder.lines.filter((line) => line.remainingQuantity > 0).map((line) => {
+          const reservedLocations = reservedDeliveryLocations(line);
+          return <div key={line.id} className="delivery-line-allocation">
+            <label>
+              {line.productName} · {line.sku} · {line.remainingQuantity} remaining
+              <input type="number" name={`quantity-${line.id}`} min="0" max={line.remainingQuantity} defaultValue="0" />
+            </label>
+            {reservedLocations.length > 0 && <fieldset>
+              <legend>Choose quantities by reserved location (optional)</legend>
+              <p className="report-footnote">Leave all at 0 to use the usual reservation order. A custom split must add up to the delivery quantity.</p>
+              {reservedLocations.map((location) => <label key={location.locationId}>
+                {location.locationName} · {location.quantity} reserved
+                <input
+                  type="number"
+                  name={`location-${line.id}-${location.locationId}`}
+                  min="0"
+                  max={location.quantity}
+                  defaultValue="0"
+                />
+              </label>)}
+            </fieldset>}
+          </div>;
+        })}
         <div className="modal-footer-actions"><button type="button" className="button button-secondary" disabled={deliverySubmitting} onClick={() => setDeliveryFormOrder(null)}>Cancel</button><button className="button button-primary" disabled={deliverySubmitting}>{deliverySubmitting ? "Saving…" : "Save delivery"}</button></div>
       </form>
     </div>}

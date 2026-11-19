@@ -63,6 +63,35 @@ test("delivery consumption fails when active reservations do not cover the reque
   assert.equal(allocateReservationConsumption([{ id: 11, locationId: 1, quantity: 2 }], 3), null);
 });
 
+test("custom delivery allocations consume only the selected locations", () => {
+  assert.deepEqual(allocateReservationConsumption([
+    { id: 11, locationId: 1, quantity: 2 },
+    { id: 12, locationId: 2, quantity: 4 },
+  ], 3, [{ locationId: 2, quantity: 3 }]), [
+    { reservationId: 12, locationId: 2, quantity: 3 },
+  ]);
+});
+
+test("custom delivery allocations reject locations above their remaining reservation", () => {
+  assert.equal(allocateReservationConsumption([
+    { id: 11, locationId: 1, quantity: 2 },
+    { id: 12, locationId: 2, quantity: 3 },
+  ], 4, [{ locationId: 2, quantity: 4 }]), null);
+});
+
+test("custom delivery allocations must cover the full delivery quantity", () => {
+  assert.equal(allocateReservationConsumption([
+    { id: 11, locationId: 1, quantity: 2 },
+    { id: 12, locationId: 2, quantity: 3 },
+  ], 4, [{ locationId: 1, quantity: 2 }]), null);
+});
+
+test("custom delivery allocations reject locations not reserved for the order", () => {
+  assert.equal(allocateReservationConsumption([
+    { id: 11, locationId: 1, quantity: 2 },
+  ], 1, [{ locationId: 99, quantity: 1 }]), null);
+});
+
 test("a requested location is honored when it has enough available stock", () => {
   assert.deepEqual(chooseSalesStockLocation(locations, 4, 2), { location: locations[1] });
 });
