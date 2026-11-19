@@ -254,6 +254,10 @@ test("marketing report counts partial campaign deliveries once and matches poste
       baseline.payload.totals.campaignLinkOrders + 1,
     );
     assert.equal(
+      report.payload.totals.ordersWithoutCampaignLinks,
+      baseline.payload.totals.ordersWithoutCampaignLinks + 1,
+    );
+    assert.equal(
       report.payload.totals.attributedOrders,
       baseline.payload.totals.attributedOrders + 2,
     );

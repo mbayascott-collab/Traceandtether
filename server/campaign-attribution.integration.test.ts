@@ -141,11 +141,24 @@ test("public shop campaign links attribute orders and reports count them without
       .from(salesOrders).where(inArray(salesOrders.orderNumber, orderNumbers));
     assert.equal(testOrders.length, 4);
 
+    const manuallyAttributedOrder = testOrders.find((order) => order.orderNumber === orderNumbers[1])!;
+    const manualAttribution = await request(
+      `/api/sales-orders/${manuallyAttributedOrder.id}/attribution`,
+      { campaignId },
+      "PATCH",
+    );
+    assert.equal(manualAttribution.response.status, 200, JSON.stringify(manualAttribution.payload));
+
     const attributions = await db.select().from(marketingAttributions);
     const testAttributions = attributions.filter((row) => testOrders.some((order) => order.id === row.salesOrderId));
     assert.deepEqual(testAttributions.map(({ salesOrderId, campaignId: savedCampaignId, source }) => ({
       salesOrderId, campaignId: savedCampaignId, source,
     })).sort((a, b) => a.salesOrderId - b.salesOrderId), [
+      {
+        salesOrderId: manuallyAttributedOrder.id,
+        campaignId,
+        source: "manual",
+      },
       {
         salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[0])!.id,
         campaignId,
@@ -165,12 +178,12 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(report.response.status, 200);
     const testCampaign = report.payload.campaigns.find((item: { id: number }) => item.id === campaignId);
     assert.ok(testCampaign);
-    assert.equal(testCampaign.orderCount, 2);
-    assert.equal(testCampaign.attributedRevenueZmw, "200.00");
+    assert.equal(testCampaign.orderCount, 3);
+    assert.equal(testCampaign.attributedRevenueZmw, "300.00");
     assert.equal(report.payload.totals.campaignLinkOrders - baseline.campaignLinkOrders, 2);
     assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 2);
-    assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 2);
-    assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
+    assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 3);
+    assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 1);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
