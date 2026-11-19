@@ -127,7 +127,11 @@ function paymentMatchesRequest(payment: typeof businessPayments.$inferSelect, in
     && (payment.notes ?? null) === (input.notes ?? null);
 }
 
-export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
+export function registerPaymentRoutes(
+  app: Express,
+  owner: RequestHandler,
+  sendReminder = sendPaymentReminderEmail,
+) {
   app.get("/api/payments/reconciliation/accounts", owner, async (_req, res) => {
     const accountsByKey = await ensureAccountingAccounts(db);
     res.json({
@@ -592,7 +596,7 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the reminder message.");
 
     const today = new Date().toISOString().slice(0, 10);
-    const claim = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const [order] = await tx.select().from(salesOrders)
         .where(eq(salesOrders.id, orderId.data)).for("update").limit(1);
       if (!order) return { error: "Customer order not found.", status: 404 as const };
@@ -680,37 +684,31 @@ export function registerPaymentRoutes(app: Express, owner: RequestHandler) {
         recordLabel: order.orderNumber, actor: res.locals.actor, action: "created",
         changedFields: ["salesOrderId", "recipientEmail", "outstandingZmw", "dueDate", "note", "status", "attemptedAt"],
       });
-      return {
-        reminder, content: {
-          orderNumber: order.orderNumber, customerName: customer.name, customerEmail: customer.email,
-          outstandingZmw: reminder.outstandingZmw, dueDate: reminder.dueDate, note: reminder.note,
-        },
-      };
-    });
-    if ("error" in claim) return res.status(claim.status ?? 400).json({ error: claim.error });
 
-    const outcome = await sendPaymentReminderEmail(claim.content);
-    const sentAt = outcome.ok ? new Date() : null;
-    const [reminder] = await db.transaction(async (tx) => {
+      // Keep the order row locked until Gmail has accepted the message. Customer
+      // receipts take this same lock, so a receipt cannot be committed between
+      // the balance snapshot above and the email being sent.
+      const outcome = await sendReminder({
+        orderNumber: order.orderNumber, customerName: customer.name, customerEmail: customer.email,
+        outstandingZmw: reminder.outstandingZmw, dueDate: reminder.dueDate, note: reminder.note,
+      });
       const [updated] = await tx.update(paymentReminders).set({
         status: outcome.ok ? "sent" : "failed",
-        sentAt,
+        sentAt: outcome.ok ? new Date() : null,
         sendError: outcome.ok ? null : outcome.error,
         providerMessageId: outcome.ok ? outcome.messageId : null,
-      }).where(and(
-        eq(paymentReminders.id, claim.reminder.id),
-        eq(paymentReminders.status, "sending"),
-      )).returning();
+      }).where(and(eq(paymentReminders.id, reminder.id), eq(paymentReminders.status, "sending"))).returning();
       if (!updated) throw new Error("The payment reminder result could not be saved.");
       await recordBusinessAudit(tx, {
         entityType: "payment_reminder", entityId: updated.id,
-        recordLabel: claim.content.orderNumber, actor: res.locals.actor, action: "updated",
+        recordLabel: order.orderNumber, actor: res.locals.actor, action: "updated",
         changedFields: ["status", "sentAt", "sendError", "providerMessageId"],
       });
-      return [updated];
+      return { reminder: updated, outcome };
     });
-    if (!outcome.ok) return res.status(502).json({ error: outcome.error, reminder });
-    res.json({ reminder });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    if (!result.outcome.ok) return res.status(502).json({ error: result.outcome.error, reminder: result.reminder });
+    res.json({ reminder: result.reminder });
   });
 
   app.put("/api/payments/due-date", owner, async (req, res) => {

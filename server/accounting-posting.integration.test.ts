@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import test from "node:test";
+import test, { after } from "node:test";
 import { and, eq, inArray } from "drizzle-orm";
 import {
-  accountingAccounts, businessAuditLogs, customers, importExpenses, inventoryLocations, inventoryMovements,
-  journalEntries, journalLines, products, purchaseOrderLines, shipmentLines,
+  accountingAccounts, businessAuditLogs, businessPayments, customers, importExpenses, inventoryLocations, inventoryMovements,
+  journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, salesOrders, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
 import { journalLinesAreBalanced } from "./accounting-posting";
+
+let closeIntegrationPool: (() => Promise<void>) | undefined;
+after(async () => closeIntegrationPool?.());
 
 test("database flow adjusts late import costs across partial receipts and sales", {
   skip: !process.env.DATABASE_URL,
@@ -25,6 +28,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
     import("./inventory-routes"),
     import("./sales-routes"),
   ]);
+  closeIntegrationPool = () => pool.end();
 
   const suffix = randomUUID();
   const testEmail = `accounting-posting-${suffix}@example.test`;
@@ -709,7 +713,193 @@ test("database flow adjusts late import costs across partial receipts and sales"
       throw error;
     } finally {
       client.release();
-      await pool.end();
+    }
+  }
+});
+
+test("customer receipts wait for an in-flight reminder send to finish", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [
+    { db, pool },
+    { registerPaymentRoutes },
+    { buildPaymentReminderEmail },
+  ] = await Promise.all([
+    import("./db"),
+    import("./payment-routes"),
+    import("./payment-reminder-email"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const requiredTables = await pool.query<{ name: string; exists: boolean }>(`
+    SELECT name, to_regclass('public.' || name) IS NOT NULL AS exists
+    FROM unnest(ARRAY['business_audit_logs', 'payment_reminders']) AS name
+  `);
+  if (requiredTables.rows.some((row) => !row.exists)) {
+    t.skip("requires the business audit and payment reminder migrations");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const actorId = `payment-reminder-race-${suffix}`;
+  const actorEmail = `${actorId}@example.test`;
+  const app = express();
+  app.use(express.json());
+
+  let senderEntered!: () => void;
+  const senderEnteredPromise = new Promise<void>((resolve) => { senderEntered = resolve; });
+  let releaseSender!: () => void;
+  const senderPause = new Promise<void>((resolve) => { releaseSender = resolve; });
+  let receiptRequestSeen!: () => void;
+  const receiptRequestSeenPromise = new Promise<void>((resolve) => { receiptRequestSeen = resolve; });
+  let sentContent: import("./payment-reminder-email").PaymentReminderEmailContent | undefined;
+  let receiptRequests = 0;
+
+  app.use((req, _res, next) => {
+    if (req.method === "POST" && req.path === "/api/payments") {
+      receiptRequests += 1;
+      receiptRequestSeen();
+    }
+    next();
+  });
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: actorId, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerPaymentRoutes(app, owner, async (content) => {
+    sentContent = content;
+    senderEntered();
+    await senderPause;
+    return { ok: true, messageId: `gmail-test-${suffix}` };
+  });
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
+  });
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let customerId: number | undefined;
+  let productId: number | undefined;
+  let salesOrderId: number | undefined;
+  let reminderRequest: Promise<Response> | undefined;
+  let receiptRequest: Promise<Response> | undefined;
+
+  try {
+    const [customer] = await db.insert(customers).values({
+      name: `Payment reminder race customer ${suffix}`,
+      email: `reminder-${suffix}@example.test`,
+    }).returning();
+    customerId = customer.id;
+    const [product] = await db.insert(products).values({
+      sku: `REM-${suffix}`,
+      name: `Payment reminder race product ${suffix}`,
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [order] = await db.insert(salesOrders).values({
+      orderNumber: `REM-${suffix.slice(0, 12)}`,
+      customerId,
+      status: "fulfilled",
+      orderDate: "2020-01-01",
+      dueDate: "2020-01-01",
+    }).returning();
+    salesOrderId = order.id;
+    await db.insert(salesOrderLines).values({
+      salesOrderId,
+      productId,
+      quantity: 2,
+      unitPriceZmw: "100.00",
+    });
+
+    reminderRequest = fetch(`${baseUrl}/api/payments/${salesOrderId}/reminder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "" }),
+    });
+    await senderEnteredPromise;
+    assert.equal(sentContent?.outstandingZmw, "200.00");
+
+    receiptRequest = fetch(`${baseUrl}/api/payments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        direction: "customer_receipt",
+        idempotencyKey: randomUUID(),
+        orderId: salesOrderId,
+        amountZmw: "75.00",
+        paymentDate: "2026-11-19",
+        method: "bank_transfer",
+        reference: `receipt-${suffix}`,
+        notes: null,
+      }),
+    });
+    await receiptRequestSeenPromise;
+
+    const receiptBeforeSendFinished = await Promise.race([
+      receiptRequest.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(receiptBeforeSendFinished, false, "the receipt must wait while the reminder is being sent");
+    assert.equal(receiptRequests, 1);
+    assert.equal((await db.select().from(businessPayments).where(eq(businessPayments.salesOrderId, salesOrderId))).length, 0);
+
+    releaseSender();
+    const [reminderResponse, receiptResponse] = await Promise.all([reminderRequest, receiptRequest]);
+    const reminderPayload = await reminderResponse.json() as any;
+    const receiptPayload = await receiptResponse.json() as any;
+    assert.equal(reminderResponse.status, 200, JSON.stringify(reminderPayload));
+    assert.equal(receiptResponse.status, 201, JSON.stringify(receiptPayload));
+    assert.equal(reminderPayload.reminder.outstandingZmw, "200.00");
+    assert.equal(reminderPayload.reminder.status, "sent");
+    assert.equal(receiptPayload.payment.amountZmw, "75.00");
+
+    assert.ok(sentContent);
+    const raw = Buffer.from(buildPaymentReminderEmail(sentContent), "base64url").toString("utf8");
+    const encodedBody = raw.slice(raw.indexOf("\r\n\r\n") + 4).replace(/\r\n/g, "");
+    const emailBody = Buffer.from(encodedBody, "base64").toString("utf8");
+    assert.match(emailBody, /Amount still owed: ZMW 200\.00/);
+    const [savedReminder] = await db.select().from(paymentReminders)
+      .where(eq(paymentReminders.id, reminderPayload.reminder.id));
+    assert.equal(savedReminder.status, "sent");
+    assert.ok(savedReminder.sentAt);
+  } finally {
+    releaseSender();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (salesOrderId) {
+        await client.query("DELETE FROM payment_reminders WHERE sales_order_id = $1", [salesOrderId]);
+        await client.query(
+          `DELETE FROM journal_lines WHERE journal_entry_id IN (
+             SELECT id FROM journal_entries WHERE source_type = 'payment' AND source_id IN (
+               SELECT id FROM business_payments WHERE sales_order_id = $1
+             )
+           )`,
+          [salesOrderId],
+        );
+        await client.query(
+          `DELETE FROM journal_entries WHERE source_type = 'payment' AND source_id IN (
+             SELECT id FROM business_payments WHERE sales_order_id = $1
+           )`,
+          [salesOrderId],
+        );
+        await client.query("DELETE FROM business_payments WHERE sales_order_id = $1", [salesOrderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
+      }
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
   }
 });
