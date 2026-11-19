@@ -37,8 +37,14 @@ function fixtureReport(): SupplierReportCsvData {
   return {
     period: { from: "2025-01-01", to: "2025-03-31" },
     monthlySpend: [
-      { month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00" },
-      { month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "10.00", paymentsZmw: "0.00" },
+      {
+        month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
+        suppliers: [{ supplierId: 1, supplierName: "Fixture Supplier 001", orderedGoodsZmw: "240.00", importCostsZmw: "30.00" }],
+      },
+      {
+        month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "10.00", paymentsZmw: "0.00",
+        suppliers: [{ supplierId: 1, supplierName: "Fixture Supplier 001", orderedGoodsZmw: "0.00", importCostsZmw: "10.00" }],
+      },
     ],
     shipments: [{
       supplierId: 1, supplierName: "Shipment Detail Vendor", orderNumber: "PO-PRINT-1", shipmentId: 51,
@@ -89,10 +95,17 @@ test("supplier spend PDF includes report totals and keeps long supplier tables r
 
     for (let index = 1; index <= rowCount; index += 1) {
       const name = `Fixture Supplier ${String(index).padStart(3, "0")}`;
-      assert.equal(allText.split(normalize(name)).length - 1, 1, `Expected exactly one printed copy of ${name}.`);
+      const expectedMentions = index === 1 ? 3 : 1;
+      assert.equal(
+        allText.split(normalize(name)).length - 1,
+        expectedMentions,
+        `Expected the supplier table and monthly breakdown to include ${name}.`,
+      );
     }
 
-    const supplierPages = pages.filter((page) => normalize(page).includes("fixture supplier"));
+    const supplierPages = pages.filter((page) =>
+      normalize(page).includes("fixture supplier") && normalize(page).includes("average variance"),
+    );
     assert.ok(supplierPages.length > 1, "Supplier rows should span multiple pages.");
     for (const page of supplierPages) {
       const text = normalize(page);
@@ -110,6 +123,8 @@ test("supplier spend PDF includes report totals and keeps long supplier tables r
       "Incomplete / open",
       "Average variance",
       "January 2025",
+      "Monthly costs by supplier",
+      "Allocated import costs",
       "PO-PRINT-1",
       "SHIP-PRINT-51",
     ]) {

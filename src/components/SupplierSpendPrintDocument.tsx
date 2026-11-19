@@ -104,6 +104,35 @@ export default function SupplierSpendPrintDocument({ report }: Props) {
     </section>
 
     <section className="supplier-spend-print-section">
+      <h2>Monthly costs by supplier</h2>
+      <p className="supplier-spend-print-note">
+        Shared shipment expenses are allocated across linked supplier orders once. Unassigned costs are excluded from supplier rows.
+      </p>
+      <table className="supplier-spend-print-table supplier-spend-print-monthly">
+        <thead><tr><th scope="col">Month</th><th scope="col">Supplier</th><th scope="col">Goods ordered</th><th scope="col">Allocated import costs</th></tr></thead>
+        <tbody>
+          {report.monthlySpend.flatMap((month) => month.suppliers.length
+            ? [
+              ...month.suppliers.map((supplier) => <tr key={`${month.month}-${supplier.supplierId}`}>
+                <th scope="row">{monthLabel(month.month)}</th><td>{supplier.supplierName}</td>
+                <td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td>
+              </tr>),
+              <tr key={`${month.month}-supplier-total`}>
+                <th scope="row">{monthLabel(month.month)} supplier-allocated total</th><td />
+                <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.orderedGoodsZmw), 0).toFixed(2))}</td>
+                <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.importCostsZmw), 0).toFixed(2))}</td>
+              </tr>,
+            ]
+            : [<tr key={`${month.month}-supplier-empty`}>
+              <th scope="row">{monthLabel(month.month)}</th><td>No supplier costs assigned this month.</td>
+              <td>{money("0.00")}</td><td>{money("0.00")}</td>
+            </tr>])}
+          {!report.monthlySpend.length && <tr><td colSpan={4}>No supplier costs in this period.</td></tr>}
+        </tbody>
+      </table>
+    </section>
+
+    <section className="supplier-spend-print-section">
       <h2>Shipment receipt dates</h2>
       <p className="supplier-spend-print-note">Only dates recorded on each shipment are shown; missing dates are not inferred.</p>
       <table className="supplier-spend-print-table supplier-spend-print-shipments">

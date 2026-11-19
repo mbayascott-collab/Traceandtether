@@ -46,8 +46,13 @@ export type SupplierDeliveryMetrics = {
 };
 
 export type SupplierMonthlySpendInput = {
-  purchaseLines: { orderedAt: string; status: string; totalZmw: string }[];
-  expenses: { incurredAt: string; amountZmw: string }[];
+  purchaseLines: {
+    supplierId: number; supplierName: string; orderedAt: string; status: string; totalZmw: string;
+  }[];
+  expenses: {
+    incurredAt: string; amountZmw: string;
+    allocations: { supplierId: number; supplierName: string; amountZmw: string }[];
+  }[];
   payments: { paymentDate: string; amountZmw: string }[];
   fromDate: string | null;
   toDate: string | null;
@@ -60,20 +65,56 @@ const toCents = (value: string) => {
 const fromCents = (value: bigint) => `${value / 100n}.${String(value % 100n).padStart(2, "0")}`;
 
 export function supplierMonthlySpend(input: SupplierMonthlySpendInput): SupplierMonthlySpendRow[] {
-  const monthTotals = new Map<string, { orderedGoods: bigint; importCosts: bigint; payments: bigint }>();
-  const add = (date: string, category: "orderedGoods" | "importCosts" | "payments", amount: string) => {
+  type MonthlySupplierSpend = {
+    supplierId: number; supplierName: string; orderedGoods: bigint; importCosts: bigint;
+  };
+  type MonthlyTotals = {
+    orderedGoods: bigint; importCosts: bigint; payments: bigint;
+    suppliers: Map<number, MonthlySupplierSpend>;
+  };
+  const monthTotals = new Map<string, MonthlyTotals>();
+  const getMonth = (month: string) => {
+    let totals = monthTotals.get(month);
+    if (!totals) {
+      totals = { orderedGoods: 0n, importCosts: 0n, payments: 0n, suppliers: new Map() };
+      monthTotals.set(month, totals);
+    }
+    return totals;
+  };
+  const getSupplier = (totals: MonthlyTotals, supplierId: number, supplierName: string) => {
+    let supplier = totals.suppliers.get(supplierId);
+    if (!supplier) {
+      supplier = { supplierId, supplierName, orderedGoods: 0n, importCosts: 0n };
+      totals.suppliers.set(supplierId, supplier);
+    }
+    return supplier;
+  };
+  const inRange = (date: string) => {
     if ((input.fromDate && date < input.fromDate) || (input.toDate && date > input.toDate)) return;
-    const month = date.slice(0, 7);
-    const totals = monthTotals.get(month) ?? { orderedGoods: 0n, importCosts: 0n, payments: 0n };
-    totals[category] += toCents(amount);
-    monthTotals.set(month, totals);
+    return date.slice(0, 7);
   };
 
   for (const line of input.purchaseLines) {
-    if (line.status !== "cancelled") add(line.orderedAt, "orderedGoods", line.totalZmw);
+    const month = line.status !== "cancelled" ? inRange(line.orderedAt) : undefined;
+    if (month) {
+      const totals = getMonth(month);
+      totals.orderedGoods += toCents(line.totalZmw);
+      getSupplier(totals, line.supplierId, line.supplierName).orderedGoods += toCents(line.totalZmw);
+    }
   }
-  for (const expense of input.expenses) add(expense.incurredAt, "importCosts", expense.amountZmw);
-  for (const payment of input.payments) add(payment.paymentDate, "payments", payment.amountZmw);
+  for (const expense of input.expenses) {
+    const month = inRange(expense.incurredAt);
+    if (!month) continue;
+    const totals = getMonth(month);
+    totals.importCosts += toCents(expense.amountZmw);
+    for (const allocation of expense.allocations) {
+      getSupplier(totals, allocation.supplierId, allocation.supplierName).importCosts += toCents(allocation.amountZmw);
+    }
+  }
+  for (const payment of input.payments) {
+    const month = inRange(payment.paymentDate);
+    if (month) getMonth(month).payments += toCents(payment.amountZmw);
+  }
 
   const observedMonths = [...monthTotals.keys()].sort();
   const firstMonth = input.fromDate?.slice(0, 7) ?? observedMonths[0];
@@ -85,12 +126,20 @@ export function supplierMonthlySpend(input: SupplierMonthlySpendInput): Supplier
   const [endYear, endMonth] = lastMonth.split("-").map(Number);
   for (let year = startYear, month = startMonth; year < endYear || (year === endYear && month <= endMonth);) {
     const key = `${year}-${String(month).padStart(2, "0")}`;
-    const totals = monthTotals.get(key) ?? { orderedGoods: 0n, importCosts: 0n, payments: 0n };
+    const totals = monthTotals.get(key) ?? { orderedGoods: 0n, importCosts: 0n, payments: 0n, suppliers: new Map() };
     result.push({
       month: key,
       orderedGoodsZmw: fromCents(totals.orderedGoods),
       importCostsZmw: fromCents(totals.importCosts),
       paymentsZmw: fromCents(totals.payments),
+      suppliers: [...totals.suppliers.values()]
+        .sort((a, b) => a.supplierName.localeCompare(b.supplierName) || a.supplierId - b.supplierId)
+        .map((supplier) => ({
+          supplierId: supplier.supplierId,
+          supplierName: supplier.supplierName,
+          orderedGoodsZmw: fromCents(supplier.orderedGoods),
+          importCostsZmw: fromCents(supplier.importCosts),
+        })),
     });
     month += 1;
     if (month > 12) {

@@ -122,6 +122,7 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
     }],
     monthlySpend: [{
       month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "35.00", paymentsZmw: "120.00",
+      suppliers: [{ supplierId: 7, supplierName: 'North "Trading"', orderedGoodsZmw: "240.00", importCostsZmw: "30.00" }],
     }],
     totals: {
       orderedGoodsZmw: "240.00", importCostsZmw: "35.00", unallocatedImportCostsZmw: "5.00", paymentsZmw: "120.00",
@@ -143,6 +144,9 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
   assert.match(csv, /"Total","2","240\.00","35\.00","120\.00"/);
   assert.match(csv, /"Goods ordered use purchase-order dates; import costs use expense dates; supplier payments use payment dates and are separate from costs\."/);
   assert.match(csv, /"2025-01","240\.00","35\.00","120\.00"/);
+  assert.match(csv, /"Monthly costs by supplier"/);
+  assert.match(csv, /"2025-01","North ""Trading""","240\.00","30\.00"/);
+  assert.match(csv, /"Supplier-allocated total","240\.00","30\.00"/);
   assert.match(csv, /"Supplier shipment receipt dates"/);
   assert.match(csv, /"Dates below are recorded on the shipment; blank dates are not inferred from purchase orders\."/);
   assert.match(csv, /"North","PO-1","11","SHIP-1","received","","2025-01-12"/);
@@ -173,15 +177,15 @@ test("monthly supplier spend uses order, expense, and payment dates independentl
     fromDate: "2025-01-01",
     toDate: "2025-03-31",
     purchaseLines: [
-      { orderedAt: "2025-01-28", status: "ordered", totalZmw: "100.00" },
-      { orderedAt: "2025-02-03", status: "received", totalZmw: "50.00" },
-      { orderedAt: "2025-02-10", status: "cancelled", totalZmw: "900.00" },
-      { orderedAt: "2024-12-31", status: "received", totalZmw: "700.00" },
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-01-28", status: "ordered", totalZmw: "100.00" },
+      { supplierId: 8, supplierName: "East", orderedAt: "2025-02-03", status: "received", totalZmw: "50.00" },
+      { supplierId: 8, supplierName: "East", orderedAt: "2025-02-10", status: "cancelled", totalZmw: "900.00" },
+      { supplierId: 7, supplierName: "North", orderedAt: "2024-12-31", status: "received", totalZmw: "700.00" },
     ],
     expenses: [
-      { incurredAt: "2025-02-05", amountZmw: "30.00" },
-      { incurredAt: "2025-03-12", amountZmw: "20.00" },
-      { incurredAt: "2024-12-31", amountZmw: "800.00" },
+      { incurredAt: "2025-02-05", amountZmw: "30.00", allocations: [{ supplierId: 7, supplierName: "North", amountZmw: "30.00" }] },
+      { incurredAt: "2025-03-12", amountZmw: "20.00", allocations: [{ supplierId: 7, supplierName: "North", amountZmw: "20.00" }] },
+      { incurredAt: "2024-12-31", amountZmw: "800.00", allocations: [] },
     ],
     payments: [
       { paymentDate: "2025-03-01", amountZmw: "60.00" },
@@ -190,9 +194,21 @@ test("monthly supplier spend uses order, expense, and payment dates independentl
   });
 
   assert.deepEqual(monthly, [
-    { month: "2025-01", orderedGoodsZmw: "100.00", importCostsZmw: "0.00", paymentsZmw: "40.00" },
-    { month: "2025-02", orderedGoodsZmw: "50.00", importCostsZmw: "30.00", paymentsZmw: "0.00" },
-    { month: "2025-03", orderedGoodsZmw: "0.00", importCostsZmw: "20.00", paymentsZmw: "60.00" },
+    {
+      month: "2025-01", orderedGoodsZmw: "100.00", importCostsZmw: "0.00", paymentsZmw: "40.00",
+      suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "100.00", importCostsZmw: "0.00" }],
+    },
+    {
+      month: "2025-02", orderedGoodsZmw: "50.00", importCostsZmw: "30.00", paymentsZmw: "0.00",
+      suppliers: [
+        { supplierId: 8, supplierName: "East", orderedGoodsZmw: "50.00", importCostsZmw: "0.00" },
+        { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "30.00" },
+      ],
+    },
+    {
+      month: "2025-03", orderedGoodsZmw: "0.00", importCostsZmw: "20.00", paymentsZmw: "60.00",
+      suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "20.00" }],
+    },
   ]);
 });
 
@@ -200,12 +216,27 @@ test("monthly supplier spend counts shared shipment expenses once in the incurre
   const monthly = supplierMonthlySpend({
     fromDate: "2025-02-01",
     toDate: "2025-02-28",
-    purchaseLines: [{ orderedAt: "2025-01-15", status: "received", totalZmw: "100.00" }],
-    expenses: [{ incurredAt: "2025-02-20", amountZmw: "75.25" }],
-    payments: [],
+    purchaseLines: [
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-01-15", status: "received", totalZmw: "100.00" },
+      { supplierId: 8, supplierName: "East", orderedAt: "2025-01-15", status: "received", totalZmw: "100.00" },
+    ],
+    expenses: [{
+      incurredAt: "2025-02-20", amountZmw: "75.25",
+      allocations: [
+        { supplierId: 7, supplierName: "North", amountZmw: "37.63" },
+        { supplierId: 8, supplierName: "East", amountZmw: "37.62" },
+      ],
+    }],
+    payments: [{ paymentDate: "2025-02-21", amountZmw: "20.00" }],
   });
 
   assert.deepEqual(monthly, [
-    { month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "75.25", paymentsZmw: "0.00" },
+    {
+      month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "75.25", paymentsZmw: "20.00",
+      suppliers: [
+        { supplierId: 8, supplierName: "East", orderedGoodsZmw: "0.00", importCostsZmw: "37.62" },
+        { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "37.63" },
+      ],
+    },
   ]);
 });

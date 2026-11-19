@@ -20,7 +20,10 @@ type DashboardData = {
 };
 type SupplierAnalytics = {
   period: { from: string | null; to: string | null };
-  monthlySpend: { month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string }[];
+  monthlySpend: {
+    month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+    suppliers: { supplierId: number; supplierName: string; orderedGoodsZmw: string; importCostsZmw: string }[];
+  }[];
   shipments: {
     supplierId: number; supplierName: string; orderNumber: string; shipmentId: number;
     shipmentReference: string | null; status: string; expectedAt: string | null; receivedAt: string | null;
@@ -223,6 +226,42 @@ export default function BusinessAnalyticsWorkspace() {
                 <td>{money(supplierReport.monthlySpend.reduce((sum, month) => sum + Number(month.importCostsZmw), 0).toFixed(2))}</td>
                 <td>{money(supplierReport.monthlySpend.reduce((sum, month) => sum + Number(month.paymentsZmw), 0).toFixed(2))}</td>
               </tr></tfoot>}
+            </table>
+          </div>
+        </section>
+        <section className="analytics-monthly-supplier-spend" aria-labelledby="monthly-supplier-detail-heading">
+          <div className="analytics-monthly-supplier-heading">
+            <div>
+              <h3 id="monthly-supplier-detail-heading">Monthly costs by supplier</h3>
+              <p>Supplier shares of shared shipment expenses are allocated once; costs that cannot be assigned are excluded here.</p>
+            </div>
+          </div>
+          <div className="table-wrap analytics-monthly-supplier-table-wrap">
+            <table className="analytics-monthly-supplier-table">
+              <caption className="analytics-table-caption">Monthly goods ordered and allocated import costs for each supplier in Zambian kwacha</caption>
+              <thead><tr>
+                <th scope="col">Month</th><th scope="col">Supplier</th>
+                <th scope="col">Goods ordered</th><th scope="col">Allocated import costs</th>
+              </tr></thead>
+              <tbody>
+                {supplierReport.monthlySpend.flatMap((month) => month.suppliers.length
+                  ? month.suppliers.map((supplier, index) => <tr key={`${month.month}-${supplier.supplierId}`}>
+                    {index === 0 && <th scope="rowgroup" rowSpan={month.suppliers.length + 1}>
+                      {new Date(`${month.month}-01T00:00:00Z`).toLocaleDateString("en", { month: "long", year: "numeric", timeZone: "UTC" })}
+                    </th>}
+                    <th scope="row" className="analytics-supplier-name">{supplier.supplierName}</th>
+                    <td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td>
+                  </tr>).concat(<tr key={`${month.month}-supplier-total`}>
+                    <th scope="row">Supplier-allocated total</th>
+                    <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.orderedGoodsZmw), 0).toFixed(2))}</td>
+                    <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.importCostsZmw), 0).toFixed(2))}</td>
+                  </tr>)
+                  : [<tr key={`${month.month}-supplier-empty`}>
+                    <th scope="row">{new Date(`${month.month}-01T00:00:00Z`).toLocaleDateString("en", { month: "long", year: "numeric", timeZone: "UTC" })}</th>
+                    <td className="analytics-supplier-empty">No supplier costs assigned this month.</td><td>{money("0.00")}</td><td>{money("0.00")}</td>
+                  </tr>])}
+                {!supplierReport.monthlySpend.length && <tr><td colSpan={4} className="analytics-supplier-empty">No supplier costs in this period.</td></tr>}
+              </tbody>
             </table>
           </div>
         </section>

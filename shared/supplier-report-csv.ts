@@ -19,6 +19,12 @@ export type SupplierMonthlySpendRow = {
   orderedGoodsZmw: string;
   importCostsZmw: string;
   paymentsZmw: string;
+  suppliers: {
+    supplierId: number;
+    supplierName: string;
+    orderedGoodsZmw: string;
+    importCostsZmw: string;
+  }[];
 };
 
 export type SupplierShipmentDetailRow = {
@@ -135,6 +141,23 @@ export function supplierReportCsv(report: SupplierReportCsvData) {
       report.monthlySpend.reduce((total, month) => total + Number(month.importCostsZmw), 0).toFixed(2),
       report.monthlySpend.reduce((total, month) => total + Number(month.paymentsZmw), 0).toFixed(2),
     ],
+    [],
+    ["Monthly costs by supplier"],
+    ["Shared shipment expenses are allocated across linked supplier orders once; unassigned costs are excluded from supplier rows."],
+    ["Month", "Supplier", "Goods ordered (ZMW)", "Allocated import costs (ZMW)"],
+    ...report.monthlySpend.flatMap((month) => month.suppliers.length
+      ? [
+        ...month.suppliers.map((supplier) => [
+          month.month, supplier.supplierName, supplier.orderedGoodsZmw, supplier.importCostsZmw,
+        ]),
+        [
+          month.month,
+          "Supplier-allocated total",
+          month.suppliers.reduce((total, supplier) => total + Number(supplier.orderedGoodsZmw), 0).toFixed(2),
+          month.suppliers.reduce((total, supplier) => total + Number(supplier.importCostsZmw), 0).toFixed(2),
+        ],
+      ]
+      : [[month.month, "No supplier costs assigned this month", "0.00", "0.00"]]),
     [],
     ["Supplier shipment receipt dates"],
     ["Dates below are recorded on the shipment; blank dates are not inferred from purchase orders."],

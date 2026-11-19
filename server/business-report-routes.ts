@@ -295,15 +295,28 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       purchaseLinesByOrder.set(line.orderId, [...(purchaseLinesByOrder.get(line.orderId) ?? []), line]);
     }
     let unallocatedImportCosts = 0n;
+    const monthlyExpenseAllocations: {
+      incurredAt: string; amountZmw: string;
+      allocations: { supplierId: number; supplierName: string; amountZmw: string }[];
+    }[] = [];
     for (const expense of expenses) {
       if (expense.purchaseOrderId !== null) {
         const order = orderById.get(expense.purchaseOrderId);
-        if (order) getSupplier(order.supplierId, order.supplierName).importCosts += cents(expense.amountZmw);
-        else unallocatedImportCosts += cents(expense.amountZmw);
+        if (order) {
+          getSupplier(order.supplierId, order.supplierName).importCosts += cents(expense.amountZmw);
+          monthlyExpenseAllocations.push({
+            incurredAt: expense.incurredAt, amountZmw: expense.amountZmw,
+            allocations: [{ supplierId: order.supplierId, supplierName: order.supplierName, amountZmw: expense.amountZmw }],
+          });
+        } else {
+          unallocatedImportCosts += cents(expense.amountZmw);
+          monthlyExpenseAllocations.push({ incurredAt: expense.incurredAt, amountZmw: expense.amountZmw, allocations: [] });
+        }
         continue;
       }
       if (expense.shipmentId === null) {
         unallocatedImportCosts += cents(expense.amountZmw);
+        monthlyExpenseAllocations.push({ incurredAt: expense.incurredAt, amountZmw: expense.amountZmw, allocations: [] });
         continue;
       }
       const shipment = shipmentById.get(expense.shipmentId);
@@ -312,6 +325,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       const allocationLines = [...linkedOrders].flatMap((orderId) => purchaseLinesByOrder.get(orderId) ?? []);
       if (!allocationLines.length) {
         unallocatedImportCosts += cents(expense.amountZmw);
+        monthlyExpenseAllocations.push({ incurredAt: expense.incurredAt, amountZmw: expense.amountZmw, allocations: [] });
         continue;
       }
       const allocation = allocateLandedCosts(
@@ -326,18 +340,37 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         "1",
       );
       const supplierByLine = new Map(allocationLines.map((line) => [line.lineId, { supplierId: line.supplierId, name: line.supplierName }]));
+      const monthlySupplierAllocations = new Map<number, { supplierId: number; supplierName: string; amount: bigint }>();
       for (const allocated of allocation.allocations) {
         const supplier = supplierByLine.get(allocated.lineId);
-        if (supplier) getSupplier(supplier.supplierId, supplier.name).importCosts += cents(allocated.amountZmw);
+        if (supplier) {
+          const allocatedCents = cents(allocated.amountZmw);
+          getSupplier(supplier.supplierId, supplier.name).importCosts += allocatedCents;
+          const supplierAllocation = monthlySupplierAllocations.get(supplier.supplierId) ?? {
+            supplierId: supplier.supplierId, supplierName: supplier.name, amount: 0n,
+          };
+          supplierAllocation.amount += allocatedCents;
+          monthlySupplierAllocations.set(supplier.supplierId, supplierAllocation);
+        }
       }
+      monthlyExpenseAllocations.push({
+        incurredAt: expense.incurredAt,
+        amountZmw: expense.amountZmw,
+        allocations: [...monthlySupplierAllocations.values()].map((allocation) => ({
+          supplierId: allocation.supplierId,
+          supplierName: allocation.supplierName,
+          amountZmw: from(allocation.amount),
+        })),
+      });
     }
     const deliveryMetrics = supplierDeliveryMetrics(orders, shipmentRows, shipmentLinks, new Date().toISOString().slice(0, 10));
     const shipmentDetails = supplierShipmentDetails(orders, shipmentRows, shipmentLinks);
     const monthlySpend = supplierMonthlySpend({
       purchaseLines: purchaseLines.map((line) => ({
+        supplierId: line.supplierId, supplierName: line.supplierName,
         orderedAt: line.orderedAt, status: line.status, totalZmw: line.totalZmw,
       })),
-      expenses: expenses.map((expense) => ({ incurredAt: expense.incurredAt, amountZmw: expense.amountZmw })),
+      expenses: monthlyExpenseAllocations,
       payments: payments.map((payment) => ({ paymentDate: payment.paymentDate, amountZmw: payment.amountZmw })),
       fromDate: fromDate || null, toDate: toDate || null,
     });
