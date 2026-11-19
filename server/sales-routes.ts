@@ -11,7 +11,9 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, cents as accountingCents, formatCents, postJournal } from "./accounting-posting";
-import { publicShopProtection } from "./public-shop-protection";
+import {
+  PUBLIC_SHOP_RETRY_MESSAGE, PublicShopProtectionUnavailableError, publicShopProtection,
+} from "./public-shop-protection";
 import {
   completePublicShopAttemptDays, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
 } from "./public-shop-analytics";
@@ -280,6 +282,15 @@ export function registerSalesRoutes(
   });
   app.get("/api/shop/products", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
+    let challenge: string;
+    try {
+      challenge = await publicShopProtection.issueChallenge(_req.ip || _req.socket.remoteAddress || "");
+    } catch (error) {
+      if (error instanceof PublicShopProtectionUnavailableError) {
+        return res.status(503).json({ error: PUBLIC_SHOP_RETRY_MESSAGE });
+      }
+      throw error;
+    }
     const rows = await db.select({
       id: products.id,
       name: products.name,
@@ -294,16 +305,24 @@ export function registerSalesRoutes(
       const available = Math.max(0, balance.onHand - balance.reserved);
       if (available > 0) catalog.push(product);
     }
-    res.json({ products: catalog, challenge: await publicShopProtection.issueChallenge(_req.ip || _req.socket.remoteAddress || "") });
+    res.json({ products: catalog, challenge });
   });
 
   app.post("/api/shop/orders", async (req, res) => {
     const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
-    const check = await publicShopProtection.checkSubmission(
-      req.ip || req.socket.remoteAddress || "",
-      body.challenge,
-      body.website,
-    );
+    let check;
+    try {
+      check = await publicShopProtection.checkSubmission(
+        req.ip || req.socket.remoteAddress || "",
+        body.challenge,
+        body.website,
+      );
+    } catch (error) {
+      if (error instanceof PublicShopProtectionUnavailableError) {
+        return res.status(503).json({ error: PUBLIC_SHOP_RETRY_MESSAGE });
+      }
+      throw error;
+    }
     if (!check.ok) {
       await recordPublicShopAttempt(db, check.reason);
       if (check.reason === "rate_limited") {

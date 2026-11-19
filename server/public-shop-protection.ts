@@ -6,6 +6,15 @@ const CHALLENGE_LIFETIME_MS = 30 * 60 * 1_000;
 const MINIMUM_FORM_AGE_MS = 1_500;
 const MAX_CHALLENGES = 10_000;
 
+export const PUBLIC_SHOP_RETRY_MESSAGE = "The shop is temporarily unavailable. Please try again shortly.";
+
+export class PublicShopProtectionUnavailableError extends Error {
+  constructor() {
+    super(PUBLIC_SHOP_RETRY_MESSAGE);
+    this.name = "PublicShopProtectionUnavailableError";
+  }
+}
+
 type Challenge = { ipHash: string; issuedAt: number };
 
 export type ChallengeStore = {
@@ -158,11 +167,15 @@ export class PublicShopProtection {
     const token = this.tokenFactory();
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const ipHash = createHash("sha256").update(ip).digest("hex");
-    await this.challengeStore.issue(tokenHash, { ipHash, issuedAt: now }, {
-      now,
-      lifetimeMs: this.challengeLifetimeMs,
-      maxChallenges: this.maxChallenges,
-    });
+    try {
+      await this.challengeStore.issue(tokenHash, { ipHash, issuedAt: now }, {
+        now,
+        lifetimeMs: this.challengeLifetimeMs,
+        maxChallenges: this.maxChallenges,
+      });
+    } catch {
+      throw new PublicShopProtectionUnavailableError();
+    }
     return token;
   }
 
@@ -170,11 +183,16 @@ export class PublicShopProtection {
     const now = this.now();
 
     const ipHash = createHash("sha256").update(ip).digest("hex");
-    const bucket = await this.orderLimitStore.recordAttempt(ipHash, {
-      now,
-      windowMs: this.orderWindowMs,
-      orderLimit: this.orderLimit,
-    });
+    let bucket: Awaited<ReturnType<OrderLimitStore["recordAttempt"]>>;
+    try {
+      bucket = await this.orderLimitStore.recordAttempt(ipHash, {
+        now,
+        windowMs: this.orderWindowMs,
+        orderLimit: this.orderLimit,
+      });
+    } catch {
+      throw new PublicShopProtectionUnavailableError();
+    }
     if (bucket.count > this.orderLimit) {
       return {
         ok: false,
@@ -186,7 +204,12 @@ export class PublicShopProtection {
     const tokenHash = typeof token === "string"
       ? createHash("sha256").update(token).digest("hex")
       : undefined;
-    const challenge = tokenHash ? await this.challengeStore.consume(tokenHash) : undefined;
+    let challenge: Challenge | undefined;
+    try {
+      challenge = tokenHash ? await this.challengeStore.consume(tokenHash) : undefined;
+    } catch {
+      throw new PublicShopProtectionUnavailableError();
+    }
     if (
       typeof honeypot !== "string"
       || honeypot.trim() !== ""

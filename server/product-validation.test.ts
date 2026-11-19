@@ -4,7 +4,9 @@ import {
   customerInputSchema, customerQuoteInputSchema, importExpenseInputSchema, inventoryAdjustmentInputSchema, inventoryReservationInputSchema, isDuplicateShipmentImportExpense, openingStockCorrectionInputSchema, openingStockInputSchema, productInputSchema, purchaseOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema, shipmentInputSchema,
   publicShopOrderInputSchema, shipmentReceiptSchema, supplierInputSchema, supplierQuoteInputSchema,
 } from "./product-validation";
-import { PublicShopProtection, type ChallengeStore, type OrderLimitStore } from "./public-shop-protection";
+import {
+  PublicShopProtection, PublicShopProtectionUnavailableError, type ChallengeStore, type OrderLimitStore,
+} from "./public-shop-protection";
 
 const validProduct = {
   sku: "mz-001",
@@ -472,4 +474,47 @@ test("rejects filled honeypots, missing, reused, premature, expired, and cross-I
   const expiredToken = await protection.issueChallenge("192.0.2.1");
   now += 5_001;
   assert.deepEqual(await protection.checkSubmission("192.0.2.1", expiredToken, ""), { ok: false, reason: "bot_check" });
+});
+
+test("reports unavailable challenge storage when issuing or consuming challenges", async () => {
+  const failedIssueStore: ChallengeStore = {
+    async issue() { throw new Error("database is unavailable"); },
+    async consume() { return undefined; },
+  };
+  const issueProtection = new PublicShopProtection({
+    challengeStore: failedIssueStore,
+    orderLimitStore: new MemoryOrderLimitStore(),
+  });
+  await assert.rejects(
+    issueProtection.issueChallenge("192.0.2.1"),
+    PublicShopProtectionUnavailableError,
+  );
+
+  const failedConsumeStore: ChallengeStore = {
+    async issue() {},
+    async consume() { throw new Error("database is unavailable"); },
+  };
+  const consumeProtection = new PublicShopProtection({
+    challengeStore: failedConsumeStore,
+    orderLimitStore: new MemoryOrderLimitStore(),
+    minimumFormAgeMs: 0,
+  });
+  await assert.rejects(
+    consumeProtection.checkSubmission("192.0.2.1", "submitted-token", ""),
+    PublicShopProtectionUnavailableError,
+  );
+});
+
+test("reports unavailable order-limit storage instead of accepting an order", async () => {
+  const protection = new PublicShopProtection({
+    challengeStore: new MemoryChallengeStore(),
+    orderLimitStore: {
+      async recordAttempt() { throw new Error("database is unavailable"); },
+    },
+  });
+
+  await assert.rejects(
+    protection.checkSubmission("192.0.2.1", "submitted-token", ""),
+    PublicShopProtectionUnavailableError,
+  );
 });

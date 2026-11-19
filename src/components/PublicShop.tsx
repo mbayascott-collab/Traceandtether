@@ -65,7 +65,24 @@ export default function PublicShop() {
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not submit your order.");
+      if (!response.ok) {
+        const message = data.error || "Could not submit your order.";
+        if (response.status === 503) {
+          setChallenge("");
+          setError(message);
+          try {
+            const refresh = await fetch("/api/shop/products");
+            const refreshed = await refresh.json();
+            if (refresh.ok && typeof refreshed.challenge === "string") {
+              setChallenge(refreshed.challenge);
+            }
+          } catch {
+            // Keep the server's retry message visible if protection is still unavailable.
+          }
+          return;
+        }
+        throw new Error(message);
+      }
       setOrderNumber(data.orderNumber);
       setCart({});
     } catch (reason) {
@@ -73,7 +90,9 @@ export default function PublicShop() {
       try {
         const refresh = await fetch("/api/shop/products");
         const data = await refresh.json();
-        if (!refresh.ok || typeof data.challenge !== "string") throw new Error("Could not refresh the order form.");
+        if (!refresh.ok || typeof data.challenge !== "string") {
+          throw new Error(data.error || "Could not refresh the order form.");
+        }
         setChallenge(data.challenge);
       } catch {
         setChallenge("");
