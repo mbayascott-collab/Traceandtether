@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  inventoryLocationValuesCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -52,6 +52,15 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const formatFileSize = (bytes: number) => bytes < 1024 * 1024
     ? `${(bytes / 1024).toFixed(1)} KB`
     : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  function downloadLocationValuesCsv() {
+    const csv = inventoryLocationValuesCsv(locationTotals);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `inventory-values-by-location-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -89,7 +98,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <p className="report-footnote field-full">{locations.map((location) => location.name).join(" · ") || "Main location will be created when stock is first recorded."}</p>
       </form>
       <section className="panel inventory-location-summary" aria-labelledby="inventory-location-totals-heading">
-        <h2 id="inventory-location-totals-heading">Inventory totals by location</h2>
+        <div className="toolbar"><h2 id="inventory-location-totals-heading">Inventory totals by location</h2><button type="button" className="button button-secondary" onClick={downloadLocationValuesCsv} disabled={!locationTotals.length}>Export CSV</button></div>
         <p className="report-footnote">Totals include all products, even when the product list is filtered. Locations without stock show zero units and ZMW 0.00.</p>
         {locationTotals.length
           ? <ul className="inventory-location-totals">{locationTotals.map((location) =>

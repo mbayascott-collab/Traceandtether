@@ -479,6 +479,29 @@ export function inventoryMovementHistoryCsv(movements: InventoryMovement[]): str
   ];
   return rows.map((row) => row.map(safeCsvCell).join(",")).join("\r\n");
 }
+function inventoryValueCents(value: string): bigint {
+  if (!/^-?\d+(?:\.\d{1,2})?$/.test(value)) throw new Error("Inventory values must be valid ZMW amounts.");
+  const negative = value.startsWith("-");
+  const unsigned = negative ? value.slice(1) : value;
+  const [whole, fraction = ""] = unsigned.split(".");
+  const amount = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+  return negative ? -amount : amount;
+}
+function formatInventoryValueCents(value: bigint): string {
+  const absolute = value < 0n ? -value : value;
+  return `${value < 0n ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`;
+}
+export function inventoryLocationValuesCsv(locationTotals: InventoryLocationTotal[]): string {
+  const totalCents = locationTotals.reduce((total, location) => total + inventoryValueCents(location.stockValueZmw), 0n);
+  const rows = [
+    ["Location", "Stock value (ZMW)"],
+    ...locationTotals.map((location) => [location.name, formatInventoryValueCents(inventoryValueCents(location.stockValueZmw))]),
+    ["Overall total", formatInventoryValueCents(totalCents)],
+  ];
+  return rows.map(([name, value], index) =>
+    `${safeCsvCell(name)},${index === 0 ? safeCsvCell(value) : `"${value}"`}`
+  ).join("\r\n");
+}
 export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: number | null, download = false): string {
   const base = `/api/inventory/movements/${movementId}/opening-evidence${evidenceId == null ? "" : `/${evidenceId}`}`;
   return download ? `${base}?download=1` : base;

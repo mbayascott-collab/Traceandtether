@@ -131,6 +131,7 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       [totalsByLocation.get(emptyLocation.id)?.onHand, totalsByLocation.get(emptyLocation.id)?.reserved, totalsByLocation.get(emptyLocation.id)?.available],
       [0, 0, 0],
     );
+    assert.equal(totalsByLocation.get(emptyLocation.id)?.stockValueZmw, "0.00");
 
     const accountLines = await db.select({
       productId: journalLines.productId,
