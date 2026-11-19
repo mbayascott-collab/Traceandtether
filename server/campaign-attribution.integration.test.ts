@@ -2,11 +2,88 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
   inventoryMovements, marketingAttributions, marketingCampaigns, products, salesOrders,
 } from "../shared/schema";
+
+test("only owners can replace campaign links", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const requiredColumns = new Set([
+    "marketing_campaigns.tracking_code",
+    "business_audit_logs.actor_email",
+  ]);
+  const availableColumns = await pool.query<{ table_name: string; column_name: string }>(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND (table_name, column_name) IN (
+         ('marketing_campaigns', 'tracking_code'),
+         ('business_audit_logs', 'actor_email')
+       )`,
+  );
+  for (const column of availableColumns.rows) requiredColumns.delete(`${column.table_name}.${column.column_name}`);
+  if (requiredColumns.size > 0) {
+    t.skip("requires campaign-link and business-audit migrations");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const campaignName = `Campaign link authorization test ${suffix}`;
+  const trackingCode = randomUUID();
+  const actorEmail = `campaign-link-auth-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const access: RequestHandler = (req, res, next) => {
+    const role = req.header("x-test-role") === "manager" ? "manager" : "owner";
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role };
+    next();
+  };
+  registerMarketingRoutes(app, access);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let campaignId: number | undefined;
+
+  try {
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: campaignName, trackingCode, status: "active",
+    }).returning();
+    campaignId = campaign.id;
+    const replaceLink = async (role: "manager" | "owner") => {
+      const response = await fetch(`${baseUrl}/api/marketing/campaigns/${campaign.id}/replace-link`, {
+        method: "POST",
+        headers: { "x-test-role": role },
+      });
+      return { response, payload: await response.json() as any };
+    };
+
+    const denied = await replaceLink("manager");
+    assert.equal(denied.response.status, 403, JSON.stringify(denied.payload));
+    const [unchangedCampaign] = await db.select({ trackingCode: marketingCampaigns.trackingCode })
+      .from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(unchangedCampaign?.trackingCode, trackingCode);
+
+    const allowed = await replaceLink("owner");
+    assert.equal(allowed.response.status, 200, JSON.stringify(allowed.payload));
+    assert.ok(allowed.payload.campaign.trackingCode);
+    assert.notEqual(allowed.payload.campaign.trackingCode, trackingCode);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (campaignId) {
+      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    }
+  }
+});
 
 test("public shop campaign links attribute orders and reports count them without exposing campaign details", {
   skip: !process.env.DATABASE_URL,
