@@ -69,17 +69,13 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const stockValue = new Map<number, bigint>();
     movements.forEach((row) => {
       onHand.set(row.productId, (onHand.get(row.productId) ?? 0) + row.delta);
-      if (row.locationId !== null) {
-        const key = `${row.productId}:${row.locationId}`;
-        byLocation.set(key, (byLocation.get(key) ?? 0) + row.delta);
-      }
+      const key = `${row.productId}:${row.locationId}`;
+      byLocation.set(key, (byLocation.get(key) ?? 0) + row.delta);
     });
     reservations.forEach((row) => {
       reserved.set(row.productId, (reserved.get(row.productId) ?? 0) + row.quantity);
-      if (row.locationId !== null) {
-        const key = `${row.productId}:${row.locationId}`;
-        reservedByLocation.set(key, (reservedByLocation.get(key) ?? 0) + row.quantity);
-      }
+      const key = `${row.productId}:${row.locationId}`;
+      reservedByLocation.set(key, (reservedByLocation.get(key) ?? 0) + row.quantity);
     });
     inventoryLines.forEach((row) => {
       if (row.productId === null) return;
