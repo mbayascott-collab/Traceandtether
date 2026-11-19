@@ -31,11 +31,19 @@ export interface LandedCostOrder extends PurchaseOrder {
   allocations: { expenseId: number; lineId: number; amountZmw: string }[];
   lines: (PurchaseOrderLine & { allocatedExpensesZmw: string; purchaseUnitCostZmw: string; landedUnitCostZmw: string })[];
   adjustmentPreview: {
+    allocatedExpensesZmw: string;
+    receiptClearedTotalZmw: string;
+    priorAdjustmentsClearedZmw: string;
     clearingBalanceZmw: string;
     adjustmentAvailableZmw: string;
     unpostedClearingZmw: string;
     canPost: boolean;
     hasNegativeLine: boolean;
+    receipts: {
+      journalEntryId: number; entryNumber: string; entryDate: string; memo: string;
+      shipmentReference: string | null; productName: string; sku: string; quantity: number;
+      clearedAmountZmw: string;
+    }[];
     lines: {
       lineId: number; productId: number; productName: string; stockedQuantity: number; onHand: number;
       averageUnitCostZmw: string; adjustmentZmw: string; inventoryZmw: string; cogsZmw: string;

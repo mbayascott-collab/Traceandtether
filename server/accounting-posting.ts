@@ -1,9 +1,9 @@
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import {
   accountingAccounts, inventoryMovements, journalEntries, journalLines,
-  products, purchaseOrderLines, purchaseOrders, shipmentLines,
+  products, purchaseOrderLines, purchaseOrders, shipmentLines, shipments,
 } from "../shared/schema";
 import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 
@@ -236,11 +236,25 @@ export type LandedCostAdjustmentLine = {
 };
 
 export type LandedCostAdjustmentPreview = {
+  allocatedExpensesZmw: string;
+  receiptClearedTotalZmw: string;
+  priorAdjustmentsClearedZmw: string;
   clearingBalanceZmw: string;
   adjustmentAvailableZmw: string;
   unpostedClearingZmw: string;
   canPost: boolean;
   hasNegativeLine: boolean;
+  receipts: {
+    journalEntryId: number;
+    entryNumber: string;
+    entryDate: string;
+    memo: string;
+    shipmentReference: string | null;
+    productName: string;
+    sku: string;
+    quantity: number;
+    clearedAmountZmw: string;
+  }[];
   lines: LandedCostAdjustmentLine[];
 };
 
@@ -308,20 +322,38 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
     ? await tx.select({
       id: shipmentLines.id, purchaseOrderLineId: shipmentLines.purchaseOrderLineId,
       quantity: shipmentLines.quantityStocked,
+      shipmentReference: shipments.shipmentReference,
+      productName: products.name, sku: products.sku,
     }).from(shipmentLines)
+      .innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
       .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
+      .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
       .where(inArray(purchaseOrderLines.id, lineIds))
     : [];
   const stockedByLine = new Map<number, number>();
   const shipmentLineToOrderLine = new Map<number, number>();
+  const receiptLineDetails = new Map<number, (typeof receipts)[number]>();
   receipts.forEach((receipt: any) => {
     stockedByLine.set(receipt.purchaseOrderLineId, (stockedByLine.get(receipt.purchaseOrderLineId) ?? 0) + receipt.quantity);
     shipmentLineToOrderLine.set(receipt.id, receipt.purchaseOrderLineId);
+    receiptLineDetails.set(receipt.id, receipt);
   });
 
   const actualClearingByLine = new Map<number, bigint>();
-  const actualReceiptClearing = await tx.select({
+  const receiptJournals = await tx.select({
+    id: journalEntries.id,
+    entryNumber: journalEntries.entryNumber,
+    entryDate: journalEntries.entryDate,
+    memo: journalEntries.memo,
     shipmentLineId: journalEntries.shipmentLineId,
+    movementSourceKey: inventoryMovements.sourceKey,
+    movementQuantity: inventoryMovements.quantityDelta,
+  }).from(journalEntries)
+    .leftJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+    .where(eq(journalEntries.sourceType, "stock_receipt"))
+    .orderBy(asc(journalEntries.entryDate), asc(journalEntries.id));
+  const clearedReceiptRows = await tx.select({
+    journalEntryId: journalEntries.id,
     creditZmw: journalLines.creditZmw,
   }).from(journalEntries)
     .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
@@ -330,11 +362,37 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
       eq(journalLines.accountId, clearingAccount.id),
       gt(journalLines.creditZmw, "0"),
     ));
-  for (const row of actualReceiptClearing) {
-    if (row.shipmentLineId === null) continue;
-    const orderLineId = shipmentLineToOrderLine.get(row.shipmentLineId);
-    if (orderLineId === undefined) continue;
-    actualClearingByLine.set(orderLineId, (actualClearingByLine.get(orderLineId) ?? 0n) + cents(row.creditZmw));
+  const clearedByReceiptJournal = new Map<number, bigint>();
+  clearedReceiptRows.forEach((row: any) => {
+    clearedByReceiptJournal.set(
+      row.journalEntryId,
+      (clearedByReceiptJournal.get(row.journalEntryId) ?? 0n) + cents(row.creditZmw),
+    );
+  });
+  const receiptDetails: LandedCostAdjustmentPreview["receipts"] = [];
+  for (const journal of receiptJournals) {
+    let shipmentLineId = journal.shipmentLineId;
+    if (shipmentLineId === null && journal.movementSourceKey) {
+      const match = /^shipment-line-(\d+)-to-\d+$/.exec(journal.movementSourceKey);
+      if (match) shipmentLineId = Number(match[1]);
+    }
+    const orderLineId = shipmentLineId === null ? undefined : shipmentLineToOrderLine.get(shipmentLineId);
+    if (orderLineId === undefined || shipmentLineId === null) continue;
+    const line = receiptLineDetails.get(shipmentLineId);
+    if (!line) continue;
+    const clearedAmount = clearedByReceiptJournal.get(journal.id) ?? 0n;
+    actualClearingByLine.set(orderLineId, (actualClearingByLine.get(orderLineId) ?? 0n) + clearedAmount);
+    receiptDetails.push({
+      journalEntryId: journal.id,
+      entryNumber: journal.entryNumber,
+      entryDate: journal.entryDate,
+      memo: journal.memo,
+      shipmentReference: line.shipmentReference,
+      productName: line.productName,
+      sku: line.sku,
+      quantity: journal.movementQuantity ?? 0,
+      clearedAmountZmw: formatCents(clearedAmount),
+    });
   }
 
   const priorAdjustmentRows = await tx.select({
@@ -415,11 +473,15 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
   const unpostedCents = clearingBalanceCents - adjustmentCents;
 
   return {
+    allocatedExpensesZmw: formatCents(totalExpenseCents),
+    receiptClearedTotalZmw: formatCents(receiptClearingCents),
+    priorAdjustmentsClearedZmw: formatCents(priorClearingCredits),
     clearingBalanceZmw: formatCents(clearingBalanceCents),
     adjustmentAvailableZmw: formatCents(adjustmentCents),
     unpostedClearingZmw: formatCents(unpostedCents),
     canPost: adjustmentCents > 0n && !hasNegativeLine,
     hasNegativeLine,
+    receipts: receiptDetails,
     lines: corrections.map((line: any) => ({
       lineId: line.lineId, productId: line.productId, productName: line.productName,
       stockedQuantity: line.stockedQuantity, onHand: line.onHand,

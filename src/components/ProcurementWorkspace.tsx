@@ -164,6 +164,20 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
         {o.adjustmentPreview && <>
           <h3>Outstanding clearing and reviewed adjustment</h3>
           <p>Clearing balance: <strong>{money(o.adjustmentPreview.clearingBalanceZmw)}</strong> · Ready for posted stock: <strong>{money(o.adjustmentPreview.adjustmentAvailableZmw)}</strong> · Still awaiting stock posting: <strong>{money(o.adjustmentPreview.unpostedClearingZmw)}</strong></p>
+          <h3>Receipt clearing detail</h3>
+          <p className="report-footnote">
+            Allocated expenses {money(o.adjustmentPreview.allocatedExpensesZmw)} − receipt clearings {money(o.adjustmentPreview.receiptClearedTotalZmw)} − earlier adjustments {money(o.adjustmentPreview.priorAdjustmentsClearedZmw)} = clearing balance {money(o.adjustmentPreview.clearingBalanceZmw)}.
+          </p>
+          {o.adjustmentPreview.receipts.length > 0
+            ? <div className="data-table-wrap"><table><thead><tr><th>Receipt journal</th><th>Date</th><th>Shipment</th><th>Product</th><th>Qty received</th><th>Cleared (ZMW)</th></tr></thead><tbody>
+              {o.adjustmentPreview.receipts.map((receipt) => <tr key={receipt.journalEntryId}>
+                <td>{receipt.entryNumber}<br /><span className="report-footnote">{receipt.memo}</span></td>
+                <td>{receipt.entryDate}</td><td>{receipt.shipmentReference || "—"}</td>
+                <td>{receipt.productName} · {receipt.sku}</td><td>{receipt.quantity}</td>
+                <td className="money-cell">{money(receipt.clearedAmountZmw)}</td>
+              </tr>)}
+            </tbody><tfoot><tr><th colSpan={5}>Total cleared by receipts</th><th className="money-cell">{money(o.adjustmentPreview.receiptClearedTotalZmw)}</th></tr></tfoot></table></div>
+            : <p className="report-footnote">No linked receipt journals have cleared landed costs for this order.</p>}
           <div className="data-table-wrap"><table><thead><tr><th>Product</th><th>Posted qty</th><th>On hand</th><th>Weighted-average unit value</th><th>Correction</th><th>Inventory</th><th>Cost of goods sold</th></tr></thead><tbody>
             {o.adjustmentPreview.lines.map((line) => <tr key={line.lineId}>
               <td>{line.productName} · {o.lines.find((item) => item.id === line.lineId)?.sku}</td>

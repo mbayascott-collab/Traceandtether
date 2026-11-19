@@ -149,11 +149,22 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(journalEntries.sourceId, earlyReceiptMovement.id),
     ));
     assert.equal(earlyReceiptEntry.shipmentLineId, shipmentLineId);
-    // Simulate a historical receipt whose movement key cannot be backfilled.
-    await db.update(inventoryMovements).set({ sourceKey: `legacy-receipt-${suffix}` })
-      .where(eq(inventoryMovements.id, earlyReceiptMovement.id));
+    // A legacy journal without shipmentLineId can still be recognized when
+    // its original shipment-line movement key is intact.
     await db.update(journalEntries).set({ shipmentLineId: null })
       .where(eq(journalEntries.id, earlyReceiptEntry.id));
+    const { orders: [identifiedLegacyReceipt] } = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    assert.deepEqual(identifiedLegacyReceipt.adjustmentPreview.receipts.map((receipt: any) => [
+      receipt.entryNumber, receipt.quantity, receipt.clearedAmountZmw,
+    ]), [[earlyReceiptEntry.entryNumber, 4, "400.00"]]);
+    assert.equal(identifiedLegacyReceipt.adjustmentPreview.receiptClearedTotalZmw, "400.00");
+    assert.equal(identifiedLegacyReceipt.adjustmentPreview.clearingBalanceZmw, "600.00");
+
+    // Simulate an older record whose movement key cannot be backfilled.
+    await db.update(inventoryMovements).set({ sourceKey: `legacy-receipt-${suffix}` })
+      .where(eq(inventoryMovements.id, earlyReceiptMovement.id));
     const { journals: unresolvedReceipts } = await request(
       "/api/inventory/unlinked-receipt-journals", undefined, 200,
     );
@@ -186,6 +197,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(afterReceiptLink.adjustmentPreview.adjustmentAvailableZmw, "0.00");
     assert.equal(afterReceiptLink.adjustmentPreview.canPost, false);
     assert.equal(afterReceiptLink.adjustmentPreview.unpostedClearingZmw, "600.00");
+    assert.deepEqual(afterReceiptLink.adjustmentPreview.receipts.map((receipt: any) => receipt.clearedAmountZmw), ["400.00"]);
+    assert.equal(afterReceiptLink.adjustmentPreview.receiptClearedTotalZmw, "400.00");
 
     const { order: salesOrder } = await request("/api/sales-orders", {
       customerId,
@@ -308,6 +321,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(incrementalPreview.clearingBalanceZmw, "625.00");
     assert.equal(incrementalPreview.adjustmentAvailableZmw, "100.00");
     assert.equal(incrementalPreview.unpostedClearingZmw, "525.00");
+    assert.deepEqual(incrementalPreview.receipts.map((receipt: any) => receipt.clearedAmountZmw), ["400.00", "525.00"]);
+    assert.equal(incrementalPreview.receiptClearedTotalZmw, "925.00");
+    assert.equal(incrementalPreview.allocatedExpensesZmw, "1750.00");
+    assert.equal(incrementalPreview.priorAdjustmentsClearedZmw, "200.00");
+    assert.equal(
+      Number(incrementalPreview.allocatedExpensesZmw)
+        - Number(incrementalPreview.receiptClearedTotalZmw)
+        - Number(incrementalPreview.priorAdjustmentsClearedZmw),
+      Number(incrementalPreview.clearingBalanceZmw),
+    );
     assert.equal(incrementalPreview.canPost, true);
     assert.deepEqual(incrementalPreview.lines.map((line: any) => [
       line.stockedQuantity, line.onHand, line.adjustmentZmw, line.inventoryZmw, line.cogsZmw,
@@ -356,6 +379,11 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(afterSecondReceipt.adjustmentPreview.clearingBalanceZmw, "0.00");
     assert.equal(afterSecondReceipt.adjustmentPreview.adjustmentAvailableZmw, "0.00");
     assert.equal(afterSecondReceipt.adjustmentPreview.unpostedClearingZmw, "0.00");
+    assert.deepEqual(afterSecondReceipt.adjustmentPreview.receipts.map((receipt: any) => receipt.clearedAmountZmw), [
+      "400.00", "525.00", "525.00",
+    ]);
+    assert.equal(afterSecondReceipt.adjustmentPreview.receiptClearedTotalZmw, "1450.00");
+    assert.equal(afterSecondReceipt.adjustmentPreview.priorAdjustmentsClearedZmw, "300.00");
 
     const [expenseEntries, receiptMovements, adjustmentEntries, deliveryEntries] = await Promise.all([
       db.select().from(journalEntries).where(and(
