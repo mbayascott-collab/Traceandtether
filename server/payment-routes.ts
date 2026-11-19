@@ -748,6 +748,7 @@ export function registerPaymentRoutes(
     let result: { payment?: typeof businessPayments.$inferSelect; duplicate?: boolean; error?: string; status?: number };
     try {
       result = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(0, hashtext(${"payment:" + input.idempotencyKey}))`);
       const [sameAttempt] = await tx.select().from(businessPayments)
         .where(eq(businessPayments.idempotencyKey, input.idempotencyKey)).limit(1);
       if (sameAttempt) {

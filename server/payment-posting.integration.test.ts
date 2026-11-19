@@ -93,6 +93,28 @@ test("payment routes post both directions to the selected funds account", {
     return { entry, lines: postingLines };
   };
 
+  const assertIdempotentRetry = async (
+    body: unknown,
+    original: typeof businessPayments.$inferSelect,
+  ) => {
+    const retry = await sendPayment(body);
+    assert.equal(retry.status, 200, JSON.stringify(retry.payload));
+    assert.deepEqual(retry.payload.payment, original, "retry must return the original payment");
+    assert.equal(
+      (await db.select().from(businessPayments)
+        .where(eq(businessPayments.idempotencyKey, original.idempotencyKey))).length,
+      1,
+      "retry must leave exactly one payment record",
+    );
+    assert.equal(
+      (await db.select().from(journalEntries)
+        .where(eq(journalEntries.sourceKey, `payment-${original.id}`))).length,
+      1,
+      "retry must leave exactly one journal",
+    );
+    await paymentJournal(original.id);
+  };
+
   const paymentRequest = (
     direction: "customer_receipt" | "supplier_payment",
     orderId: number,
@@ -195,10 +217,10 @@ test("payment routes post both directions to the selected funds account", {
 
     // Keep a pre-existing payment and its journal as a sentinel while other
     // methods are posted through the same route.
-    const priorCustomerPayment = await request(
-      paymentRequest("customer_receipt", salesOrderId, "cash"),
-    );
+    const priorCustomerRequest = paymentRequest("customer_receipt", salesOrderId, "cash");
+    const priorCustomerPayment = await request(priorCustomerRequest);
     paymentIds.push(priorCustomerPayment.id);
+    await assertIdempotentRetry(priorCustomerRequest, priorCustomerPayment);
     const priorCustomerPaymentSnapshot = {
       payment: (await db.select().from(businessPayments)
         .where(eq(businessPayments.id, priorCustomerPayment.id)))[0],
@@ -206,10 +228,10 @@ test("payment routes post both directions to the selected funds account", {
     };
     await assertPostedToFundsAccount(priorCustomerPayment, "cash_on_hand", "customer_receipt");
 
-    const priorSupplierPayment = await request(
-      paymentRequest("supplier_payment", purchaseOrderId, "bank_transfer"),
-    );
+    const priorSupplierRequest = paymentRequest("supplier_payment", purchaseOrderId, "bank_transfer");
+    const priorSupplierPayment = await request(priorSupplierRequest);
     paymentIds.push(priorSupplierPayment.id);
+    await assertIdempotentRetry(priorSupplierRequest, priorSupplierPayment);
     const priorSupplierPaymentSnapshot = {
       payment: (await db.select().from(businessPayments)
         .where(eq(businessPayments.id, priorSupplierPayment.id)))[0],
