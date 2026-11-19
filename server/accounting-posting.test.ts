@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
 import { inventoryMovements, journalEntries, paymentStatementLines } from "../shared/schema";
 import {
-  allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByDelivery, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -67,24 +67,37 @@ test("sums delivery costs in exact cents and flags deliveries without recorded c
 });
 
 test("allocates product landed-cost adjustments once across deliveries by recorded cost", () => {
+  const deliveries = [
+    { deliveryId: 10, orderId: 1, productId: 4 },
+    { deliveryId: 11, orderId: 2, productId: 4 },
+    { deliveryId: 12, orderId: 2, productId: 4 },
+    { deliveryId: 13, orderId: 3, productId: 5 },
+  ];
+  const deliveryCostLines = [
+    { deliveryId: 10, productId: 4, debitZmw: "1.00" },
+    { deliveryId: 11, productId: 4, debitZmw: "2.00" },
+    { deliveryId: 12, productId: 4, debitZmw: "0.00" },
+    { deliveryId: 13, productId: 5, debitZmw: "9.00" },
+  ];
+  const adjustmentLines = [
+    { productId: 4, debitZmw: "1.00", creditZmw: "0.00" },
+    { productId: 5, debitZmw: "0.50", creditZmw: "0.00" },
+    { productId: null, debitZmw: "100.00", creditZmw: "0.00" },
+  ];
+  const allocatedByDelivery = allocateLandedCostAdjustmentsByDelivery(
+    deliveries,
+    deliveryCostLines,
+    adjustmentLines,
+  );
+  assert.deepEqual([...allocatedByDelivery].sort(([a], [b]) => a - b), [
+    [10, 33n], [11, 67n], [13, 50n],
+  ]);
+  assert.equal([...allocatedByDelivery.values()].reduce((total, value) => total + value, 0n), 150n);
+
   const allocated = allocateLandedCostAdjustmentsByOrder(
-    [
-      { deliveryId: 10, orderId: 1, productId: 4 },
-      { deliveryId: 11, orderId: 2, productId: 4 },
-      { deliveryId: 12, orderId: 2, productId: 4 },
-      { deliveryId: 13, orderId: 3, productId: 5 },
-    ],
-    [
-      { deliveryId: 10, productId: 4, debitZmw: "1.00" },
-      { deliveryId: 11, productId: 4, debitZmw: "2.00" },
-      { deliveryId: 12, productId: 4, debitZmw: "0.00" },
-      { deliveryId: 13, productId: 5, debitZmw: "9.00" },
-    ],
-    [
-      { productId: 4, debitZmw: "1.00", creditZmw: "0.00" },
-      { productId: 5, debitZmw: "0.50", creditZmw: "0.00" },
-      { productId: null, debitZmw: "100.00", creditZmw: "0.00" },
-    ],
+    deliveries,
+    deliveryCostLines,
+    adjustmentLines,
   );
   assert.deepEqual([...allocated].sort(([a], [b]) => a - b), [[1, 33n], [2, 67n], [3, 50n]]);
   assert.equal([...allocated.values()].reduce((total, value) => total + value, 0n), 150n);

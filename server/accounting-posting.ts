@@ -113,7 +113,7 @@ export function buildDeliveryCostTotals(
  * product-level journal has no order link, so this pooled allocation keeps
  * the source accounting entry intact while assigning every cent exactly once.
  */
-export function allocateLandedCostAdjustmentsByOrder(
+export function allocateLandedCostAdjustmentsByDelivery(
   deliveries: { deliveryId: number; orderId: number; productId: number }[],
   deliveryCostLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
   adjustmentLines: { productId: number | null; debitZmw: string; creditZmw: string }[],
@@ -142,7 +142,7 @@ export function allocateLandedCostAdjustmentsByOrder(
     );
   }
 
-  const adjustmentByOrder = new Map<number, bigint>();
+  const adjustmentByDelivery = new Map<number, bigint>();
   for (const [productId, adjustment] of adjustmentsByProduct) {
     if (adjustment === 0n) continue;
     const weights = weightsByProduct.get(productId);
@@ -170,12 +170,29 @@ export function allocateLandedCostAdjustmentsByOrder(
     for (const allocation of allocations) {
       const extraCent = remaining > 0n ? 1n : 0n;
       const signedAmount = (adjustment < 0n ? -1n : 1n) * (allocation.amount + extraCent);
-      adjustmentByOrder.set(
-        allocation.orderId,
-        (adjustmentByOrder.get(allocation.orderId) ?? 0n) + signedAmount,
+      adjustmentByDelivery.set(
+        allocation.deliveryId,
+        (adjustmentByDelivery.get(allocation.deliveryId) ?? 0n) + signedAmount,
       );
       remaining -= extraCent;
     }
+  }
+  return adjustmentByDelivery;
+}
+
+export function allocateLandedCostAdjustmentsByOrder(
+  deliveries: { deliveryId: number; orderId: number; productId: number }[],
+  deliveryCostLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
+  adjustmentLines: { productId: number | null; debitZmw: string; creditZmw: string }[],
+) {
+  const orderByDelivery = new Map(deliveries.map(({ deliveryId, orderId }) => [deliveryId, orderId]));
+  const adjustmentByOrder = new Map<number, bigint>();
+  for (const [deliveryId, adjustment] of allocateLandedCostAdjustmentsByDelivery(
+    deliveries, deliveryCostLines, adjustmentLines,
+  )) {
+    const orderId = orderByDelivery.get(deliveryId);
+    if (orderId === undefined) continue;
+    adjustmentByOrder.set(orderId, (adjustmentByOrder.get(orderId) ?? 0n) + adjustment);
   }
   return adjustmentByOrder;
 }

@@ -2661,6 +2661,14 @@ textarea:focus-visible {
 .marketing-report-cards strong { color: var(--ink); font-size: 18px; }
 .marketing-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 16px; }
 .marketing-report-grid .table-wrap { min-width: 0; }
+.campaign-adjustment-cell { display: grid; gap: 5px; min-width: 150px; }
+.campaign-adjustment-cell > strong { color: var(--ink); }
+.campaign-adjustment-details { color: var(--muted); font-size: 10px; }
+.campaign-adjustment-details summary { cursor: pointer; color: var(--teal); font-weight: 700; }
+.campaign-adjustment-details table { margin-top: 8px; border-collapse: collapse; font-size: 10px; }
+.campaign-adjustment-details th,
+.campaign-adjustment-details td { padding: 5px 7px; border: 1px solid var(--line); white-space: nowrap; }
+.campaign-adjustment-details th { color: var(--ink); }
 .marketing-report-warning { margin: 0 16px; padding: 12px 14px; border: 1px solid #d99b65; border-radius: 8px; background: #fff5e9; color: #70421e; font-size: 12px; }
 .marketing-report-warning ul { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 8px 0 0; padding-left: 18px; }
 .marketing-segment-list { display: grid; gap: 12px; padding: 16px 16px 0; }

@@ -370,6 +370,17 @@ test("marketing report counts partial campaign deliveries once and matches poste
       postSaleEntry(fullDeliveryTwo.id, "cogs", "60.00"),
       postSaleEntry(missingDeliveryOne.id, "cogs", "20.00"),
     ]);
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-late-adjustment`,
+      sourceType: "landed_cost_adjustment",
+      sourceId: product.id,
+      memo: `${prefix} late landed-cost adjustment`,
+      entryDate: reportDate,
+      lines: [
+        { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "11.00" },
+        { accountKey: "inventory", productId: product.id, creditZmw: "11.00" },
+      ],
+    }));
 
     const campaignExpense = await request("/api/marketing/expenses", {
       campaignId: fullyCostedCampaign.id,
@@ -435,27 +446,65 @@ test("marketing report counts partial campaign deliveries once and matches poste
       orderCount: fullCampaign.orderCount,
       attributedRevenueZmw: fullCampaign.attributedRevenueZmw,
       productCostZmw: fullCampaign.productCostZmw,
+      landedCostAdjustmentZmw: fullCampaign.landedCostAdjustmentZmw,
+      landedCostAdjustmentDeliveries: fullCampaign.landedCostAdjustmentDeliveries.map(
+        (delivery: { deliveryNumber: string; orderNumber: string; deliveryDate: string; adjustmentZmw: string }) => ({
+          deliveryNumber: delivery.deliveryNumber,
+          orderNumber: delivery.orderNumber,
+          deliveryDate: delivery.deliveryDate,
+          adjustmentZmw: delivery.adjustmentZmw,
+        }),
+      ),
       spendZmw: fullCampaign.spendZmw,
       netContributionZmw: fullCampaign.netContributionZmw,
       missingCostOrders: fullCampaign.missingCostOrders,
     }, {
       orderCount: 1,
       attributedRevenueZmw: "300.00",
-      productCostZmw: "90.00",
+      productCostZmw: "99.00",
+      landedCostAdjustmentZmw: "9.00",
+      landedCostAdjustmentDeliveries: [
+        {
+          deliveryNumber: `MR-${suffix.slice(0, 12)}-F1`,
+          orderNumber: fullyCostedOrder.orderNumber,
+          deliveryDate: reportDate,
+          adjustmentZmw: "3.00",
+        },
+        {
+          deliveryNumber: `MR-${suffix.slice(0, 12)}-F2`,
+          orderNumber: fullyCostedOrder.orderNumber,
+          deliveryDate: reportDate,
+          adjustmentZmw: "6.00",
+        },
+      ],
       spendZmw: "7.58",
-      netContributionZmw: "202.42",
+      netContributionZmw: "193.42",
       missingCostOrders: [],
     });
     assert.deepEqual({
       orderCount: missingCampaign.orderCount,
       attributedRevenueZmw: missingCampaign.attributedRevenueZmw,
       productCostZmw: missingCampaign.productCostZmw,
+      landedCostAdjustmentZmw: missingCampaign.landedCostAdjustmentZmw,
+      landedCostAdjustmentDeliveries: missingCampaign.landedCostAdjustmentDeliveries.map(
+        (delivery: { deliveryNumber: string; orderNumber: string; adjustmentZmw: string }) => ({
+          deliveryNumber: delivery.deliveryNumber,
+          orderNumber: delivery.orderNumber,
+          adjustmentZmw: delivery.adjustmentZmw,
+        }),
+      ),
       netContributionZmw: missingCampaign.netContributionZmw,
       missingCostOrders: missingCampaign.missingCostOrders,
     }, {
       orderCount: 1,
       attributedRevenueZmw: "100.00",
-      productCostZmw: "20.00",
+      productCostZmw: "22.00",
+      landedCostAdjustmentZmw: "2.00",
+      landedCostAdjustmentDeliveries: [{
+        deliveryNumber: `MR-${suffix.slice(0, 12)}-M1`,
+        orderNumber: missingCostOrder.orderNumber,
+        adjustmentZmw: "2.00",
+      }],
       netContributionZmw: null,
       missingCostOrders: [missingCostOrder.orderNumber],
     });
@@ -490,7 +539,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
     assert.equal(
       (BigInt(report.payload.totals.productCostZmw.replace(".", "")) -
         BigInt(baseline.payload.totals.productCostZmw.replace(".", ""))).toString(),
-      "11000",
+      "12100",
     );
     assert.equal(report.payload.totals.netContributionZmw, null);
     assert.equal(
