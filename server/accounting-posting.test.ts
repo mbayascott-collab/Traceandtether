@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { databaseErrorStatus } from "./database-errors";
 import { inventoryMovements, journalEntries, paymentStatementLines } from "../shared/schema";
 import {
-  allocateInventoryValueByLocationCents, allocateLandedCostAdjustmentsByDelivery, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
+  allocateInventoryValueByLocationCents, allocateLandedCostAdjustments, allocateLandedCostAdjustmentsByDelivery, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, buildOpeningBalanceLines, buildOpeningStockLines, cashAccountKeyForMethod, cents, formatCents, journalLinesAreBalanced,
   buildOwnerFundLines, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, reversePostingLines, splitLandedCostCorrection, weightedAverageUnitCostCents,
 } from "./accounting-posting";
 
@@ -104,12 +104,21 @@ test("allocates product landed-cost adjustments once across deliveries by record
 });
 
 test("does not invent a delivery allocation when product COGS has no delivery-cost basis", () => {
-  const allocated = allocateLandedCostAdjustmentsByOrder(
+  const missingBasis = allocateLandedCostAdjustments(
     [{ deliveryId: 10, orderId: 1, productId: 4 }],
-    [{ deliveryId: 10, productId: 4, debitZmw: "0.00" }],
+    [],
     [{ productId: 4, debitZmw: "25.00", creditZmw: "0.00" }],
   );
-  assert.equal(allocated.size, 0);
+  assert.equal(missingBasis.adjustmentByDelivery.size, 0);
+  assert.deepEqual([...missingBasis.unallocatedByProduct], [[4, 2_500n]]);
+
+  const zeroBasis = allocateLandedCostAdjustments(
+    [{ deliveryId: 11, orderId: 2, productId: 5 }],
+    [{ deliveryId: 11, productId: 5, debitZmw: "0.00" }],
+    [{ productId: 5, debitZmw: "0.00", creditZmw: "12.34" }],
+  );
+  assert.equal(zeroBasis.adjustmentByDelivery.size, 0);
+  assert.deepEqual([...zeroBasis.unallocatedByProduct], [[5, -1_234n]]);
 });
 
 test("accepts only positive balanced journal lines", () => {

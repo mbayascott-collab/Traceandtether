@@ -5,11 +5,11 @@ import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { requireBusinessOwner } from "./access-control";
-import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
+import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { customerGroupContactsCsv, matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import {
-  allocateLandedCostAdjustmentsByDelivery, allocateLandedCostAdjustmentsByOrder, buildDeliveryCostTotals, cents, formatCents, postJournal,
+  allocateLandedCostAdjustments, buildDeliveryCostTotals, cents, formatCents, postJournal,
 } from "./accounting-posting";
 
 const bad = (res: import("express").Response, error: z.ZodError) => res.status(400).json({ error: error.issues[0]?.message ?? "Check the submitted details." });
@@ -396,10 +396,12 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
           eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
         )),
       db.select({
-        productId: journalLines.productId, debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+        productId: journalLines.productId, productName: products.name,
+        debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
       }).from(journalEntries)
         .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
         .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .leftJoin(products, eq(journalLines.productId, products.id))
         .where(and(
           eq(journalEntries.sourceType, "landed_cost_adjustment"),
           eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
@@ -415,16 +417,19 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       costLines.filter((line): line is typeof line & { deliveryId: number } => line.deliveryId !== null),
       inRange,
     );
-    const landedCostAdjustmentByOrder = allocateLandedCostAdjustmentsByOrder(
+    const landedCostAllocations = allocateLandedCostAdjustments(
       deliveryRows,
       costLines.filter((line): line is typeof line & { deliveryId: number } => line.deliveryId !== null),
       landedCostAdjustmentLines,
     );
-    const landedCostAdjustmentByDelivery = allocateLandedCostAdjustmentsByDelivery(
-      deliveryRows,
-      costLines.filter((line): line is typeof line & { deliveryId: number } => line.deliveryId !== null),
-      landedCostAdjustmentLines,
-    );
+    const landedCostAdjustmentByOrder = new Map<number, bigint>();
+    const orderByDelivery = new Map(deliveryRows.map(({ deliveryId, orderId }) => [deliveryId, orderId]));
+    for (const [deliveryId, adjustment] of landedCostAllocations.adjustmentByDelivery) {
+      const orderId = orderByDelivery.get(deliveryId);
+      if (orderId !== undefined) {
+        landedCostAdjustmentByOrder.set(orderId, (landedCostAdjustmentByOrder.get(orderId) ?? 0n) + adjustment);
+      }
+    }
     for (const row of deliveryRows) {
       const value = cents(row.unitPriceZmw) * BigInt(row.quantity);
       revenueByOrder.set(row.orderId, (revenueByOrder.get(row.orderId) ?? 0n) + value);
@@ -447,8 +452,15 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const attributedCampaign = new Map(attributions.map((row) => [row.salesOrderId, row]));
     const campaignTotals = new Map(campaigns.map((c) => [c.id, {
       orderCount: 0, revenue: 0n, productCost: 0n, landedCostAdjustment: 0n, spend: 0n,
-      missingCostOrderNumbers: new Set<string>(),
+      missingCostOrderNumbers: new Set<string>(), unallocatedCostProducts: new Set<number>(),
     }]));
+    const unallocatedProductsByOrder = new Map<number, Set<number>>();
+    for (const delivery of deliveryRows) {
+      if (!inRange(delivery.deliveryDate) || !landedCostAllocations.unallocatedByProduct.has(delivery.productId)) continue;
+      const productsForOrder = unallocatedProductsByOrder.get(delivery.orderId) ?? new Set<number>();
+      productsForOrder.add(delivery.productId);
+      unallocatedProductsByOrder.set(delivery.orderId, productsForOrder);
+    }
     const campaignAdjustmentDeliveries = new Map<number, Map<number, {
       deliveryId: number; deliveryNumber: string; orderNumber: string; deliveryDate: string; adjustmentZmw: string;
     }>>();
@@ -472,6 +484,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
             stat.productCost += deliveryCost + landedCostAdjustment;
             stat.landedCostAdjustment += landedCostAdjustment;
             if (ordersMissingCost.has(order.id)) stat.missingCostOrderNumbers.add(order.orderNumber);
+            for (const productId of unallocatedProductsByOrder.get(order.id) ?? []) stat.unallocatedCostProducts.add(productId);
           }
         }
       }
@@ -480,7 +493,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     for (const row of deliveryRows) {
       if (!deliveryMetadata.has(row.deliveryId)) deliveryMetadata.set(row.deliveryId, row);
     }
-    for (const [deliveryId, adjustment] of landedCostAdjustmentByDelivery) {
+    for (const [deliveryId, adjustment] of landedCostAllocations.adjustmentByDelivery) {
       const delivery = deliveryMetadata.get(deliveryId);
       if (!delivery || !deliveredInRange.has(delivery.orderId)) continue;
       const campaignId = attributedCampaign.get(delivery.orderId)?.campaignId;
@@ -515,7 +528,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
           .sort((a, b) => a.deliveryDate.localeCompare(b.deliveryDate) || a.deliveryNumber.localeCompare(b.deliveryNumber)),
         spendZmw: formatCents(stat.spend),
         missingCostOrders: [...stat.missingCostOrderNumbers].sort(),
-        netContributionZmw: stat.missingCostOrderNumbers.size === 0
+        netContributionZmw: stat.missingCostOrderNumbers.size === 0 && stat.unallocatedCostProducts.size === 0
           ? formatCents(stat.revenue - stat.productCost - stat.spend) : null,
         revenueToSpend: ratio(stat.revenue, stat.spend),
       };
@@ -552,13 +565,37 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const ordersMissingProductCost = campaignRows.flatMap((row) =>
       row.missingCostOrders.map((orderNumber) => ({ orderNumber, campaignName: row.name })),
     );
+    const campaignNamesByProduct = new Map<number, Set<string>>();
+    const campaignById = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
+    for (const delivery of deliveryRows) {
+      if (!inRange(delivery.deliveryDate) || !landedCostAllocations.unallocatedByProduct.has(delivery.productId)) continue;
+      const campaignId = attributedCampaign.get(delivery.orderId)?.campaignId;
+      const campaign = campaignId == null ? undefined : campaignById.get(campaignId);
+      if (!campaign) continue;
+      const names = campaignNamesByProduct.get(delivery.productId) ?? new Set<string>();
+      names.add(campaign.name);
+      campaignNamesByProduct.set(delivery.productId, names);
+    }
+    const unallocatedLandedCostAdjustments = [...landedCostAllocations.unallocatedByProduct]
+      .filter(([productId]) => campaignNamesByProduct.has(productId))
+      .map(([productId, adjustment]) => ({
+        productId,
+        productName: landedCostAdjustmentLines.find((line) => line.productId === productId)?.productName ?? `Product #${productId}`,
+        adjustmentZmw: formatCents(adjustment),
+        campaignNames: [...campaignNamesByProduct.get(productId)!].sort(),
+      }))
+      .sort((a, b) => a.productName.localeCompare(b.productName));
+    const hasIncompleteLandedCostAllocation = unallocatedLandedCostAdjustments.length > 0;
     res.json({
       period: { from: from || null, to: to || null },
       totals: {
         spendZmw: formatCents(totalSpend), attributedRevenueZmw: formatCents(attributedRevenue),
         productCostZmw: formatCents(attributedProductCost),
         landedCostAdjustmentZmw: formatCents(attributedLandedCostAdjustment),
-        netContributionZmw: ordersMissingProductCost.length === 0
+        unallocatedLandedCostAdjustmentZmw: formatCents(unallocatedLandedCostAdjustments.reduce(
+          (total, item) => total + cents(item.adjustmentZmw), 0n,
+        )),
+        netContributionZmw: ordersMissingProductCost.length === 0 && !hasIncompleteLandedCostAllocation
           ? formatCents(attributedRevenue - attributedProductCost - totalSpend) : null,
         missingCostOrders: ordersMissingProductCost.length,
         attributedOrders: campaignRows.reduce((total, row) => total + row.orderCount, 0),
@@ -566,7 +603,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         unattributedRevenueZmw: formatCents(unattributedRevenue), unattributedOrders,
         revenueToSpend: ratio(attributedRevenue, totalSpend),
       },
-      campaigns: campaignRows, ordersMissingProductCost, segments,
+      campaigns: campaignRows, ordersMissingProductCost, unallocatedLandedCostAdjustments, segments,
     });
   });
 }

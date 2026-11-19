@@ -113,7 +113,7 @@ export function buildDeliveryCostTotals(
  * product-level journal has no order link, so this pooled allocation keeps
  * the source accounting entry intact while assigning every cent exactly once.
  */
-export function allocateLandedCostAdjustmentsByDelivery(
+export function allocateLandedCostAdjustments(
   deliveries: { deliveryId: number; orderId: number; productId: number }[],
   deliveryCostLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
   adjustmentLines: { productId: number | null; debitZmw: string; creditZmw: string }[],
@@ -143,13 +143,20 @@ export function allocateLandedCostAdjustmentsByDelivery(
   }
 
   const adjustmentByDelivery = new Map<number, bigint>();
+  const unallocatedByProduct = new Map<number, bigint>();
   for (const [productId, adjustment] of adjustmentsByProduct) {
     if (adjustment === 0n) continue;
     const weights = weightsByProduct.get(productId);
-    if (!weights) continue;
+    if (!weights) {
+      unallocatedByProduct.set(productId, adjustment);
+      continue;
+    }
     const eligible = [...weights.entries()].filter(([, weight]) => weight > 0n);
     const totalWeight = eligible.reduce((total, [, weight]) => total + weight, 0n);
-    if (totalWeight <= 0n) continue;
+    if (totalWeight <= 0n) {
+      unallocatedByProduct.set(productId, adjustment);
+      continue;
+    }
 
     const amount = adjustment < 0n ? -adjustment : adjustment;
     const allocations = eligible.map(([key, weight]) => {
@@ -177,7 +184,15 @@ export function allocateLandedCostAdjustmentsByDelivery(
       remaining -= extraCent;
     }
   }
-  return adjustmentByDelivery;
+  return { adjustmentByDelivery, unallocatedByProduct };
+}
+
+export function allocateLandedCostAdjustmentsByDelivery(
+  deliveries: { deliveryId: number; orderId: number; productId: number }[],
+  deliveryCostLines: { deliveryId: number; productId: number | null; debitZmw: string }[],
+  adjustmentLines: { productId: number | null; debitZmw: string; creditZmw: string }[],
+) {
+  return allocateLandedCostAdjustments(deliveries, deliveryCostLines, adjustmentLines).adjustmentByDelivery;
 }
 
 export function allocateLandedCostAdjustmentsByOrder(
