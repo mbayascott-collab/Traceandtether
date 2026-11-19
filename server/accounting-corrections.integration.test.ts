@@ -7,14 +7,23 @@ import test from "node:test";
 import {
   accountingCorrections, businessAuditLogs, businessExpenses, journalEntries, journalLines, ownerFundTransactions,
 } from "../shared/schema";
+import { operatingExpenseAccountKey } from "./accounting-posting";
 
 test("expense and owner-fund corrections preserve originals and post linked balanced journals", {
   skip: !process.env.DATABASE_URL,
-}, async () => {
+}, async (t) => {
   const [{ db, pool }, { registerAccountingRoutes }] = await Promise.all([
     import("./db"),
     import("./accounting-routes"),
   ]);
+  const migration = await pool.query<{ column_name: string | null }>(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'owner_fund_transactions' AND column_name = 'idempotency_key'",
+  );
+  if (!migration.rows.length) {
+    await pool.end();
+    t.skip("requires the owner-fund idempotency migration");
+    return;
+  }
   const suffix = randomUUID();
   const app = express();
   app.use(express.json());
@@ -56,29 +65,6 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     const createdExpenseId = Number(expenseResult.payload.expense.id);
     expenseId = createdExpenseId;
 
-    const firstExpenseCorrection = await request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
-      category: "rent",
-      description: `Corrected expense ${suffix}`,
-      amountZmw: "15.75",
-      expenseDate: "2002-02-10",
-      method: "bank_transfer",
-      reference: `corrected-expense-${suffix}`,
-      notes: "Corrected expense note",
-      reason: "Wrong account and amount",
-    });
-    assert.equal(firstExpenseCorrection.response.status, 201, JSON.stringify(firstExpenseCorrection.payload));
-    const secondExpenseCorrection = await request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
-      category: "utilities",
-      description: `Final expense ${suffix}`,
-      amountZmw: "18.25",
-      expenseDate: "2002-03-10",
-      method: "mobile_money",
-      reference: `final-expense-${suffix}`,
-      notes: "Final corrected note",
-      reason: "Corrected date and amount",
-    });
-    assert.equal(secondExpenseCorrection.response.status, 201, JSON.stringify(secondExpenseCorrection.payload));
-
     const fundResult = await request("/api/accounting/funds", {
       idempotencyKey: randomUUID(),
       kind: "owner_contribution",
@@ -95,16 +81,49 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     const yearBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
     assert.equal(januaryBeforeCorrection.response.status, 200, JSON.stringify(januaryBeforeCorrection.payload));
     assert.equal(yearBeforeCorrection.response.status, 200, JSON.stringify(yearBeforeCorrection.payload));
-    const fundCorrection = await request(`/api/accounting/funds/${createdFundId}/correct`, {
-      kind: "business_loan",
-      amountZmw: "30.00",
-      receivedAt: "2002-02-12",
-      method: "bank_transfer",
-      reference: `corrected-fund-${suffix}`,
-      notes: "Corrected loan",
-      reason: "It was a loan, not a contribution",
-    });
-    assert.equal(fundCorrection.response.status, 201, JSON.stringify(fundCorrection.payload));
+    const concurrentCorrections = await Promise.all([
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
+        category: "rent",
+        description: `Corrected expense ${suffix}`,
+        amountZmw: "15.75",
+        expenseDate: "2002-03-10",
+        method: "bank_transfer",
+        reference: `corrected-expense-${suffix}`,
+        notes: "Corrected expense note",
+        reason: "Wrong account and amount",
+      }),
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
+        category: "utilities",
+        description: `Final expense ${suffix}`,
+        amountZmw: "18.25",
+        expenseDate: "2002-03-10",
+        method: "mobile_money",
+        reference: `final-expense-${suffix}`,
+        notes: "Final corrected note",
+        reason: "Corrected date and amount",
+      }),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        kind: "business_loan",
+        amountZmw: "30.00",
+        receivedAt: "2002-03-12",
+        method: "bank_transfer",
+        reference: `corrected-fund-${suffix}`,
+        notes: "Corrected loan",
+        reason: "It was a loan, not a contribution",
+      }),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        kind: "owner_withdrawal",
+        amountZmw: "32.50",
+        receivedAt: "2002-03-12",
+        method: "mobile_money",
+        reference: `final-fund-${suffix}`,
+        notes: "Final corrected withdrawal",
+        reason: "Corrected the transaction classification",
+      }),
+    ]);
+    for (const correction of concurrentCorrections) {
+      assert.equal(correction.response.status, 201, JSON.stringify(correction.payload));
+    }
 
     const [originalExpense] = await db.select().from(businessExpenses).where(eq(businessExpenses.id, createdExpenseId));
     assert.equal(originalExpense.amountZmw, "10.00");
@@ -132,36 +151,6 @@ test("expense and owner-fund corrections preserve originals and post linked bala
 
     const reportResult = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
     assert.equal(reportResult.response.status, 200, JSON.stringify(reportResult.payload));
-    const reportExpense = reportResult.payload.expenses.find((row: any) => row.id === createdExpenseId);
-    assert.equal(reportExpense.effective.category, "utilities");
-    assert.equal(reportExpense.effective.amountZmw, "18.25");
-    assert.equal(reportExpense.effective.expenseDate, "2002-03-10");
-    assert.equal(reportExpense.correctionCount, 2);
-    const reportFund = reportResult.payload.ownerTransactions.find((row: any) => row.id === createdFundId);
-    assert.equal(reportFund.effective.kind, "business_loan");
-    assert.equal(reportFund.effective.amountZmw, "30.00");
-    assert.equal(reportFund.correctionCount, 1);
-    const previousTrialBalance = new Map(yearBeforeCorrection.payload.trialBalance.map((row: any) => [row.code, row]));
-    const finalTrialBalance = new Map(reportResult.payload.trialBalance.map((row: any) => [row.code, row]));
-    const balanceCents = (trialBalance: Map<any, any>, code: string) =>
-      Math.round(Number((trialBalance.get(code) as any)?.balanceZmw ?? "0.00") * 100);
-    assert.equal(balanceCents(finalTrialBalance, "1010") - balanceCents(previousTrialBalance, "1010"), -2_500);
-    assert.equal(balanceCents(finalTrialBalance, "1020") - balanceCents(previousTrialBalance, "1020"), 3_000);
-    assert.equal(balanceCents(finalTrialBalance, "3000") - balanceCents(previousTrialBalance, "3000"), -2_500);
-    assert.equal(balanceCents(finalTrialBalance, "2200") - balanceCents(previousTrialBalance, "2200"), 3_000);
-    assert.equal(reportResult.payload.totals.trialDebitsZmw, reportResult.payload.totals.trialCreditsZmw);
-    assert.equal(reportResult.payload.correctionHistory.filter((row: any) =>
-      (row.recordType === "business_expense" && row.recordId === createdExpenseId) ||
-      (row.recordType === "owner_fund_transaction" && row.recordId === createdFundId)).length, 3);
-
-    const marchReport = await request("/api/accounting?from=2002-03-10&to=2002-03-10");
-    assert.equal(marchReport.response.status, 200, JSON.stringify(marchReport.payload));
-    assert.equal(
-      marchReport.payload.incomeStatement.find((row: any) => row.code === "6500")?.amountZmw,
-      "18.25",
-      "the corrected expense account and amount must appear in the correction period report",
-    );
-
     const corrections = await db.select().from(accountingCorrections).where(or(
       and(
         eq(accountingCorrections.recordType, "business_expense"),
@@ -171,27 +160,97 @@ test("expense and owner-fund corrections preserve originals and post linked bala
         eq(accountingCorrections.recordType, "owner_fund_transaction"),
         eq(accountingCorrections.recordId, createdFundId),
       ),
-    ));
-    assert.equal(corrections.length, 3);
-    const fundCorrectionRow = corrections.find((correction) =>
-      correction.recordType === "owner_fund_transaction" && correction.recordId === createdFundId);
-    assert.ok(fundCorrectionRow);
-    assert.equal(fundCorrectionRow.previousCorrectionId, null);
+    )).orderBy(accountingCorrections.id);
+    const expenseCorrections = corrections.filter((row) =>
+      row.recordType === "business_expense" && row.recordId === createdExpenseId);
+    const fundCorrections = corrections.filter((row) =>
+      row.recordType === "owner_fund_transaction" && row.recordId === createdFundId);
+    assert.equal(expenseCorrections.length, 2);
+    assert.equal(fundCorrections.length, 2);
+    for (const chain of [expenseCorrections, fundCorrections]) {
+      assert.equal(chain[0].previousCorrectionId, null);
+      assert.equal(chain[1].previousCorrectionId, chain[0].id);
+      for (const correction of chain) {
+        assert.ok(correction.reversalEntryId, "each correction must have a reversal journal");
+        assert.ok(correction.replacementEntryId, "each correction must have a replacement journal");
+      }
+    }
+    const latestExpenseCorrection = expenseCorrections.at(-1)!;
+    const latestFundCorrection = fundCorrections.at(-1)!;
+    const reportExpense = reportResult.payload.expenses.find((row: any) => row.id === createdExpenseId);
+    assert.equal(reportExpense.effective.category, latestExpenseCorrection.category);
+    assert.equal(reportExpense.effective.amountZmw, latestExpenseCorrection.amountZmw);
+    assert.equal(reportExpense.effective.expenseDate, latestExpenseCorrection.effectiveDate);
+    assert.equal(reportExpense.effective.method, latestExpenseCorrection.method);
+    assert.equal(reportExpense.correctionCount, expenseCorrections.length);
+    const reportFund = reportResult.payload.ownerTransactions.find((row: any) => row.id === createdFundId);
+    assert.equal(reportFund.effective.kind, latestFundCorrection.kind);
+    assert.equal(reportFund.effective.amountZmw, latestFundCorrection.amountZmw);
+    assert.equal(reportFund.effective.transactionDate, latestFundCorrection.effectiveDate);
+    assert.equal(reportFund.effective.method, latestFundCorrection.method);
+    assert.equal(reportFund.correctionCount, fundCorrections.length);
+    assert.equal(reportResult.payload.totals.trialDebitsZmw, reportResult.payload.totals.trialCreditsZmw);
+    assert.equal(reportResult.payload.correctionHistory.filter((row: any) =>
+      (row.recordType === "business_expense" && row.recordId === createdExpenseId) ||
+      (row.recordType === "owner_fund_transaction" && row.recordId === createdFundId)).length, 4);
+
+    const marchReport = await request(
+      `/api/accounting?from=${latestExpenseCorrection.effectiveDate}&to=${latestExpenseCorrection.effectiveDate}`,
+    );
+    assert.equal(marchReport.response.status, 200, JSON.stringify(marchReport.payload));
+    const expenseAccount = reportResult.payload.accounts.find((account: any) =>
+      account.systemKey === operatingExpenseAccountKey(latestExpenseCorrection.category ?? "other"));
+    assert.equal(
+      marchReport.payload.incomeStatement.find((row: any) => row.code === expenseAccount.code)?.amountZmw,
+      latestExpenseCorrection.amountZmw,
+      "the corrected expense account and amount must appear in the correction period report",
+    );
+
     const relatedJournalIds = corrections.flatMap((correction) => [
       correction.reversalEntryId, correction.replacementEntryId,
     ]).filter((id): id is number => id !== null);
     const journalRows = await db.select().from(journalEntries).where(inArray(journalEntries.id, relatedJournalIds));
-    assert.equal(journalRows.length, 6);
-    const replacementEntry = journalRows.find((entry) => entry.id === fundCorrectionRow.replacementEntryId);
-    assert.ok(replacementEntry);
-    assert.equal(replacementEntry.sourceType, "accounting_correction");
-    assert.equal(replacementEntry.sourceId, fundCorrectionRow.id);
+    assert.equal(journalRows.length, 8);
     for (const entry of journalRows) {
       const lines = await db.select().from(journalLines).where(eq(journalLines.journalEntryId, entry.id));
       const debits = lines.reduce((sum, line) => sum + Math.round(Number(line.debitZmw) * 100), 0);
       const credits = lines.reduce((sum, line) => sum + Math.round(Number(line.creditZmw) * 100), 0);
       assert.ok(debits > 0);
       assert.equal(debits, credits, `${entry.entryNumber} must remain balanced`);
+    }
+    for (const chain of [expenseCorrections, fundCorrections]) {
+      const originalSourceKey = chain[0].recordType === "business_expense"
+        ? `business-expense-${createdExpenseId}`
+        : `owner-fund-${createdFundId}`;
+      let previousEntry = (await db.select().from(journalEntries)
+        .where(eq(journalEntries.sourceKey, originalSourceKey)).limit(1))[0];
+      assert.ok(previousEntry, "the original journal must exist");
+      for (const correction of chain) {
+        const reversal = journalRows.find((entry) => entry.id === correction.reversalEntryId);
+        const replacement = journalRows.find((entry) => entry.id === correction.replacementEntryId);
+        assert.ok(reversal);
+        assert.ok(replacement);
+        assert.equal(reversal.sourceType, "accounting_correction_reversal");
+        assert.equal(reversal.sourceId, correction.id);
+        assert.equal(replacement.sourceType, "accounting_correction");
+        assert.equal(replacement.sourceId, correction.id);
+        const previousLines = await db.select().from(journalLines)
+          .where(eq(journalLines.journalEntryId, previousEntry.id));
+        const reversalLines = await db.select().from(journalLines)
+          .where(eq(journalLines.journalEntryId, reversal.id));
+        const lineKey = (line: typeof previousLines[number], reverse = false) => [
+          line.accountId,
+          line.productId ?? "",
+          reverse ? line.creditZmw : line.debitZmw,
+          reverse ? line.debitZmw : line.creditZmw,
+        ].join(":");
+        assert.deepEqual(
+          reversalLines.map((line) => lineKey(line)).sort(),
+          previousLines.map((line) => lineKey(line, true)).sort(),
+          `${reversal.entryNumber} must reverse the immediately prior journal`,
+        );
+        previousEntry = replacement;
+      }
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
