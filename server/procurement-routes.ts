@@ -142,15 +142,36 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     if (purchaseOrderIds.some((orderId) => !orderLines.some((line) => line.purchaseOrderId === orderId))) {
       return invalid(res, "Add at least one product from each selected purchase order.");
     }
-    const shippedRows = await db.select({ lineId: shipmentLines.purchaseOrderLineId, quantity: sum(shipmentLines.quantityShipped) })
-      .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
-      .where(ne(shipments.status, "cancelled")).groupBy(shipmentLines.purchaseOrderLineId);
-    const shipped = new Map(shippedRows.map((row) => [row.lineId, Number(row.quantity ?? 0)]));
-    for (const item of lines) {
-      const ordered = orderLines.find((line) => line.id === item.purchaseOrderLineId)?.quantityOrdered ?? 0;
-      if ((shipped.get(item.purchaseOrderLineId) ?? 0) + item.quantityShipped > ordered) return invalid(res, "Shipment quantity exceeds the quantity ordered.");
-    }
-    const shipment = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
+      const lockedOrderLines = await tx.select().from(purchaseOrderLines)
+        .where(inArray(purchaseOrderLines.id, lineIds))
+        .orderBy(asc(purchaseOrderLines.id))
+        .for("update");
+      if (lockedOrderLines.length !== lines.length || lockedOrderLines.some((line) => !purchaseOrderIds.includes(line.purchaseOrderId))) {
+        return { ok: false as const, error: "Every shipment product must belong to a selected purchase order." };
+      }
+      if (purchaseOrderIds.some((orderId) => !lockedOrderLines.some((line) => line.purchaseOrderId === orderId))) {
+        return { ok: false as const, error: "Add at least one product from each selected purchase order." };
+      }
+      const currentOrders = await tx.select().from(purchaseOrders).where(inArray(purchaseOrders.id, purchaseOrderIds));
+      if (currentOrders.length !== purchaseOrderIds.length
+        || currentOrders.some((order) => order.status === "cancelled" || order.status === "received")) {
+        return { ok: false as const, error: "Choose open purchase orders." };
+      }
+      const shippedRows = await tx.select({
+        lineId: shipmentLines.purchaseOrderLineId,
+        quantity: sum(shipmentLines.quantityShipped),
+      })
+        .from(shipmentLines).innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
+        .where(and(inArray(shipmentLines.purchaseOrderLineId, lineIds), ne(shipments.status, "cancelled")))
+        .groupBy(shipmentLines.purchaseOrderLineId);
+      const shipped = new Map(shippedRows.map((row) => [row.lineId, Number(row.quantity ?? 0)]));
+      for (const item of lines) {
+        const ordered = lockedOrderLines.find((line) => line.id === item.purchaseOrderLineId)?.quantityOrdered ?? 0;
+        if ((shipped.get(item.purchaseOrderLineId) ?? 0) + item.quantityShipped > ordered) {
+          return { ok: false as const, error: "Shipment quantity exceeds the quantity ordered." };
+        }
+      }
       const [created] = await tx.insert(shipments).values({ ...input, purchaseOrderId: purchaseOrderIds[0] }).returning();
       await tx.insert(shipmentPurchaseOrders).values(purchaseOrderIds.map((purchaseOrderId) => ({
         shipmentId: created.id, purchaseOrderId,
@@ -161,9 +182,10 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
         recordLabel: created.shipmentReference || `Shipment #${created.id}`,
         actor: res.locals.actor, action: "created", changedFields: [...Object.keys(input), "purchaseOrderIds", "lines"],
       });
-      return created;
+      return { ok: true as const, shipment: created };
     });
-    res.status(201).json({ shipment });
+    if (!result.ok) return invalid(res, result.error);
+    res.status(201).json({ shipment: result.shipment });
   });
 
   app.patch("/api/shipments/:id/receive", owner, async (req, res) => {

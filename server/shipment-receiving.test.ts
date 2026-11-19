@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import test from "node:test";
+import test, { after } from "node:test";
 import { eq, sum } from "drizzle-orm";
 import {
   products, purchaseOrderLines, shipmentLines as shipmentLineRows,
@@ -12,6 +12,13 @@ import { calculatePurchaseReceiptPosting, journalLinesAreBalanced } from "./acco
 import {
   purchaseOrderReceiptStatus, shipmentReceiptStatus, validateShipmentReceipt,
 } from "./shipment-receiving";
+
+after(async () => {
+  if (process.env.DATABASE_URL) {
+    const { pool } = await import("./db");
+    await pool.end();
+  }
+});
 
 const shipmentLines = [
   { id: 11, purchaseOrderLineId: 101, quantityShipped: 4, quantityStocked: 0 },
@@ -74,7 +81,6 @@ test("rejects one of two concurrent receipts that exceed the purchase order quan
     "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
   );
   if (!auditTable.rows[0]?.exists) {
-    await pool.end();
     t.skip("requires the business audit migration used by the receiving route");
     return;
   }
@@ -169,7 +175,105 @@ test("rejects one of two concurrent receipts that exceed the purchase order quan
       if (supplierId) await pool.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      await pool.end();
+    }
+  }
+});
+
+test("rejects one of two concurrent shipments that exceed the purchase-order quantity", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerProcurementRoutes }] = await Promise.all([
+    import("./db"),
+    import("./procurement-routes"),
+  ]);
+  const auditTable = await pool.query<{ exists: boolean }>(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    t.skip("requires the business audit migration used by the shipment route");
+    return;
+  }
+  const suffix = randomUUID();
+  const actorEmail = `shipment-create-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerProcurementRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let supplierId: number | undefined;
+  let productId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  try {
+    const [supplier] = await db.insert(suppliers).values({ name: `Shipment concurrency supplier ${suffix}` }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `SHP-${suffix}`, name: `Shipment concurrency product ${suffix}`, status: "active", purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+
+    const orderResponse = await fetch(`${baseUrl}/api/purchase-orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        supplierId, currency: "CNY", exchangeRateToZmw: "2", expectedAt: null, notes: null,
+        lines: [{ productId, quantityOrdered: 5, unitPrice: "10.00" }],
+      }),
+    });
+    assert.equal(orderResponse.status, 201);
+    const { order } = await orderResponse.json() as { order: { id: number } };
+    purchaseOrderId = order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+
+    const responses = await Promise.all([0, 1].map((index) => fetch(`${baseUrl}/api/shipments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        purchaseOrderIds: [purchaseOrderId],
+        shipmentReference: `SHP-${suffix}-${index}`,
+        carrier: null,
+        trackingNumber: null,
+        shippedAt: null,
+        expectedAt: null,
+        notes: null,
+        lines: [{ purchaseOrderLineId: orderLine.id, quantityShipped: 3 }],
+      }),
+    })));
+    const payloads = await Promise.all(responses.map((response) => response.json() as Promise<{ error?: string }>));
+    assert.deepEqual(responses.map((response) => response.status).sort(), [201, 400]);
+    assert.match(payloads.find((payload) => payload.error)?.error ?? "", /quantity ordered/i);
+
+    const [shippedTotal] = await db.select({ quantity: sum(shipmentLineRows.quantityShipped) })
+      .from(shipmentLineRows).where(eq(shipmentLineRows.purchaseOrderLineId, orderLine.id));
+    assert.equal(Number(shippedTotal.quantity), 3);
+  } finally {
+    try {
+      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (purchaseOrderId) {
+        await pool.query(
+          "DELETE FROM shipment_lines WHERE shipment_id IN (SELECT id FROM shipments WHERE purchase_order_id = $1)",
+          [purchaseOrderId],
+        );
+        await pool.query(
+          "DELETE FROM shipment_purchase_orders WHERE purchase_order_id = $1",
+          [purchaseOrderId],
+        );
+        await pool.query("DELETE FROM shipments WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await pool.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await pool.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   }
 });
