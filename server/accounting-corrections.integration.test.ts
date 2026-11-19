@@ -2,12 +2,59 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, like, or } from "drizzle-orm";
 import test from "node:test";
 import {
   accountingCorrections, businessAuditLogs, businessExpenses, journalEntries, journalLines, ownerFundTransactions,
 } from "../shared/schema";
 import { operatingExpenseAccountKey } from "./accounting-posting";
+
+test("managers are forbidden from both accounting correction endpoints", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const { registerAccountingRoutes } = await import("./accounting-routes");
+  const app = express();
+  app.use(express.json());
+  const manager: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: "correction-auth-manager", email: "manager@example.test", role: "manager" };
+    next();
+  };
+  registerAccountingRoutes(app, manager);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  try {
+    const [expenseResponse, fundResponse] = await Promise.all([
+      request("/api/accounting/expenses/2147483647/correct", {
+        category: "rent",
+        description: "Unauthorized expense correction",
+        amountZmw: "12.00",
+        expenseDate: "2002-02-10",
+        method: "cash",
+        reason: "Managers cannot correct expenses",
+      }),
+      request("/api/accounting/funds/2147483647/correct", {
+        kind: "business_loan",
+        amountZmw: "27.00",
+        receivedAt: "2002-02-12",
+        method: "cash",
+        reason: "Managers cannot correct owner funds",
+      }),
+    ]);
+    assert.equal(expenseResponse.status, 403);
+    assert.equal(fundResponse.status, 403);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test("expense and owner-fund corrections preserve originals and post linked balanced journals", {
   skip: !process.env.DATABASE_URL,
@@ -27,8 +74,9 @@ test("expense and owner-fund corrections preserve originals and post linked bala
   const suffix = randomUUID();
   const app = express();
   app.use(express.json());
-  const owner: RequestHandler = (_req, res, next) => {
-    res.locals.actor = { clerkUserId: `correction-test-${suffix}`, email: `${suffix}@example.test`, role: "owner" };
+  const owner: RequestHandler = (req, res, next) => {
+    const role = req.header("x-test-role") === "manager" ? "manager" : "owner";
+    res.locals.actor = { clerkUserId: `correction-test-${suffix}-${role}`, email: `${suffix}@example.test`, role };
     next();
   };
   registerAccountingRoutes(app, owner);
@@ -42,10 +90,13 @@ test("expense and owner-fund corrections preserve originals and post linked bala
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let expenseId: number | null = null;
   let fundId: number | null = null;
-  const request = async (path: string, body?: unknown) => {
+  const request = async (path: string, body?: unknown, role?: "manager") => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      headers: body === undefined ? undefined : {
+        "content-type": "application/json",
+        ...(role ? { "x-test-role": role } : {}),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { response, payload: await response.json() as any };
@@ -77,6 +128,46 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(fundResult.response.status, 201, JSON.stringify(fundResult.payload));
     const createdFundId = Number(fundResult.payload.transaction.id);
     fundId = createdFundId;
+
+    const deniedCorrections = await Promise.all([
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
+        category: "rent",
+        description: `Denied expense correction ${suffix}`,
+        amountZmw: "12.00",
+        expenseDate: "2002-02-10",
+        method: "cash",
+        reference: `denied-expense-${suffix}`,
+        reason: `Manager must not correct expense ${suffix}`,
+      }, "manager"),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        kind: "business_loan",
+        amountZmw: "27.00",
+        receivedAt: "2002-02-12",
+        method: "cash",
+        reference: `denied-fund-${suffix}`,
+        reason: `Manager must not correct owner funds ${suffix}`,
+      }, "manager"),
+    ]);
+    for (const denied of deniedCorrections) {
+      assert.equal(denied.response.status, 403, JSON.stringify(denied.payload));
+    }
+    const deniedRecordCorrections = await db.select().from(accountingCorrections).where(or(
+      and(
+        eq(accountingCorrections.recordType, "business_expense"),
+        eq(accountingCorrections.recordId, createdExpenseId),
+      ),
+      and(
+        eq(accountingCorrections.recordType, "owner_fund_transaction"),
+        eq(accountingCorrections.recordId, createdFundId),
+      ),
+    ));
+    assert.equal(deniedRecordCorrections.length, 0, "denied requests must not create correction records");
+    const deniedCorrectionJournals = await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["accounting_correction", "accounting_correction_reversal"]),
+      like(journalEntries.memo, `%${suffix}%`),
+    ));
+    assert.equal(deniedCorrectionJournals.length, 0, "denied requests must not create correction journals");
+
     const januaryBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-01-31");
     const yearBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
     assert.equal(januaryBeforeCorrection.response.status, 200, JSON.stringify(januaryBeforeCorrection.payload));
