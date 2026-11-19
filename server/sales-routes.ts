@@ -1193,6 +1193,10 @@ export function registerSalesRoutes(
   app.post("/api/sales-deliveries/:id/receipt-proofs", owner, async (req, res) => {
     const deliveryId = idOf(req.params.id);
     if (!deliveryId) return bad(res, "Invalid delivery note.");
+    const idempotencyKey = req.get("Idempotency-Key") ?? "";
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+      return bad(res, "A valid upload request key is required.");
+    }
     const fileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
     if (!fileName || fileName.length > 255) return bad(res, "Choose a valid signed proof file.");
     const file = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
@@ -1206,18 +1210,41 @@ export function registerSalesRoutes(
       .from(salesDeliveryReceipts).where(eq(salesDeliveryReceipts.deliveryId, deliveryId)).limit(1);
     if (!receipt) return res.status(409).json({ error: "Save the delivery recipient and receipt time before adding signed proof." });
 
-    const saved = await db.transaction(async (tx) => {
+    const outcome = await db.transaction(async (tx) => {
       const [created] = await tx.insert(salesDeliveryReceiptProofs).values({
-        deliveryId, fileName: proof.fileName, mimeType: proof.mimeType, data: file,
+        deliveryId, fileName: proof.fileName, mimeType: proof.mimeType, data: file, idempotencyKey,
+      }).onConflictDoNothing({
+        target: [salesDeliveryReceiptProofs.deliveryId, salesDeliveryReceiptProofs.idempotencyKey],
       }).returning();
+      if (!created) {
+        const [existing] = await tx.select({
+          id: salesDeliveryReceiptProofs.id,
+          fileName: salesDeliveryReceiptProofs.fileName,
+          mimeType: salesDeliveryReceiptProofs.mimeType,
+          data: salesDeliveryReceiptProofs.data,
+        }).from(salesDeliveryReceiptProofs).where(and(
+          eq(salesDeliveryReceiptProofs.deliveryId, deliveryId),
+          eq(salesDeliveryReceiptProofs.idempotencyKey, idempotencyKey),
+        )).limit(1);
+        if (!existing) return { conflict: true as const };
+        const isSameUpload = existing.fileName === proof.fileName
+          && existing.mimeType === proof.mimeType
+          && Buffer.from(existing.data).equals(file);
+        return isSameUpload
+          ? { proof: existing, replay: true as const, conflict: false as const }
+          : { conflict: true as const };
+      }
       await recordBusinessAudit(tx, {
         entityType: "sales_delivery_receipt", entityId: receipt.id,
         recordLabel: `${delivery.deliveryNumber} · ${proof.fileName}`,
         actor: res.locals.actor, action: "updated", changedFields: ["proof"],
       });
-      return created;
+      return { proof: created, replay: false as const, conflict: false as const };
     });
-    res.status(201).json({ proof: { id: saved.id, fileName: saved.fileName, mimeType: saved.mimeType } });
+    if (outcome.conflict) return res.status(409).json({ error: "This upload request key was already used for a different proof file." });
+    res.status(outcome.replay ? 200 : 201).json({
+      proof: { id: outcome.proof.id, fileName: outcome.proof.fileName, mimeType: outcome.proof.mimeType },
+    });
   });
   app.get("/api/sales-deliveries/:id/receipt-proofs/:proofId", owner, async (req, res) => {
     const deliveryId = idOf(req.params.id);

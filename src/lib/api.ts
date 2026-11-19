@@ -602,12 +602,12 @@ export async function saveSalesDeliveryReceipt(
 export function salesDeliveryReceiptProofUrl(deliveryId: number): string {
   return `/api/sales-deliveries/${deliveryId}/receipt-proof`;
 }
-export async function addSalesDeliveryReceiptProof(deliveryId: number, file: File): Promise<SalesDeliveryReceiptProof> {
+export async function addSalesDeliveryReceiptProof(deliveryId: number, file: File, idempotencyKey: string): Promise<SalesDeliveryReceiptProof> {
   const query = new URLSearchParams({ fileName: file.name });
   const response = await fetch(`/api/sales-deliveries/${deliveryId}/receipt-proofs?${query}`, {
     method: "POST",
     credentials: "same-origin",
-    headers: { "Content-Type": "application/octet-stream" },
+    headers: { "Content-Type": "application/octet-stream", "Idempotency-Key": idempotencyKey },
     body: file,
   });
   const body = await response.json().catch(() => ({})) as { error?: string; proof?: SalesDeliveryReceiptProof };

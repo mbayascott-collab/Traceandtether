@@ -8,6 +8,7 @@ import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation
 
 type Mode = "customers" | "orders";
 type Line = { productId: string; quantity: string; unitPriceZmw: string };
+type ReceiptProofUpload = { file: File; idempotencyKey: string };
 const emptyLine = (): Line => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const zmw = (amount: string) => `ZMW ${Number(amount).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const companyName = "Trace and Tether Craft Studio Limited";
@@ -51,6 +52,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [deliveryPrint, setDeliveryPrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
   const [receiptDelivery, setReceiptDelivery] = useState<{ order: SalesOrder; delivery: SalesDelivery } | null>(null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
+  const [receiptProofUploads, setReceiptProofUploads] = useState<ReceiptProofUpload[]>([]);
   const [returnForm, setReturnForm] = useState<{
     order: SalesOrder; delivery: SalesDelivery; line: SalesDelivery["lines"][number]; idempotencyKey: string;
   } | null>(null);
@@ -129,7 +131,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     if (receiptSubmitting) return;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const files = form.getAll("proofFiles").filter((value): value is File => value instanceof File && value.size > 0);
+    const uploads = receiptProofUploads.filter(({ file }) => file.size > 0);
+    const files = uploads.map(({ file }) => file);
     if (files.some((file) => file.size > 5 * 1024 * 1024)) {
       setError("Each signed proof file must be 5 MB or smaller.");
       return;
@@ -148,13 +151,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         receivedBy: String(form.get("receivedBy") || "").trim(),
         receivedAt: receivedAt.toISOString(),
       });
-      for (const file of files) {
-        const proof = await addSalesDeliveryReceiptProof(delivery.id, file);
-        savedProofs.push(proof);
+      for (const upload of uploads) {
+        const proof = await addSalesDeliveryReceiptProof(delivery.id, upload.file, upload.idempotencyKey);
+        if (!savedProofs.some((saved) => saved.id === proof.id)) savedProofs.push(proof);
         setReceiptDelivery((current) => current?.delivery.id === delivery.id
           ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
           : current);
       }
+      setReceiptProofUploads([]);
       setReceiptDelivery(null);
       setNotice("Delivery receipt saved.");
       setReload((value) => value + 1);
@@ -163,10 +167,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         setReceiptDelivery((current) => current?.delivery.id === delivery.id
           ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
           : current);
-        const proofInput = formElement.elements.namedItem("proofFiles");
-        if (proofInput instanceof HTMLInputElement) proofInput.value = "";
         const detail = cause instanceof Error ? cause.message : "Could not upload a proof file.";
-        setError(`Receipt details and ${savedProofs.length - (delivery.receipt?.proofs.length ?? 0)} proof file(s) were saved. ${detail} Select only files that are not listed below and save again.`);
+        setError(`The receipt is saved and ${savedProofs.length} proof file(s) are attached. ${detail} Keep the selected files and save again to safely retry.`);
       } else {
         setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
       }
@@ -465,7 +467,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Received by<input name="receivedBy" required maxLength={120} defaultValue={receiptDelivery.delivery.receipt?.receivedBy ?? ""} /></label>
         <label>Date and time received<input name="receivedAt" type="datetime-local" required defaultValue={localDateTime(receiptDelivery.delivery.receipt?.receivedAt)} /></label>
         <label>Signed proof files (PDF or image, up to 5 MB each)
-          <input name="proofFiles" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp" />
+          <input name="proofFiles" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => {
+            setReceiptProofUploads(Array.from(event.currentTarget.files ?? []).map((file) => ({
+              file, idempotencyKey: window.crypto.randomUUID(),
+            })));
+          }} />
         </label>
         {!!receiptDelivery.delivery.receipt?.proofs.length && <div>
           <strong>Saved signed proof files</strong>
@@ -480,7 +486,10 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>}
         <p className="report-footnote">Receipt details and signed proof are stored with this delivery note, separately from invoices and payments.</p>
         <div className="modal-footer-actions">
-          <button type="button" className="button button-secondary" disabled={receiptSubmitting} onClick={() => setReceiptDelivery(null)}>Cancel</button>
+          <button type="button" className="button button-secondary" disabled={receiptSubmitting} onClick={() => {
+            setReceiptProofUploads([]);
+            setReceiptDelivery(null);
+          }}>Cancel</button>
           <button className="button button-primary" disabled={receiptSubmitting}>{receiptSubmitting ? "Saving…" : "Save receipt"}</button>
         </div>
       </form>

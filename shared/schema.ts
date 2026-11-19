@@ -498,10 +498,12 @@ export const salesDeliveryReceiptProofs = pgTable(
     fileName: varchar("file_name", { length: 255 }).notNull(),
     mimeType: varchar("mime_type", { length: 80 }).notNull(),
     data: bytea("data").notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 80 }).notNull().default(sql`gen_random_uuid()::text`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("sales_delivery_receipt_proofs_delivery_idx").on(table.deliveryId),
+    uniqueIndex("sales_delivery_receipt_proofs_idempotency_unique").on(table.deliveryId, table.idempotencyKey),
   ],
 );
 

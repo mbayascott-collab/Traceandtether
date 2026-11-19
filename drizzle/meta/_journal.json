@@ -379,6 +379,13 @@
       "when": 1795047896403,
       "tag": "0053_blushing_korvac",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1795067083274,
+      "tag": "0054_wooden_butterfly",
+      "breakpoints": true
     }
   ]
 }
