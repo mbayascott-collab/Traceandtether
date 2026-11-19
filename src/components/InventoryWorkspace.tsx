@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryMovementEvidenceUrl, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -265,7 +265,7 @@ function MovementTable({
         ? `Replaces reversal #${m.correctionOfMovementId}`
         : child ? `Corrected by #${child.id}` : "—";
     return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
-      {m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>) : "—"}
+      {m.evidenceFiles.length ? <>{m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>)}{m.evidenceFiles.length > 1 && <><br /><a className="button button-secondary button-small" href={inventoryMovementEvidenceArchiveUrl(m.id)}>Download all files (.zip)</a></>}</> : "—"}
       {m.kind === "opening_stock" && m.evidenceFiles.length < 5 && <form className="inventory-evidence-append" onSubmit={(event) => onSubmit(event, async (data) => {
         const selected = data.get("additionalEvidence");
         const evidence = selected instanceof FileList ? Array.from(selected).filter((file) => file.size > 0) : [];

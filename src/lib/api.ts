@@ -440,6 +440,9 @@ export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: nu
   const base = `/api/inventory/movements/${movementId}/opening-evidence${evidenceId == null ? "" : `/${evidenceId}`}`;
   return download ? `${base}?download=1` : base;
 }
+export function inventoryMovementEvidenceArchiveUrl(movementId: number): string {
+  return `/api/inventory/movements/${movementId}/opening-evidence/archive`;
+}
 export async function fetchInventoryLocations(): Promise<InventoryLocation[]> {
   return (await request<{ locations: InventoryLocation[] }>("/api/inventory/locations")).locations;
 }

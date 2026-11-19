@@ -4,6 +4,7 @@ import {
   inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_BYTES, MAX_OPENING_STOCK_EVIDENCE_FILES,
   parseOpeningStockEvidenceMultipart, safeOpeningStockEvidenceFilename,
 } from "./opening-stock-evidence";
+import { createZipArchive } from "./zip-archive";
 
 test("opening-stock evidence accepts supported worksheet and photo types", () => {
   assert.equal(inspectOpeningStockEvidence(Buffer.from("%PDF-1.7 worksheet"), "count.pdf").mimeType, "application/pdf");
@@ -64,3 +65,45 @@ test("opening-stock multipart upload rejects malformed bodies and too many files
   assert.ok("error" in parsed);
   if ("error" in parsed) assert.match(parsed.error ?? "", /no more than/);
 });
+
+test("count evidence ZIP archives preserve saved names and exact file bytes", () => {
+  const entries = [
+    { fileName: "count-sheet.pdf", data: Buffer.from("%PDF-original worksheet") },
+    { fileName: "Révisé-stock-photo.webp", data: Buffer.from([0, 255, 17, 0, 32]) },
+  ];
+  const archive = createZipArchive(entries);
+  const endOffset = archive.length - 22;
+  assert.equal(archive.readUInt32LE(endOffset), 0x06054b50);
+  assert.equal(archive.readUInt16LE(endOffset + 10), entries.length);
+  const centralOffset = archive.readUInt32LE(endOffset + 16);
+  let cursor = centralOffset;
+
+  entries.forEach((expected) => {
+    assert.equal(archive.readUInt32LE(cursor), 0x02014b50);
+    const checksum = archive.readUInt32LE(cursor + 16);
+    const compressedSize = archive.readUInt32LE(cursor + 20);
+    const fileNameLength = archive.readUInt16LE(cursor + 28);
+    const extraLength = archive.readUInt16LE(cursor + 30);
+    const commentLength = archive.readUInt16LE(cursor + 32);
+    const localOffset = archive.readUInt32LE(cursor + 42);
+    const fileName = archive.subarray(cursor + 46, cursor + 46 + fileNameLength).toString("utf8");
+    assert.equal(fileName, expected.fileName);
+
+    const localNameLength = archive.readUInt16LE(localOffset + 26);
+    const localExtraLength = archive.readUInt16LE(localOffset + 28);
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    const fileData = archive.subarray(dataOffset, dataOffset + compressedSize);
+    assert.deepEqual(fileData, expected.data);
+    assert.equal(checksum, crc32ForTest(fileData));
+    cursor += 46 + fileNameLength + extraLength + commentLength;
+  });
+});
+
+function crc32ForTest(data: Buffer) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}

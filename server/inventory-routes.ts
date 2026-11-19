@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, sum } from "drizzle-orm";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
+import { createZipArchive } from "./zip-archive";
 import { allocateLandedCosts } from "../shared/landed-cost";
 import { importExpensesForPurchaseOrder } from "./import-expense-allocation";
 import {
@@ -200,6 +201,43 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     else res.setHeader("Content-Disposition", "inline");
     res.setHeader("Content-Type", mimeType);
     return res.send(data);
+  });
+
+  app.get("/api/inventory/movements/:id/opening-evidence/archive", owner, async (req, res) => {
+    const id = getId(req.params.id);
+    if (!id) return bad(res, "Invalid stock movement.");
+    const [movement] = await db.select({
+      kind: inventoryMovements.kind, evidenceFileName: inventoryMovements.evidenceFileName,
+      evidenceData: inventoryMovements.evidenceData,
+    }).from(inventoryMovements).where(eq(inventoryMovements.id, id)).limit(1);
+    if (movement?.kind !== "opening_stock") {
+      return res.status(404).json({ error: "No count evidence is saved for this opening-stock entry." });
+    }
+
+    const evidenceRows = await db.select({
+      fileName: inventoryMovementEvidence.fileName,
+      data: inventoryMovementEvidence.data,
+    }).from(inventoryMovementEvidence).where(eq(inventoryMovementEvidence.movementId, id))
+      .orderBy(asc(inventoryMovementEvidence.id));
+    const files = [
+      ...(movement.evidenceData && movement.evidenceFileName
+        ? [{ fileName: movement.evidenceFileName, data: movement.evidenceData }]
+        : []),
+      ...evidenceRows,
+    ];
+    if (!files.length) {
+      return res.status(404).json({ error: "No count evidence is saved for this opening-stock entry." });
+    }
+
+    const archive = createZipArchive(files.map(({ fileName, data }) => ({
+      fileName: safeOpeningStockEvidenceFilename(fileName),
+      data: Buffer.from(data),
+    })));
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.attachment(`count-${id}-evidence.zip`);
+    res.setHeader("Content-Type", "application/zip");
+    return res.send(archive);
   });
 
   app.get("/api/inventory/movements/:id/opening-evidence/:evidenceId", owner, async (req, res) => {
