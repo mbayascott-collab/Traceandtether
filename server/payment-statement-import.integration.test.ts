@@ -10,7 +10,7 @@ import {
 } from "../shared/schema";
 import { ensureAccountingAccounts, postJournal } from "./accounting-posting";
 
-test("removing one statement import preserves other lines, matches, and journals", {
+test("statement import removal preserves unrelated records and concurrent repeats require review", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
   const [
@@ -227,6 +227,61 @@ test("removing one statement import preserves other lines, matches, and journals
       id: preservedMatchedLine.id,
       matchedPaymentId: paymentIds[1]!,
     }]);
+
+    const concurrentImportBody = {
+      accountId: bankAccount.id,
+      fileName: `concurrent-${label}.csv`,
+      from: "2026-11-18",
+      to: "2026-11-18",
+      lines: [{
+        transactionDate: "2026-11-18",
+        flow: "in",
+        amountZmw: "31.17",
+        description: "Concurrent statement import",
+        reference: `CONCURRENT-${suffix}`,
+      }],
+      includedIndexes: [0],
+      allowDuplicateBatch: false,
+    };
+    const concurrentResponses = await Promise.all([0, 1].map(async () => {
+      const response = await fetch(`${baseUrl}/api/payments/reconciliation/imports`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(concurrentImportBody),
+      });
+      return { status: response.status, payload: await response.json() as any };
+    }));
+    assert.deepEqual(
+      concurrentResponses.map(({ status }) => status).sort(),
+      [201, 409],
+      "simultaneous saves of the same statement must require review for the second request",
+    );
+    const acceptedConcurrentImport = concurrentResponses.find(({ status }) => status === 201);
+    const rejectedConcurrentImport = concurrentResponses.find(({ status }) => status === 409);
+    assert.ok(acceptedConcurrentImport);
+    assert.ok(rejectedConcurrentImport);
+    assert.match(rejectedConcurrentImport.payload.error, /already imported\. Review it before importing again/i);
+    assert.equal(
+      rejectedConcurrentImport.payload.duplicateBatch.id,
+      acceptedConcurrentImport.payload.batch.id,
+      "the repeated request must identify the batch created by its concurrent partner",
+    );
+    const firstConcurrentBatchId = Number(acceptedConcurrentImport.payload.batch.id);
+    importBatchIds.push(firstConcurrentBatchId);
+
+    const reviewedRepeat = await request("/api/payments/reconciliation/imports", "POST", {
+      ...concurrentImportBody,
+      allowDuplicateBatch: true,
+    }, 201);
+    const reviewedRepeatBatchId = Number(reviewedRepeat.batch.id);
+    importBatchIds.push(reviewedRepeatBatchId);
+    const concurrentBatches = await db.select().from(paymentStatementImportBatches)
+      .where(inArray(paymentStatementImportBatches.id, [firstConcurrentBatchId, reviewedRepeatBatchId]));
+    assert.equal(concurrentBatches.length, 2, "an explicitly reviewed repeat should create one additional batch");
+    const concurrentLines = await db.select().from(paymentStatementLines)
+      .where(inArray(paymentStatementLines.importBatchId, [firstConcurrentBatchId, reviewedRepeatBatchId]));
+    assert.equal(concurrentLines.length, 2, "only the accepted and explicitly reviewed imports should save rows");
+    statementLineIds.push(...concurrentLines.map((line) => line.id));
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
