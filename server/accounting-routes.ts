@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -52,9 +52,11 @@ const expenseSchema = z.object({
   notes: z.string().trim().max(1000).optional().default(""),
 });
 const expenseCorrectionSchema = expenseSchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(80),
   reason: z.string().trim().min(3).max(450),
 });
 const ownerFundCorrectionSchema = cashInSchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(80),
   reason: z.string().trim().min(3).max(450),
 });
 const openingBalanceSchema = z.object({
@@ -88,6 +90,56 @@ async function activeCorrection(tx: any, recordType: string, recordId: number) {
   return correction ?? null;
 }
 
+async function findCorrectionReplay(
+  tx: any,
+  input: {
+    idempotencyKey: string;
+    recordType: "business_expense" | "owner_fund_transaction";
+    recordId: number;
+    category: string | null;
+    kind: string | null;
+    description: string | null;
+    amountZmw: string;
+    effectiveDate: string;
+    method: "cash" | "bank_transfer" | "mobile_money" | "other";
+    reference: string | null;
+    notes: string | null;
+    reason: string;
+  },
+) {
+  const [correction] = await tx.select().from(accountingCorrections)
+    .where(eq(accountingCorrections.idempotencyKey, input.idempotencyKey))
+    .limit(1);
+  if (!correction) return null;
+  const matches = correction.recordType === input.recordType &&
+    correction.recordId === input.recordId &&
+    correction.category === input.category &&
+    correction.kind === input.kind &&
+    correction.description === input.description &&
+    cents(correction.amountZmw) === cents(input.amountZmw) &&
+    correction.effectiveDate === input.effectiveDate &&
+    correction.method === input.method &&
+    correction.reference === input.reference &&
+    correction.notes === input.notes &&
+    correction.reason === input.reason;
+  if (!matches) return { error: "This save key was already used for different correction details." };
+  if (!correction.reversalEntryId || !correction.replacementEntryId) {
+    throw new Error("The saved correction is missing its linked journal entries.");
+  }
+  const [reversal] = await tx.select().from(journalEntries)
+    .where(eq(journalEntries.id, correction.reversalEntryId)).limit(1);
+  const [replacement] = await tx.select().from(journalEntries)
+    .where(eq(journalEntries.id, correction.replacementEntryId)).limit(1);
+  if (!reversal || !replacement) {
+    throw new Error("The saved correction's linked journal entries could not be found.");
+  }
+  return { correction: { ...correction, reversalEntryId: reversal.id, replacementEntryId: replacement.id }, reversal, replacement };
+}
+
+async function lockCorrectionSubmission(tx: any, idempotencyKey: string) {
+  await tx.execute(sql`select pg_advisory_xact_lock(0, hashtext(${"accounting-correction:" + idempotencyKey}))`);
+}
+
 function accountNameForOwnerKind(kind: string, accounts: Array<{ systemKey: string | null; name: string }>) {
   if (!["owner_contribution", "business_loan", "owner_withdrawal"].includes(kind)) return null;
   const systemKey = ownerFundAccountKey(kind as "owner_contribution" | "business_loan" | "owner_withdrawal");
@@ -97,6 +149,7 @@ function accountNameForOwnerKind(kind: string, accounts: Array<{ systemKey: stri
 async function postAccountingCorrection(tx: any, actor: any, input: {
   recordType: "business_expense" | "owner_fund_transaction";
   recordId: number;
+  idempotencyKey: string;
   sourceKey: string;
   previousCorrection: typeof accountingCorrections.$inferSelect | null;
   category: string | null;
@@ -134,6 +187,7 @@ async function postAccountingCorrection(tx: any, actor: any, input: {
   const [correction] = await tx.insert(accountingCorrections).values({
     recordType: input.recordType,
     recordId: input.recordId,
+    idempotencyKey: input.idempotencyKey,
     previousCorrectionId: input.previousCorrection?.id ?? null,
     category: input.category,
     kind: input.kind,
@@ -279,14 +333,31 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       res.status(400).json({ error: "Enter an expense amount greater than zero." });
       return;
     }
-    const result = await db.transaction(async (tx) => {
+    const result: any = await db.transaction(async (tx) => {
+      await lockCorrectionSubmission(tx, input.idempotencyKey);
       const [expense] = await tx.select().from(businessExpenses)
         .where(eq(businessExpenses.id, expenseId)).for("update").limit(1);
       if (!expense) return null;
-      const previousCorrection = await activeCorrection(tx, "business_expense", expense.id);
-      return postAccountingCorrection(tx, res.locals.actor, {
+      const replay = await findCorrectionReplay(tx, {
+        idempotencyKey: input.idempotencyKey,
         recordType: "business_expense",
         recordId: expense.id,
+        category: input.category,
+        kind: null,
+        description: input.description,
+        amountZmw: input.amountZmw,
+        effectiveDate: input.expenseDate,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+        reason: input.reason,
+      });
+      if (replay) return "error" in replay ? replay : { ...replay, duplicate: true };
+      const previousCorrection = await activeCorrection(tx, "business_expense", expense.id);
+      const correction = await postAccountingCorrection(tx, res.locals.actor, {
+        recordType: "business_expense",
+        recordId: expense.id,
+        idempotencyKey: input.idempotencyKey,
         sourceKey: `business-expense-${expense.id}`,
         previousCorrection,
         category: input.category,
@@ -299,12 +370,18 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         notes: input.notes || null,
         reason: input.reason,
       });
+      return { ...correction, duplicate: false };
     });
+    if (result && "error" in result) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
     if (!result) {
       res.status(404).json({ error: "That expense could not be found." });
       return;
     }
-    res.status(201).json(result);
+    const { duplicate, ...payload } = result;
+    res.status(duplicate ? 200 : 201).json(payload);
   });
 
   app.post("/api/accounting/opening-balances", owner, async (req, res) => {
@@ -586,14 +663,31 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       res.status(400).json({ error: "Enter an amount greater than zero." });
       return;
     }
-    const result = await db.transaction(async (tx) => {
+    const result: any = await db.transaction(async (tx) => {
+      await lockCorrectionSubmission(tx, input.idempotencyKey);
       const [transaction] = await tx.select().from(ownerFundTransactions)
         .where(eq(ownerFundTransactions.id, transactionId)).for("update").limit(1);
       if (!transaction) return null;
-      const previousCorrection = await activeCorrection(tx, "owner_fund_transaction", transaction.id);
-      return postAccountingCorrection(tx, res.locals.actor, {
+      const replay = await findCorrectionReplay(tx, {
+        idempotencyKey: input.idempotencyKey,
         recordType: "owner_fund_transaction",
         recordId: transaction.id,
+        category: null,
+        kind: input.kind,
+        description: null,
+        amountZmw: input.amountZmw,
+        effectiveDate: input.receivedAt,
+        method: input.method,
+        reference: input.reference || null,
+        notes: input.notes || null,
+        reason: input.reason,
+      });
+      if (replay) return "error" in replay ? replay : { ...replay, duplicate: true };
+      const previousCorrection = await activeCorrection(tx, "owner_fund_transaction", transaction.id);
+      const correction = await postAccountingCorrection(tx, res.locals.actor, {
+        recordType: "owner_fund_transaction",
+        recordId: transaction.id,
+        idempotencyKey: input.idempotencyKey,
         sourceKey: `owner-fund-${transaction.id}`,
         previousCorrection,
         category: null,
@@ -606,12 +700,18 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         notes: input.notes || null,
         reason: input.reason,
       });
+      return { ...correction, duplicate: false };
     });
+    if (result && "error" in result) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
     if (!result) {
       res.status(404).json({ error: "That owner-fund transaction could not be found." });
       return;
     }
-    res.status(201).json(result);
+    const { duplicate, ...payload } = result;
+    res.status(duplicate ? 200 : 201).json(payload);
   });
 
   app.get("/api/accounting", owner, async (req, res) => {

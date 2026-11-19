@@ -895,6 +895,7 @@ export const accountingCorrections = pgTable(
     id: serial("id").primaryKey(),
     recordType: varchar("record_type", { length: 32 }).notNull(),
     recordId: integer("record_id").notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 80 }).notNull().default(sql`gen_random_uuid()::text`),
     previousCorrectionId: integer("previous_correction_id")
       .references((): AnyPgColumn => accountingCorrections.id, { onDelete: "restrict" }),
     reversalEntryId: integer("reversal_entry_id")
@@ -914,6 +915,7 @@ export const accountingCorrections = pgTable(
   },
   (table) => [
     index("accounting_corrections_source_idx").on(table.recordType, table.recordId, table.id),
+    uniqueIndex("accounting_corrections_idempotency_key_unique").on(table.idempotencyKey),
     uniqueIndex("accounting_corrections_reversal_entry_unique").on(table.reversalEntryId),
     uniqueIndex("accounting_corrections_replacement_entry_unique").on(table.replacementEntryId),
     check("accounting_corrections_record_type", sql`${table.recordType} in ('business_expense', 'owner_fund_transaction')`),

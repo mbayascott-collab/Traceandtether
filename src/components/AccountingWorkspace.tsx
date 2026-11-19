@@ -101,6 +101,7 @@ export default function AccountingWorkspace() {
   const [loading, setLoading] = useState(true);
   const [editingCorrection, setEditingCorrection] = useState<{ type: "expense" | "fund"; id: number } | null>(null);
   const pendingOwnerFundAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const pendingCorrectionAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -198,12 +199,18 @@ export default function AccountingWorkspace() {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form).entries());
+    const fingerprint = JSON.stringify([path, values]);
+    if (pendingCorrectionAttempt.current?.fingerprint !== fingerprint) {
+      pendingCorrectionAttempt.current = { fingerprint, key: window.crypto.randomUUID() };
+    }
     try {
       const response = await fetch(path, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...values, idempotencyKey: pendingCorrectionAttempt.current.key }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "The correction could not be posted.");
+      pendingCorrectionAttempt.current = null;
       setEditingCorrection(null);
       setNotice("Correction posted. The original record and journal remain in the history.");
       setRange((current) => ({ ...current }));

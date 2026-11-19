@@ -393,6 +393,13 @@
       "when": 1795095569453,
       "tag": "0055_flashy_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1795117208519,
+      "tag": "0056_odd_mauler",
+      "breakpoints": true
     }
   ]
 }

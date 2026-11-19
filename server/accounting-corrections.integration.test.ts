@@ -67,9 +67,12 @@ test("expense and owner-fund corrections preserve originals and post linked bala
   const migration = await pool.query<{ column_name: string | null }>(
     "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'owner_fund_transactions' AND column_name = 'idempotency_key'",
   );
-  if (!migration.rows.length) {
+  const correctionIdempotencyMigration = await pool.query<{ column_name: string | null }>(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'accounting_corrections' AND column_name = 'idempotency_key'",
+  );
+  if (!migration.rows.length || !correctionIdempotencyMigration.rows.length) {
     await pool.end();
-    t.skip("requires the owner-fund idempotency migration");
+    t.skip("requires the owner-fund and accounting-correction idempotency migrations");
     return;
   }
   const suffix = randomUUID();
@@ -186,17 +189,73 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       januaryBeforeCorrection.payload.expenses.some((row: any) => row.id === createdExpenseId),
       "the original expense must appear in its original reporting period before correction",
     );
-    const concurrentCorrections = await Promise.all([
+    const firstExpenseCorrectionKey = randomUUID();
+    const firstExpenseCorrection = {
+      category: "rent",
+      description: `Corrected expense ${suffix}`,
+      amountZmw: "15.75",
+      expenseDate: "2002-03-10",
+      method: "bank_transfer",
+      reference: `corrected-expense-${suffix}`,
+      notes: "Corrected expense note",
+      reason: "Wrong account and amount",
+      idempotencyKey: firstExpenseCorrectionKey,
+    };
+    const firstFundCorrectionKey = randomUUID();
+    const firstFundCorrection = {
+      kind: "business_loan",
+      amountZmw: "30.00",
+      receivedAt: "2002-03-12",
+      method: "bank_transfer",
+      reference: `corrected-fund-${suffix}`,
+      notes: "Corrected loan",
+      reason: "It was a loan, not a contribution",
+      idempotencyKey: firstFundCorrectionKey,
+    };
+    const duplicateSubmissions = await Promise.all([
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection),
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection),
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection),
+      request(`/api/accounting/funds/${createdFundId}/correct`, firstFundCorrection),
+      request(`/api/accounting/funds/${createdFundId}/correct`, firstFundCorrection),
+      request(`/api/accounting/funds/${createdFundId}/correct`, firstFundCorrection),
+    ]);
+    for (const { response, payload } of duplicateSubmissions) {
+      assert.ok([200, 201].includes(response.status), JSON.stringify(payload));
+    }
+    for (const recordType of ["business_expense", "owner_fund_transaction"]) {
+      const recordSubmissions = duplicateSubmissions.filter((submission) =>
+        submission.payload.correction?.recordType === recordType);
+      assert.equal(recordSubmissions.length, 3);
+      assert.equal(recordSubmissions.filter(({ response }) => response.status === 201).length, 1);
+      assert.equal(recordSubmissions.filter(({ response }) => response.status === 200).length, 2);
+      assert.equal(new Set(recordSubmissions.map(({ payload }) => payload.correction.id)).size, 1);
+      assert.ok(recordSubmissions.every(({ payload }) =>
+        payload.correction.reversalEntryId && payload.correction.replacementEntryId));
+    }
+    const repeatedExpense = await request(
+      `/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection,
+    );
+    const repeatedFund = await request(`/api/accounting/funds/${createdFundId}/correct`, firstFundCorrection);
+    assert.equal(repeatedExpense.response.status, 200);
+    assert.equal(repeatedFund.response.status, 200);
+    assert.equal(repeatedExpense.payload.correction.id, duplicateSubmissions[0].payload.correction.id);
+    assert.equal(repeatedFund.payload.correction.id, duplicateSubmissions[3].payload.correction.id);
+    const conflictingRetries = await Promise.all([
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
-        category: "rent",
-        description: `Corrected expense ${suffix}`,
-        amountZmw: "15.75",
-        expenseDate: "2002-03-10",
-        method: "bank_transfer",
-        reference: `corrected-expense-${suffix}`,
-        notes: "Corrected expense note",
-        reason: "Wrong account and amount",
+        ...firstExpenseCorrection,
+        amountZmw: "16.00",
       }),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        ...firstFundCorrection,
+        amountZmw: "31.00",
+      }),
+    ]);
+    for (const conflict of conflictingRetries) {
+      assert.equal(conflict.response.status, 409, JSON.stringify(conflict.payload));
+    }
+
+    const laterCorrections = await Promise.all([
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
         category: "utilities",
         description: `Final expense ${suffix}`,
@@ -206,15 +265,7 @@ test("expense and owner-fund corrections preserve originals and post linked bala
         reference: `final-expense-${suffix}`,
         notes: "Final corrected note",
         reason: "Corrected date and amount",
-      }),
-      request(`/api/accounting/funds/${createdFundId}/correct`, {
-        kind: "business_loan",
-        amountZmw: "30.00",
-        receivedAt: "2002-03-12",
-        method: "bank_transfer",
-        reference: `corrected-fund-${suffix}`,
-        notes: "Corrected loan",
-        reason: "It was a loan, not a contribution",
+        idempotencyKey: randomUUID(),
       }),
       request(`/api/accounting/funds/${createdFundId}/correct`, {
         kind: "owner_withdrawal",
@@ -224,9 +275,10 @@ test("expense and owner-fund corrections preserve originals and post linked bala
         reference: `final-fund-${suffix}`,
         notes: "Final corrected withdrawal",
         reason: "Corrected the transaction classification",
+        idempotencyKey: randomUUID(),
       }),
     ]);
-    for (const correction of concurrentCorrections) {
+    for (const correction of laterCorrections) {
       assert.equal(correction.response.status, 201, JSON.stringify(correction.payload));
     }
 

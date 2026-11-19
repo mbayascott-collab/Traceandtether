@@ -1,0 +1,2 @@
+ALTER TABLE "accounting_corrections" ADD COLUMN "idempotency_key" varchar(80) DEFAULT gen_random_uuid()::text NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "accounting_corrections_idempotency_key_unique" ON "accounting_corrections" USING btree ("idempotency_key");
