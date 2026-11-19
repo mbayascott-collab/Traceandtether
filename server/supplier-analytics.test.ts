@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import express, { type RequestHandler } from "express";
 import test from "node:test";
+import { inArray } from "drizzle-orm";
+import {
+  businessPayments, importExpenses, products, purchaseOrderLines, purchaseOrders,
+  shipmentPurchaseOrders, shipments, suppliers,
+} from "../shared/schema";
 import { supplierDeliveryMetrics, supplierMonthlySpend, supplierShipmentDetails } from "./supplier-analytics";
 import { supplierReportCsv } from "../shared/supplier-report-csv";
 
@@ -239,4 +247,159 @@ test("monthly supplier spend counts shared shipment expenses once in the incurre
       ],
     },
   ]);
+});
+
+test("supplier analytics monthly totals reconcile with selected-period totals", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db, pool }, { registerBusinessReportRoutes }] = await Promise.all([
+    import("./db"),
+    import("./business-report-routes"),
+  ]);
+  const suffix = randomUUID();
+  const app = express();
+  const owner: RequestHandler = (_req, _res, next) => next();
+  registerBusinessReportRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let supplierIds: number[] = [];
+  let productId: number | undefined;
+  let purchaseOrderIds: number[] = [];
+  let shipmentId: number | undefined;
+  let expenseIds: number[] = [];
+  let paymentIds: number[] = [];
+
+  try {
+    const createdSuppliers = await db.insert(suppliers).values([
+      { name: `Monthly reconciliation North ${suffix}` },
+      { name: `Monthly reconciliation East ${suffix}` },
+    ]).returning();
+    supplierIds = createdSuppliers.map(({ id }) => id);
+    const [north, east] = createdSuppliers;
+    assert.ok(north && east);
+
+    const [product] = await db.insert(products).values({
+      sku: `MRE-${suffix}`,
+      name: `Monthly reconciliation product ${suffix}`,
+      status: "active",
+    }).returning();
+    productId = product.id;
+
+    const createdOrders = await db.insert(purchaseOrders).values([
+      {
+        orderNumber: `MRE-N-${suffix.slice(0, 12)}`, supplierId: north.id,
+        status: "received", currency: "USD", exchangeRateToZmw: "2",
+        orderedAt: "2097-01-15",
+      },
+      {
+        orderNumber: `MRE-E-${suffix.slice(0, 12)}`, supplierId: east.id,
+        status: "received", currency: "GBP", exchangeRateToZmw: "4",
+        orderedAt: "2097-02-15",
+      },
+    ]).returning();
+    purchaseOrderIds = createdOrders.map(({ id }) => id);
+    const [northOrder, eastOrder] = createdOrders;
+    assert.ok(northOrder && eastOrder);
+
+    const lines = await db.insert(purchaseOrderLines).values([
+      { purchaseOrderId: northOrder.id, productId, quantityOrdered: 2, unitPrice: "100.00" },
+      { purchaseOrderId: eastOrder.id, productId, quantityOrdered: 1, unitPrice: "50.00" },
+    ]).returning();
+
+    const [shipment] = await db.insert(shipments).values({
+      purchaseOrderId: northOrder.id,
+      shipmentReference: `MRE-S-${suffix.slice(0, 12)}`,
+      status: "received",
+      receivedAt: "2097-02-20",
+    }).returning();
+    shipmentId = shipment.id;
+    await db.insert(shipmentPurchaseOrders).values({
+      shipmentId,
+      purchaseOrderId: eastOrder.id,
+    });
+
+    const createdExpenses = await db.insert(importExpenses).values([
+      {
+        shipmentId, category: "freight", description: "Shared shipment cost",
+        amount: "30.00", currency: "USD", exchangeRateToZmw: "2",
+        basis: "value", incurredAt: "2097-02-20",
+      },
+      {
+        purchaseOrderId: northOrder.id, category: "handling", description: "Order cost",
+        amount: "10.00", currency: "USD", exchangeRateToZmw: "2",
+        basis: "value", incurredAt: "2097-03-10",
+      },
+    ]).returning();
+    expenseIds = createdExpenses.map(({ id }) => id);
+
+    const createdPayments = await db.insert(businessPayments).values([
+      {
+        paymentNumber: `MRE-P1-${suffix.slice(0, 10)}`,
+        direction: "supplier_payment", purchaseOrderId: northOrder.id,
+        amountZmw: "35.00", paymentDate: "2097-01-20", method: "bank_transfer",
+      },
+      {
+        paymentNumber: `MRE-P2-${suffix.slice(0, 10)}`,
+        direction: "supplier_payment", purchaseOrderId: eastOrder.id,
+        amountZmw: "15.00", paymentDate: "2097-03-20", method: "bank_transfer",
+      },
+    ]).returning();
+    paymentIds = createdPayments.map(({ id }) => id);
+    assert.equal(lines.length, 2);
+
+    const response = await fetch(
+      `${baseUrl}/api/supplier-analytics?from=2097-01-01&to=2097-03-31`,
+    );
+    const payload = await response.json() as {
+      totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
+      monthlySpend: {
+        month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+      }[];
+    };
+    assert.equal(response.status, 200, JSON.stringify(payload));
+
+    const cents = (value: string) => {
+      const [whole, fraction = ""] = value.split(".");
+      return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+    };
+    const sumMonthly = (key: "orderedGoodsZmw" | "importCostsZmw" | "paymentsZmw") =>
+      payload.monthlySpend.reduce((sum, month) => sum + cents(month[key]), 0n);
+    assert.equal(payload.totals.orderedGoodsZmw, "600.00");
+    assert.equal(payload.totals.importCostsZmw, "80.00");
+    assert.equal(payload.totals.paymentsZmw, "50.00");
+    assert.equal(sumMonthly("orderedGoodsZmw"), cents(payload.totals.orderedGoodsZmw));
+    assert.equal(sumMonthly("importCostsZmw"), cents(payload.totals.importCostsZmw));
+    assert.equal(sumMonthly("paymentsZmw"), cents(payload.totals.paymentsZmw));
+
+    const february = payload.monthlySpend.find(({ month }) => month === "2097-02");
+    assert.ok(february);
+    assert.equal(february.orderedGoodsZmw, "200.00");
+    assert.equal(february.importCostsZmw, "60.00");
+    assert.equal(february.paymentsZmw, "0.00");
+    assert.equal(cents(february.importCostsZmw), 6_000n, "the shared shipment expense must be counted once");
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    try {
+      if (paymentIds.length) await db.delete(businessPayments).where(inArray(businessPayments.id, paymentIds));
+      if (expenseIds.length) await db.delete(importExpenses).where(inArray(importExpenses.id, expenseIds));
+      if (shipmentId !== undefined) {
+        await db.delete(shipmentPurchaseOrders).where(inArray(shipmentPurchaseOrders.shipmentId, [shipmentId]));
+        await db.delete(shipments).where(inArray(shipments.id, [shipmentId]));
+      }
+      if (purchaseOrderIds.length) {
+        await db.delete(purchaseOrderLines).where(inArray(purchaseOrderLines.purchaseOrderId, purchaseOrderIds));
+        await db.delete(purchaseOrders).where(inArray(purchaseOrders.id, purchaseOrderIds));
+      }
+      if (productId !== undefined) await db.delete(products).where(inArray(products.id, [productId]));
+      if (supplierIds.length) await db.delete(suppliers).where(inArray(suppliers.id, supplierIds));
+    } finally {
+      await pool.end();
+    }
+  }
 });
