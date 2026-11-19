@@ -251,7 +251,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
   const prefix = `marketing-report-${suffix}`;
   const orderPrefix = `MKT-${suffix.slice(0, 20)}`;
   const actorEmail = `${prefix}@example.test`;
-  const reportDate = "2001-01-01";
+  const reportDate = "9999-12-31";
   const app = express();
   app.use(express.json());
   const owner: RequestHandler = (_req, res, next) => {
@@ -370,17 +370,35 @@ test("marketing report counts partial campaign deliveries once and matches poste
       postSaleEntry(fullDeliveryTwo.id, "cogs", "60.00"),
       postSaleEntry(missingDeliveryOne.id, "cogs", "20.00"),
     ]);
-    await db.transaction((tx) => postJournal(tx, {
+    const lateAdjustmentEntry = await db.transaction((tx) => postJournal(tx, {
       sourceKey: `${prefix}-late-adjustment`,
       sourceType: "landed_cost_adjustment",
       sourceId: product.id,
       memo: `${prefix} late landed-cost adjustment`,
       entryDate: reportDate,
       lines: [
-        { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "11.00" },
-        { accountKey: "inventory", productId: product.id, creditZmw: "11.00" },
+        { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "11.01" },
+        { accountKey: "inventory", productId: product.id, creditZmw: "11.01" },
       ],
     }));
+    const readLateAdjustmentJournal = () => db.select({
+      systemKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalEntries.id, lateAdjustmentEntry.id));
+    const postedLateAdjustmentJournal = await readLateAdjustmentJournal();
+    assert.deepEqual(
+      postedLateAdjustmentJournal
+        .map((line) => [line.systemKey, line.debitZmw, line.creditZmw])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      [
+        ["cost_of_goods_sold", "11.01", "0.00"],
+        ["inventory", "0.00", "11.01"],
+      ],
+    );
 
     const campaignExpense = await request("/api/marketing/expenses", {
       campaignId: fullyCostedCampaign.id,
@@ -461,8 +479,8 @@ test("marketing report counts partial campaign deliveries once and matches poste
     }, {
       orderCount: 1,
       attributedRevenueZmw: "300.00",
-      productCostZmw: "99.00",
-      landedCostAdjustmentZmw: "9.00",
+      productCostZmw: "99.01",
+      landedCostAdjustmentZmw: "9.01",
       landedCostAdjustmentDeliveries: [
         {
           deliveryNumber: `MR-${suffix.slice(0, 12)}-F1`,
@@ -474,11 +492,11 @@ test("marketing report counts partial campaign deliveries once and matches poste
           deliveryNumber: `MR-${suffix.slice(0, 12)}-F2`,
           orderNumber: fullyCostedOrder.orderNumber,
           deliveryDate: reportDate,
-          adjustmentZmw: "6.00",
+          adjustmentZmw: "6.01",
         },
       ],
       spendZmw: "7.58",
-      netContributionZmw: "193.42",
+      netContributionZmw: "193.41",
       missingCostOrders: [],
     });
     assert.deepEqual({
@@ -539,13 +557,78 @@ test("marketing report counts partial campaign deliveries once and matches poste
     assert.equal(
       (BigInt(report.payload.totals.productCostZmw.replace(".", "")) -
         BigInt(baseline.payload.totals.productCostZmw.replace(".", ""))).toString(),
-      "12100",
+      "12101",
     );
     assert.equal(report.payload.totals.netContributionZmw, null);
     assert.equal(
       report.payload.totals.missingCostOrders,
       baseline.payload.totals.missingCostOrders + 1,
     );
+
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-cogs-${missingDeliveryTwo.id}`,
+      sourceType: "sales_delivery_cogs",
+      sourceId: missingDeliveryTwo.id,
+      memo: `${prefix} missing delivery cost posting`,
+      entryDate: reportDate,
+      lines: [
+        { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "10.00" },
+        { accountKey: "inventory", productId: product.id, creditZmw: "10.00" },
+      ],
+    }));
+
+    const completeReport = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(completeReport.response.status, 200, JSON.stringify(completeReport.payload));
+    const completeFullCampaign = completeReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === fullyCostedCampaign.id,
+    );
+    const completeMissingCampaign = completeReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === missingCostCampaign.id,
+    );
+    assert.deepEqual({
+      productCostZmw: completeFullCampaign.productCostZmw,
+      landedCostAdjustmentZmw: completeFullCampaign.landedCostAdjustmentZmw,
+      landedCostAdjustmentDeliveries: completeFullCampaign.landedCostAdjustmentDeliveries.map(
+        (delivery: { deliveryNumber: string; adjustmentZmw: string }) => [delivery.deliveryNumber, delivery.adjustmentZmw],
+      ),
+      netContributionZmw: completeFullCampaign.netContributionZmw,
+      missingCostOrders: completeFullCampaign.missingCostOrders,
+    }, {
+      productCostZmw: "98.26",
+      landedCostAdjustmentZmw: "8.26",
+      landedCostAdjustmentDeliveries: [
+        [`MR-${suffix.slice(0, 12)}-F1`, "2.75"],
+        [`MR-${suffix.slice(0, 12)}-F2`, "5.51"],
+      ],
+      netContributionZmw: "194.16",
+      missingCostOrders: [],
+    });
+    assert.deepEqual({
+      productCostZmw: completeMissingCampaign.productCostZmw,
+      landedCostAdjustmentZmw: completeMissingCampaign.landedCostAdjustmentZmw,
+      landedCostAdjustmentDeliveries: completeMissingCampaign.landedCostAdjustmentDeliveries.map(
+        (delivery: { deliveryNumber: string; adjustmentZmw: string }) => [delivery.deliveryNumber, delivery.adjustmentZmw],
+      ),
+      netContributionZmw: completeMissingCampaign.netContributionZmw,
+      missingCostOrders: completeMissingCampaign.missingCostOrders,
+    }, {
+      productCostZmw: "32.75",
+      landedCostAdjustmentZmw: "2.75",
+      landedCostAdjustmentDeliveries: [
+        [`MR-${suffix.slice(0, 12)}-M1`, "1.83"],
+        [`MR-${suffix.slice(0, 12)}-M2`, "0.92"],
+      ],
+      netContributionZmw: "67.25",
+      missingCostOrders: [],
+    });
+    assert.equal(completeReport.payload.totals.landedCostAdjustmentZmw, "11.01");
+    assert.equal(
+      (BigInt(completeReport.payload.totals.productCostZmw.replace(".", "")) -
+        BigInt(baseline.payload.totals.productCostZmw.replace(".", ""))).toString(),
+      "13101",
+    );
+    assert.equal(completeReport.payload.totals.netContributionZmw, "244.66");
+    assert.deepEqual(await readLateAdjustmentJournal(), postedLateAdjustmentJournal);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
