@@ -1,8 +1,10 @@
-export interface StockLocationAvailability {
-  id: number;
-  name: string;
-  available: number;
-}
+export {
+  allocateReservationConsumption,
+  chooseSalesStockAllocations,
+  salesStockLocationPriority,
+} from "../shared/sales-stock-allocation";
+import { chooseSalesStockAllocations, type StockLocationAvailability } from "../shared/sales-stock-allocation";
+export type { StockLocationAvailability } from "../shared/sales-stock-allocation";
 
 export function chooseSalesStockLocation(
   locations: StockLocationAvailability[],
@@ -17,7 +19,6 @@ export function chooseSalesStockLocation(
     }
     return { location: selected };
   }
-
   const eligible = locations
     .filter((location) => location.available >= quantity)
     .sort((left, right) => {

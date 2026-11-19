@@ -4,6 +4,7 @@ import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
+import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
 
 type Mode = "customers" | "orders";
 type Line = { productId: string; quantity: string; unitPriceZmw: string };
@@ -19,13 +20,9 @@ function publicShopDateOffset(daysAgo: number) {
   date.setUTCDate(date.getUTCDate() - daysAgo);
   return date.toISOString().slice(0, 10);
 }
-function suggestedStockLocation(line: SalesOrder["lines"][number]) {
-  return [...line.stockLocations]
-    .filter((location) => location.available >= line.quantity)
-    .sort((left, right) => {
-      const mainPriority = Number(right.name.toLowerCase() === "main") - Number(left.name.toLowerCase() === "main");
-      return mainPriority || left.name.localeCompare(right.name);
-    })[0] ?? null;
+function suggestedStockAllocations(line: SalesOrder["lines"][number]) {
+  const result = chooseSalesStockAllocations(line.stockLocations, line.quantity, null);
+  return "error" in result ? [] : result.allocations;
 }
 export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -385,7 +382,10 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       </form>
           <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Stock location</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{o.lines.map((line) => {
             const choice = stockLocationChoices[`${o.id}:${line.productId}`] ?? "auto";
-            const suggested = suggestedStockLocation(line);
+            const suggested = suggestedStockAllocations(line);
+            const suggestedLabel = suggested.length
+              ? suggested.map((allocation) => `${allocation.name} × ${allocation.quantity}`).join(" + ")
+              : "not enough combined stock";
             return <div key={line.id}>
               <strong>{line.productName}: </strong>
               {o.status === "draft" ? <select
@@ -396,11 +396,17 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                   [`${o.id}:${line.productId}`]: event.target.value === "auto" ? "auto" : Number(event.target.value),
                 }))}
               >
-                <option value="auto">Auto{suggested ? ` · ${suggested.name} (${suggested.available} available)` : " · no location has enough stock"}</option>
+                <option value="auto">Auto · {suggestedLabel}</option>
                 {line.stockLocations.map((location) => <option key={location.id} value={location.id} disabled={location.available < line.quantity}>
                   {location.name} · {location.available} available
                 </option>)}
-              </select> : <span>{line.stockLocationName || "Not reserved"}</span>}
+              </select> : <div className="sales-stock-reservations">
+                {line.stockReservations.length ? line.stockReservations.map((reservation) => (
+                  <small key={reservation.id}>
+                    {reservation.locationName || "Stock"} · {reservation.quantity} · {reservation.status}
+                  </small>
+                )) : <span>{line.stockLocationName || "Not reserved"}</span>}
+              </div>}
             </div>;
           })}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => confirmOrder(o)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
@@ -411,6 +417,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
               <button className="button button-secondary button-small" onClick={() => setReceiptDelivery({ order: o, delivery })}>
                 {delivery.receipt ? "Edit receipt" : "Record receipt"}
               </button>
+              <div className="sales-delivery-stock-history">
+                {delivery.lines.map((line) => <small key={line.salesDeliveryLineId}>
+                  {line.productName} × {line.quantity} · {line.stockLocations.length
+                    ? line.stockLocations.map((location) => `${location.locationName || "Stock"} × ${location.quantity}`).join(", ")
+                    : "location history unavailable"}
+                </small>)}
+              </div>
             </span>)}
             {o.deliveries.map((delivery) => <button key={`invoice-${delivery.id}`} className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
               Invoice {delivery.deliveryNumber} / PDF

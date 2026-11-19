@@ -1,0 +1,2 @@
+DROP INDEX "inventory_reservations_sales_product_unique";--> statement-breakpoint
+CREATE INDEX "inventory_reservations_sales_product_idx" ON "inventory_reservations" USING btree ("sales_order_id","product_id","status");

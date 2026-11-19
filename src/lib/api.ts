@@ -56,6 +56,7 @@ export interface Customer { id: number; name: string; contactPerson: string | nu
 export interface SalesOrderLine {
   id: number; productId: number; productName: string; sku: string; quantity: number; deliveredQuantity: number; remainingQuantity: number;
   unitPriceZmw: string; lineTotalZmw: string; stockLocationId: number | null; stockLocationName: string | null;
+  stockReservations: { id: number; locationId: number | null; locationName: string | null; quantity: number; status: "active" | "released" | "fulfilled" }[];
   stockLocations: { id: number; name: string; available: number }[];
 }
 export interface SalesDeliveryReceiptProof { id: number | null; fileName: string; mimeType: string; }
@@ -69,6 +70,7 @@ export interface SalesDelivery {
     salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string;
     quantity: number; returnedQuantity: number;
     returns: { quantity: number; reason: string; createdAt: string; locationName: string | null }[];
+    stockLocations: { locationId: number | null; locationName: string | null; quantity: number }[];
     unitPriceZmw: string; lineTotalZmw: string;
   }[];
 }

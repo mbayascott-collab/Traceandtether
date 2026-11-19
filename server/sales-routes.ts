@@ -18,7 +18,7 @@ import {
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
 import { inspectDeliveryProof } from "./delivery-proof";
-import { chooseSalesStockLocation } from "./sales-stock-allocation";
+import { allocateReservationConsumption, chooseSalesStockAllocations } from "./sales-stock-allocation";
 import { requireBusinessOwner } from "./access-control";
 import { sendCustomerQuoteEmail } from "./customer-quote-email";
 import {
@@ -101,16 +101,20 @@ async function recordDelivery(tx: any, orderId: number,
     const remaining = line.quantity - (delivered.get(lineId) ?? 0);
     if (quantity > remaining) return { error: `Only ${remaining} more units can be delivered for product ${line.productId}.`, status: 409 };
   }
-  const holdsByProduct = new Map<number, typeof inventoryReservations.$inferSelect>();
+  const holdsByLine = new Map<number, {
+    holds: typeof inventoryReservations.$inferSelect[];
+    consumption: { reservationId: number; locationId: number | null; quantity: number }[];
+  }>();
   for (const lineInput of input.lines) {
     const line = orderLines.find((item: typeof salesOrderLines.$inferSelect) => item.id === lineInput.salesOrderLineId)!;
-    const [hold] = await tx.select().from(inventoryReservations)
+    const holds = await tx.select().from(inventoryReservations)
       .where(and(eq(inventoryReservations.salesOrderId, orderId), eq(inventoryReservations.productId, line.productId), eq(inventoryReservations.status, "active")))
-      .for("update").limit(1);
-    if (!hold || hold.quantity < lineInput.quantity) {
+      .orderBy(asc(inventoryReservations.id)).for("update");
+    const consumption = allocateReservationConsumption(holds, lineInput.quantity);
+    if (!consumption) {
       return { error: `The reserved stock for product ${line.productId} is not enough for this delivery.`, status: 409 };
     }
-    holdsByProduct.set(line.productId, hold);
+    holdsByLine.set(lineInput.salesOrderLineId, { holds, consumption });
   }
   const [delivery] = await tx.insert(salesDeliveries).values({
     deliveryNumber: `DN-${new Date().getUTCFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`,
@@ -123,26 +127,17 @@ async function recordDelivery(tx: any, orderId: number,
     if (!concurrentDelivery) throw new Error("The delivery request could not be recorded.");
     return deliveryRequestResult(tx, concurrentDelivery, orderId, input);
   }
-  await tx.insert(salesDeliveryLines).values(input.lines.map((line) => ({
+  const deliveryLines = await tx.insert(salesDeliveryLines).values(input.lines.map((line) => ({
     deliveryId: delivery.id, salesOrderLineId: line.salesOrderLineId, quantity: line.quantity,
-  })));
+  }))).returning({ id: salesDeliveryLines.id, salesOrderLineId: salesDeliveryLines.salesOrderLineId });
+  const deliveryLineIdByOrderLine = new Map(deliveryLines.map((line: { id: number; salesOrderLineId: number }) => [
+    line.salesOrderLineId, line.id,
+  ]));
 
   let revenue = 0n;
   const cogsLines = [];
   for (const lineInput of input.lines) {
     const line = orderLines.find((item: typeof salesOrderLines.$inferSelect) => item.id === lineInput.salesOrderLineId)!;
-    const hold = holdsByProduct.get(line.productId)!;
-    const remainingReservation = hold.quantity - lineInput.quantity;
-    await tx.update(inventoryReservations).set({
-      quantity: remainingReservation > 0 ? remainingReservation : hold.quantity,
-      status: remainingReservation > 0 ? "active" : "fulfilled",
-      updatedAt: new Date(),
-    }).where(eq(inventoryReservations.id, hold.id));
-    await recordBusinessAudit(tx, {
-      entityType: "inventory_reservation", entityId: hold.id,
-      recordLabel: `Reservation #${hold.id} · product #${line.productId}`,
-      actor, action: "updated", changedFields: ["quantity", "status"],
-    });
     const [movementTotal] = await tx.select({ value: sum(inventoryMovements.quantityDelta) })
       .from(inventoryMovements).where(eq(inventoryMovements.productId, line.productId));
     const onHand = Number(movementTotal?.value ?? 0);
@@ -154,16 +149,35 @@ async function recordDelivery(tx: any, orderId: number,
         { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory delivered" },
       );
     }
-    const [movement] = await tx.insert(inventoryMovements).values({
-      productId: line.productId, locationId: hold.locationId, kind: "reservation_fulfillment", quantityDelta: -lineInput.quantity,
-      reason: `Delivered on ${delivery.deliveryNumber}`, reference: delivery.deliveryNumber,
-      sourceKey: `sales-delivery-${delivery.id}-product-${line.productId}`, reservationId: hold.id,
-    }).returning();
-    await recordBusinessAudit(tx, {
-      entityType: "inventory_movement", entityId: movement.id,
-      recordLabel: `Delivery ${delivery.deliveryNumber} · product #${line.productId}`,
-      actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
-    });
+    const allocation = holdsByLine.get(lineInput.salesOrderLineId)!;
+    const deliveryLineId = deliveryLineIdByOrderLine.get(lineInput.salesOrderLineId)!;
+    const holdsById = new Map(allocation.holds.map((hold) => [hold.id, hold]));
+    for (const consumed of allocation.consumption) {
+      const hold = holdsById.get(consumed.reservationId)!;
+      const remainingReservation = hold.quantity - consumed.quantity;
+      await tx.update(inventoryReservations).set({
+        quantity: remainingReservation > 0 ? remainingReservation : hold.quantity,
+        status: remainingReservation > 0 ? "active" : "fulfilled",
+        updatedAt: new Date(),
+      }).where(eq(inventoryReservations.id, hold.id));
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_reservation", entityId: hold.id,
+        recordLabel: `Reservation #${hold.id} · product #${line.productId}`,
+        actor, action: "updated", changedFields: ["quantity", "status"],
+      });
+      const [movement] = await tx.insert(inventoryMovements).values({
+        productId: line.productId, locationId: hold.locationId, kind: "reservation_fulfillment", quantityDelta: -consumed.quantity,
+        reason: `Delivered on ${delivery.deliveryNumber}`, reference: delivery.deliveryNumber,
+        sourceKey: `sales-delivery-${delivery.id}-line-${deliveryLineId}-reservation-${hold.id}`,
+        reservationId: hold.id, salesDeliveryLineId: deliveryLineId,
+      }).returning();
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id,
+        recordLabel: `Delivery ${delivery.deliveryNumber} · product #${line.productId}`,
+        actor, action: "created",
+        changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference", "reservationId", "salesDeliveryLineId"],
+      });
+    }
     revenue += cents(line.unitPriceZmw) * BigInt(lineInput.quantity);
   }
   if (revenue > 0n) await postJournal(tx, {
@@ -414,7 +428,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows, receiptRows, receiptProofRows, locations, movementBalances, reservationBalances, orderReservations, returnRows] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows, receiptProofRows, locations, movementBalances, reservationBalances, orderReservations, fulfillmentRows, returnRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -455,10 +469,29 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         .groupBy(inventoryReservations.productId, inventoryReservations.locationId),
       db.select({
         salesOrderId: inventoryReservations.salesOrderId, productId: inventoryReservations.productId,
-        locationId: inventoryReservations.locationId, locationName: inventoryLocations.name,
+        reservation: inventoryReservations, locationName: inventoryLocations.name,
       }).from(inventoryReservations)
         .leftJoin(inventoryLocations, eq(inventoryReservations.locationId, inventoryLocations.id))
-        .where(isNotNull(inventoryReservations.salesOrderId)),
+        .where(isNotNull(inventoryReservations.salesOrderId))
+        .orderBy(asc(inventoryReservations.id)),
+      db.select({
+        salesDeliveryLineId: salesDeliveryLines.id,
+        locationId: inventoryMovements.locationId,
+        locationName: inventoryLocations.name,
+        quantityDelta: inventoryMovements.quantityDelta,
+      }).from(inventoryMovements)
+        .innerJoin(salesDeliveries, eq(inventoryMovements.reference, salesDeliveries.deliveryNumber))
+        .innerJoin(salesDeliveryLines, eq(salesDeliveryLines.deliveryId, salesDeliveries.id))
+        .innerJoin(salesOrderLines, and(
+          eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId),
+          eq(salesOrderLines.productId, inventoryMovements.productId),
+        ))
+        .innerJoin(inventoryReservations, eq(inventoryReservations.id, inventoryMovements.reservationId))
+        .leftJoin(inventoryLocations, eq(inventoryMovements.locationId, inventoryLocations.id))
+        .where(and(
+          eq(inventoryMovements.kind, "reservation_fulfillment"),
+          isNotNull(inventoryReservations.salesOrderId),
+        )),
       db.select({
         salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
         quantity: inventoryMovements.quantityDelta,
@@ -492,9 +525,31 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     const reservedByProductLocation = new Map(reservationBalances.map((row) => [
       `${row.productId}:${row.locationId}`, Number(row.quantity ?? 0),
     ]));
-    const orderReservationByProduct = new Map(orderReservations.map((row) => [
-      `${row.salesOrderId}:${row.productId}`, row,
-    ]));
+    const orderReservationsByProduct = new Map<string, {
+      id: number; locationId: number | null; locationName: string | null; quantity: number;
+      status: "active" | "released" | "fulfilled";
+    }[]>();
+    for (const row of orderReservations) {
+      if (row.salesOrderId === null) continue;
+      const key = `${row.salesOrderId}:${row.productId}`;
+      const reservations = orderReservationsByProduct.get(key) ?? [];
+      reservations.push({
+        id: row.reservation.id, locationId: row.reservation.locationId, locationName: row.locationName,
+        quantity: row.reservation.quantity, status: row.reservation.status,
+      });
+      orderReservationsByProduct.set(key, reservations);
+    }
+    const stockByDeliveryLine = new Map<number, { locationId: number | null; locationName: string | null; quantity: number }[]>();
+    for (const row of fulfillmentRows) {
+      if (row.salesDeliveryLineId === null) continue;
+      const locationsForLine = stockByDeliveryLine.get(row.salesDeliveryLineId) ?? [];
+      const existing = locationsForLine.find((item) => item.locationId === row.locationId);
+      if (existing) existing.quantity += -row.quantityDelta;
+      else locationsForLine.push({
+        locationId: row.locationId, locationName: row.locationName, quantity: -row.quantityDelta,
+      });
+      stockByDeliveryLine.set(row.salesDeliveryLineId, locationsForLine);
+    }
     const returnsByDeliveryLine = new Map<number, typeof returnRows>();
     for (const row of returnRows) {
       if (row.salesDeliveryLineId === null) continue;
@@ -511,13 +566,16 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const items = lines.filter(({ line }) => line.salesOrderId === order.id)
         .map(({ line, productName, sku }) => {
           const deliveredQuantity = deliveredByLine.get(line.id) ?? (order.status === "fulfilled" ? line.quantity : 0);
-          const reservation = orderReservationByProduct.get(`${order.id}:${line.productId}`);
+          const stockReservations = orderReservationsByProduct.get(`${order.id}:${line.productId}`) ?? [];
           return {
             ...line, productName, sku, deliveredQuantity,
             remainingQuantity: Math.max(0, line.quantity - deliveredQuantity),
             lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
-            stockLocationId: reservation?.locationId ?? null,
-            stockLocationName: reservation?.locationName ?? null,
+            stockLocationId: stockReservations.length === 1 ? stockReservations[0].locationId : null,
+            stockLocationName: stockReservations.length
+              ? stockReservations.map((reservation) => `${reservation.locationName ?? "Stock"} (${reservation.quantity})`).join(", ")
+              : null,
+            stockReservations,
             stockLocations: locations.map((location) => ({
               ...location,
               available: Math.max(0,
@@ -530,7 +588,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const deliveriesById = new Map<number, {
         id: number; deliveryNumber: string; deliveryDate: string;
         receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null; proofs: { id: number | null; fileName: string; mimeType: string }[] } | null;
-        lines: { salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string; quantity: number; returnedQuantity: number; returns: { quantity: number; reason: string; createdAt: Date; locationName: string | null }[]; unitPriceZmw: string; lineTotalZmw: string }[];
+        lines: { salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string; quantity: number; returnedQuantity: number; returns: { quantity: number; reason: string; createdAt: Date; locationName: string | null }[]; stockLocations: { locationId: number | null; locationName: string | null; quantity: number }[]; unitPriceZmw: string; lineTotalZmw: string }[];
         totalZmw: string;
       }>();
       for (const row of orderDeliveries) {
@@ -555,6 +613,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
             quantity: returned.quantity, reason: returned.reason, createdAt: returned.createdAt,
             locationName: returned.locationName,
           })),
+          stockLocations: stockByDeliveryLine.get(row.deliveryLine.id) ?? [],
           unitPriceZmw: row.orderLine.unitPriceZmw,
           lineTotalZmw: money(lineTotal),
         });
@@ -1002,7 +1061,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       }
       const activeLocations = await tx.select({ id: inventoryLocations.id, name: inventoryLocations.name })
         .from(inventoryLocations).where(eq(inventoryLocations.active, true)).orderBy(asc(inventoryLocations.name));
-      const locationByProduct = new Map<number, number>();
+      const allocationsByProduct = new Map<number, { locationId: number; quantity: number }[]>();
       for (const line of lines) {
         const [product] = await tx.select({ id: products.id, status: products.status }).from(products).where(eq(products.id, line.productId)).for("update");
         if (!product || product.status !== "active") return { error: `Product ${line.productId} is no longer active.`, status: 409 };
@@ -1010,18 +1069,23 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
           const balance = await stockBalance(tx, line.productId, location.id);
           return { ...location, available: balance.onHand - balance.reserved };
         }));
-        const allocation = chooseSalesStockLocation(
+        const allocation = chooseSalesStockAllocations(
           stockLocations, line.quantity, requestedLocations.get(line.productId) ?? null,
         );
         if ("error" in allocation) {
           return { error: `Product ${line.productId}: ${allocation.error}`, status: 409 };
         }
-        locationByProduct.set(line.productId, allocation.location.id);
+        allocationsByProduct.set(line.productId, allocation.allocations.map(({ id, quantity }) => ({
+          locationId: id, quantity,
+        })));
       }
-      const reservations = await tx.insert(inventoryReservations).values(lines.map((line) => ({
-        productId: line.productId, locationId: locationByProduct.get(line.productId)!, salesOrderId: id, quantity: line.quantity, reference: order.orderNumber,
-        reason: `Sales order ${order.orderNumber}`, status: "active" as const,
-      }))).returning();
+      const reservations = await tx.insert(inventoryReservations).values(lines.flatMap((line) =>
+        (allocationsByProduct.get(line.productId) ?? []).map((allocation) => ({
+          productId: line.productId, locationId: allocation.locationId, salesOrderId: id,
+          quantity: allocation.quantity, reference: order.orderNumber,
+          reason: `Sales order ${order.orderNumber}`, status: "active" as const,
+        })),
+      )).returning();
       for (const reservation of reservations) await recordBusinessAudit(tx, {
         entityType: "inventory_reservation", entityId: reservation.id,
         recordLabel: `Reservation #${reservation.id} · product #${reservation.productId}`,

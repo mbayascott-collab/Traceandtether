@@ -605,7 +605,7 @@ export const inventoryReservations = pgTable(
   },
   (table) => [
     index("inventory_reservations_product_status_idx").on(table.productId, table.status),
-    uniqueIndex("inventory_reservations_sales_product_unique").on(table.salesOrderId, table.productId),
+    index("inventory_reservations_sales_product_idx").on(table.salesOrderId, table.productId, table.status),
     check("inventory_reservations_quantity_positive", sql`${table.quantity} > 0`),
     check("inventory_reservations_reason_nonempty", sql`length(trim(${table.reason})) > 0`),
   ],
