@@ -6,9 +6,88 @@ import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
   accountingAccounts, customers, journalEntries, journalLines, marketingAttributions,
-  marketingCampaigns, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
+  marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
+
+test("customer-group CSV downloads are limited to owners", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }, { createBusinessAccessMiddleware }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+    import("./access-control"),
+  ]);
+  const suffix = randomUUID();
+  const customerName = `group-export-${suffix}`;
+  const contactEmail = `group-export-${suffix}@example.test`;
+  const contactPhone = `+260-${suffix.slice(0, 8)}`;
+  const groupName = `Group export ${suffix}`;
+  const app = express();
+  const access = createBusinessAccessMiddleware(
+    async (userId) => ({
+      authorized: true as const,
+      actor: {
+        clerkUserId: userId,
+        email: `${userId}@example.test`,
+        role: userId === "test-manager" ? "manager" as const : "owner" as const,
+      },
+    }),
+    (req) => req.header("x-test-user"),
+  );
+  registerMarketingRoutes(app, access);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let customerId: number | undefined;
+  let groupId: number | undefined;
+
+  try {
+    const [customer] = await db.insert(customers).values({
+      name: customerName, email: contactEmail, phone: contactPhone,
+    }).returning();
+    customerId = customer.id;
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: groupName, rules: {},
+    }).returning();
+    groupId = group.id;
+
+    const download = async (userId?: string) => {
+      const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${group.id}/export.csv`, {
+        headers: userId ? { "x-test-user": userId } : undefined,
+      });
+      return { response, body: await response.text() };
+    };
+
+    const ownerDownload = await download("test-owner");
+    assert.equal(ownerDownload.response.status, 200, ownerDownload.body);
+    assert.match(ownerDownload.response.headers.get("content-type") ?? "", /text\/csv/i);
+    assert.ok(ownerDownload.body.includes(customerName));
+    assert.ok(ownerDownload.body.includes(contactEmail));
+    assert.ok(ownerDownload.body.includes(contactPhone));
+
+    const managerDownload = await download("test-manager");
+    assert.equal(managerDownload.response.status, 403);
+    assert.match(managerDownload.body, /Only the business owner/i);
+    assert.ok(!managerDownload.body.includes(customerName));
+    assert.ok(!managerDownload.body.includes(contactEmail));
+    assert.ok(!managerDownload.body.includes(contactPhone));
+
+    const signedOutDownload = await download();
+    assert.equal(signedOutDownload.response.status, 401);
+    assert.match(signedOutDownload.body, /Sign in/i);
+    assert.ok(!signedOutDownload.body.includes(customerName));
+    assert.ok(!signedOutDownload.body.includes(contactEmail));
+    assert.ok(!signedOutDownload.body.includes(contactPhone));
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
+  }
+});
 
 test("marketing report counts partial campaign deliveries once and matches posted costs and expenses", {
   skip: !process.env.DATABASE_URL,
