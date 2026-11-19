@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -255,16 +255,20 @@ function MovementTable({
   onCorrect: (movement: InventoryMovement) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) => Promise<void>;
 }) {
-  const correctedBy = new Map(movements.filter((movement) => movement.correctionOfMovementId !== null)
-    .map((movement) => [movement.correctionOfMovementId!, movement]));
-  return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => {
-    const child = correctedBy.get(m.id);
-    const correctionLink = m.kind === "opening_stock_reversal"
-      ? `Reverses #${m.correctionOfMovementId}`
-      : m.correctionOfMovementId !== null
-        ? `Replaces reversal #${m.correctionOfMovementId}`
-        : child ? `Corrected by #${child.id}` : "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
+  const correctionLinks = inventoryMovementCorrectionLinks(movements);
+  function downloadCsv() {
+    const csv = inventoryMovementHistoryCsv(movements);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `stock-movement-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  return <div className="panel data-table-wrap"><div className="toolbar"><h2>Movement history</h2><button type="button" className="button button-secondary" onClick={downloadCsv} disabled={!movements.length}>Export CSV</button></div><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => {
+    const correctionLink = correctionLinks.get(m.id) ?? "—";
+    const hasCorrection = correctionLink !== "—";
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !hasCorrection && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
       {m.evidenceFiles.length ? <>{m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>)}{m.evidenceFiles.length > 1 && <><br /><a className="button button-secondary button-small" href={inventoryMovementEvidenceArchiveUrl(m.id)}>Download all files (.zip)</a></>}</> : "—"}
       {m.kind === "opening_stock" && m.evidenceFiles.length < 5 && <form className="inventory-evidence-append" onSubmit={(event) => onSubmit(event, async (data) => {
         const selected = data.get("additionalEvidence");

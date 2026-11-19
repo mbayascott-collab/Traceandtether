@@ -436,6 +436,47 @@ export async function fetchInventory(): Promise<{ inventory: InventoryItem[]; lo
 export async function fetchInventoryMovements(): Promise<InventoryMovement[]> {
   return (await request<{ movements: InventoryMovement[] }>("/api/inventory/movements")).movements;
 }
+export function inventoryMovementCorrectionLinks(movements: InventoryMovement[]): Map<number, string> {
+  const correctedBy = new Map(movements
+    .filter((movement) => movement.correctionOfMovementId !== null)
+    .map((movement) => [movement.correctionOfMovementId!, movement]));
+  return new Map(movements.map((movement) => {
+    const child = correctedBy.get(movement.id);
+    const link = movement.kind === "opening_stock_reversal"
+      ? `Reverses #${movement.correctionOfMovementId}`
+      : movement.correctionOfMovementId !== null
+        ? `Replaces reversal #${movement.correctionOfMovementId}`
+        : child ? `Corrected by #${child.id}` : "—";
+    return [movement.id, link];
+  }));
+}
+function spreadsheetSafeText(text: string): string {
+  return /^[\s\u0000-\u001f]*[=+\-@]/.test(text) ? `'${text}` : text;
+}
+function safeCsvCell(value: unknown): string {
+  const text = typeof value === "string" ? spreadsheetSafeText(value) : String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+export function inventoryMovementHistoryCsv(movements: InventoryMovement[]): string {
+  const correctionLinks = inventoryMovementCorrectionLinks(movements);
+  const rows: unknown[][] = [
+    ["Movement ID", "Date (UTC)", "Product", "SKU", "Location", "Type", "Quantity change", "Reason", "Correction link", "Reference", "Evidence filenames"],
+    ...movements.map((movement) => [
+      movement.id,
+      movement.createdAt,
+      movement.productName,
+      movement.sku,
+      movement.locationName || "Main",
+      movement.kind.replaceAll("_", " "),
+      movement.quantityDelta,
+      movement.reason,
+      correctionLinks.get(movement.id) ?? "—",
+      movement.reference || "",
+      movement.evidenceFiles.map((file) => spreadsheetSafeText(file.fileName)).join("; "),
+    ]),
+  ];
+  return rows.map((row) => row.map(safeCsvCell).join(",")).join("\r\n");
+}
 export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: number | null, download = false): string {
   const base = `/api/inventory/movements/${movementId}/opening-evidence${evidenceId == null ? "" : `/${evidenceId}`}`;
   return download ? `${base}?download=1` : base;
