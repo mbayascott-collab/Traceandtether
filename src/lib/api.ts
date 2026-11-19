@@ -409,6 +409,10 @@ export async function fetchInventory(): Promise<InventoryItem[]> {
 export async function fetchInventoryMovements(): Promise<InventoryMovement[]> {
   return (await request<{ movements: InventoryMovement[] }>("/api/inventory/movements")).movements;
 }
+export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: number | null, download = false): string {
+  const base = `/api/inventory/movements/${movementId}/opening-evidence${evidenceId == null ? "" : `/${evidenceId}`}`;
+  return download ? `${base}?download=1` : base;
+}
 export async function fetchInventoryLocations(): Promise<InventoryLocation[]> {
   return (await request<{ locations: InventoryLocation[] }>("/api/inventory/locations")).locations;
 }

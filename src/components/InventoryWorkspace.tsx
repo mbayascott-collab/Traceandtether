@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
-  recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryMovement, type InventoryReceipt,
+  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryMovement, type InventoryReceipt,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -196,6 +196,6 @@ function MovementTable({ movements, onCorrect }: { movements: InventoryMovement[
       : m.correctionOfMovementId !== null
         ? `Replaces reversal #${m.correctionOfMovementId}`
         : child ? `Corrected by #${child.id}` : "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={file.id === null ? `/api/inventory/movements/${m.id}/opening-evidence` : `/api/inventory/movements/${m.id}/opening-evidence/${file.id}`} target="_blank" rel="noreferrer">{file.fileName}</a></span>) : "—"}</td></tr>;
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>) : "—"}</td></tr>;
   })}{!movements.length && <tr><td colSpan={9}>No stock movements yet.</td></tr>}</tbody></table></div>;
 }

@@ -15,6 +15,7 @@ import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import {
   inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_FILES, parseOpeningStockEvidenceMultipart,
+  safeOpeningStockEvidenceFilename,
 } from "./opening-stock-evidence";
 import {
   accountBalance, allocateInventoryValueByLocationCents, buildOpeningStockLines, calculatePurchaseReceiptPosting, cents, ensureAccountingAccounts, formatCents,
@@ -184,11 +185,12 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     if (!fileName || !mimeType || !data) {
       return res.status(404).json({ error: "No count evidence is saved for this opening-stock entry." });
     }
-    const downloadName = fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    const downloadName = safeOpeningStockEvidenceFilename(fileName);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    if (req.query.download === "1") res.attachment(downloadName);
+    else res.setHeader("Content-Disposition", "inline");
     res.setHeader("Content-Type", mimeType);
-    res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
     return res.send(data);
   });
 
@@ -208,11 +210,12 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         eq(inventoryMovements.kind, "opening_stock"),
       )).limit(1);
     if (!evidence) return res.status(404).json({ error: "Count evidence was not found for this opening-stock entry." });
-    const downloadName = evidence.fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "_");
+    const downloadName = safeOpeningStockEvidenceFilename(evidence.fileName);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    if (req.query.download === "1") res.attachment(downloadName);
+    else res.setHeader("Content-Disposition", "inline");
     res.setHeader("Content-Type", evidence.mimeType);
-    res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
     return res.send(evidence.data);
   });
 

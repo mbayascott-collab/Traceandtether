@@ -6,6 +6,14 @@ export interface OpeningStockEvidenceUpload {
   data: Buffer;
 }
 
+export function safeOpeningStockEvidenceFilename(fileName: string) {
+  const leafName = fileName.split(/[\\/]/).pop()
+    ?.replace(/[\u0000-\u001f\u007f"]/g, "")
+    .trim()
+    .slice(0, 255) ?? "";
+  return leafName && leafName !== "." && leafName !== ".." ? leafName : "count-evidence";
+}
+
 export function parseOpeningStockEvidenceMultipart(body: Buffer, contentType: string) {
   const boundaryMatch = /(?:^|;)\s*boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType);
   const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_BYTES, MAX_OPENING_STOCK_EVIDENCE_FILES,
-  parseOpeningStockEvidenceMultipart,
+  parseOpeningStockEvidenceMultipart, safeOpeningStockEvidenceFilename,
 } from "./opening-stock-evidence";
 
 test("opening-stock evidence accepts supported worksheet and photo types", () => {
@@ -23,6 +23,13 @@ test("opening-stock evidence rejects empty, oversized, and unsupported files", (
 
 test("opening-stock evidence strips paths and unsafe filename characters", () => {
   assert.equal(inspectOpeningStockEvidence(Buffer.from("%PDF-1.7"), '../count"\n-sheet.pdf').fileName, "count-sheet.pdf");
+});
+
+test("download filenames preserve saved names while removing paths and unsafe header characters", () => {
+  assert.equal(safeOpeningStockEvidenceFilename("../count-sheet.pdf"), "count-sheet.pdf");
+  assert.equal(safeOpeningStockEvidenceFilename("C:\\counts\\Révisé.pdf"), "Révisé.pdf");
+  assert.equal(safeOpeningStockEvidenceFilename('bad"\r\nname.pdf'), "badname.pdf");
+  assert.equal(safeOpeningStockEvidenceFilename(".."), "count-evidence");
 });
 
 test("opening-stock multipart upload keeps all count fields and evidence files together", () => {
