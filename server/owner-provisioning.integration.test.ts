@@ -23,17 +23,24 @@ test("Clerk first sign-in provisions only the configured verified owner", {
 
   const suffix = randomUUID();
   const ownerEmail = `owner-${suffix}@example.test`;
+  const ownerSecondaryEmail = `owner-secondary-${suffix}@example.test`;
   const unverifiedEmail = `unverified-${suffix}@example.test`;
   const configuredEmail = `configured-${suffix}@example.test`;
+  const secondaryOnlyPrimaryEmail = `secondary-only-primary-${suffix}@example.test`;
   const managerEmail = `manager-${suffix}@example.test`;
   const ownerUserId = `first-owner-${suffix}`;
   const unverifiedUserId = `unverified-owner-${suffix}`;
+  const secondaryOnlyUserId = `secondary-only-owner-${suffix}`;
   const managerUserId = `other-account-${suffix}`;
   const clerkUsers = new Map([
     [ownerUserId, {
       id: ownerUserId,
       primaryEmailAddressId: "owner-primary",
       emailAddresses: [{
+        id: "owner-secondary",
+        emailAddress: ownerSecondaryEmail,
+        verification: { status: "verified" },
+      }, {
         id: "owner-primary",
         emailAddress: ownerEmail.toUpperCase(),
         verification: { status: "verified" },
@@ -48,6 +55,19 @@ test("Clerk first sign-in provisions only the configured verified owner", {
         verification: { status: "unverified" },
       }],
     }],
+    [secondaryOnlyUserId, {
+      id: secondaryOnlyUserId,
+      primaryEmailAddressId: "secondary-only-primary",
+      emailAddresses: [{
+        id: "secondary-only-primary",
+        emailAddress: secondaryOnlyPrimaryEmail,
+        verification: { status: "verified" },
+      }, {
+        id: "configured-secondary",
+        emailAddress: configuredEmail,
+        verification: { status: "verified" },
+      }],
+    }],
     [managerUserId, {
       id: managerUserId,
       primaryEmailAddressId: "manager-primary",
@@ -59,8 +79,11 @@ test("Clerk first sign-in provisions only the configured verified owner", {
     }],
   ]);
   const previousOwnerEmail = process.env.INITIAL_ADMIN_EMAIL;
-  const userIds = [ownerUserId, unverifiedUserId, managerUserId];
-  const emails = [ownerEmail, unverifiedEmail, configuredEmail, managerEmail];
+  const userIds = [ownerUserId, unverifiedUserId, secondaryOnlyUserId, managerUserId];
+  const emails = [
+    ownerEmail, ownerSecondaryEmail, unverifiedEmail, configuredEmail,
+    secondaryOnlyPrimaryEmail, managerEmail,
+  ];
 
   t.mock.method(clerkClient.users, "getUser", async (userId: string) => {
     const clerkUser = clerkUsers.get(userId);
@@ -89,6 +112,21 @@ test("Clerk first sign-in provisions only the configured verified owner", {
       .where(eq(appUsers.clerkUserId, ownerUserId));
     assert.equal(ownerRecords.length, 1);
     assert.equal(ownerRecords[0]?.role, "owner");
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerSecondaryEmail))).length, 0,
+    "a verified secondary address must not receive a separate owner grant");
+
+    // A configured owner address found only as a secondary email does not grant owner access.
+    process.env.INITIAL_ADMIN_EMAIL = configuredEmail;
+    assert.deepEqual(await resolveUser(secondaryOnlyUserId), {
+      authorized: false,
+      email: secondaryOnlyPrimaryEmail,
+      reason: "email_not_approved",
+    });
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, configuredEmail))).length, 0);
+    assert.equal((await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, secondaryOnlyUserId))).length, 0);
 
     // An unverified Clerk primary address cannot create either access record.
     process.env.INITIAL_ADMIN_EMAIL = unverifiedEmail;
