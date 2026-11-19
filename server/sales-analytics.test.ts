@@ -29,6 +29,19 @@ test("dashboard sales and demand exclude cancelled deliveries but include undeli
   ]);
 });
 
+test("dashboard sales and demand exclude undelivered fulfillments older than both windows", () => {
+  const activity = calculateDashboardSales({
+    monthStart: "2025-02-01",
+    salesWindowStart: "2024-11-01",
+    orders: [{ id: 1, status: "fulfilled", orderDate: "2024-10-31" }],
+    lines: [{ orderId: 1, productId: 100, quantity: 99, price: "9999.99" }],
+    deliveries: [],
+  });
+
+  assert.equal(activity.monthSales, 0n);
+  assert.deepEqual([...activity.demand.entries()], []);
+});
+
 test("counts partial deliveries and undelivered fulfillments once within inclusive period bounds", () => {
   const report = calculateSalesActivity({
     fromDate: "2025-01-31",
