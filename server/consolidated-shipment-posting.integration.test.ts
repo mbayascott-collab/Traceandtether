@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import {
-  accountingAccounts, inventoryLocations, inventoryMovements, journalEntries, journalLines,
+  accountingAccounts, importExpenses, inventoryLocations, inventoryMovements, journalEntries, journalLines,
   products, purchaseOrderLines, shipments, shipmentLines, suppliers,
 } from "../shared/schema";
 import { cents, formatCents, journalLinesAreBalanced } from "./accounting-posting";
@@ -124,6 +124,59 @@ test("posts staged consolidated shipment receipts by increment with balanced jou
       })),
     }, 201);
     shipmentId = shipment.id;
+    const { expense } = await request("POST", "/api/import-expenses", {
+      purchaseOrderId: null,
+      shipmentId,
+      category: "Freight",
+      description: `Shared consolidated freight ${suffix}`,
+      amount: "12.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: `FW-${suffix}`,
+      notes: null,
+    }, 201);
+
+    const landedCostByOrder = await Promise.all(purchaseOrderIds.map(async (purchaseOrderId) => {
+      const { orders } = await request(
+        "GET",
+        `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`,
+        undefined,
+        200,
+      );
+      assert.equal(orders.length, 1);
+      return [purchaseOrderId, orders[0].lines[0].allocatedExpensesZmw] as const;
+    }));
+    assert.deepEqual(landedCostByOrder.map(([, amount]) => amount), ["53.33", "66.67"]);
+    const sharedExpenses = await db.select().from(importExpenses).where(eq(importExpenses.shipmentId, shipment.id));
+    assert.equal(sharedExpenses.length, 1, "the consolidated shipment should have one shared freight expense");
+    assert.equal(sharedExpenses[0]!.id, expense.id);
+
+    const expenseEntries = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "import_expense"),
+      eq(journalEntries.sourceId, expense.id),
+    ));
+    assert.equal(expenseEntries.length, 1, "the shared bill should create one payable journal");
+    const expenseJournalLines = await db.select({
+      accountKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, expenseEntries[0]!.id));
+    assert.equal(journalLinesAreBalanced(expenseJournalLines.map((line) => ({
+      accountKey: line.accountKey ?? "",
+      debitZmw: line.debitZmw,
+      creditZmw: line.creditZmw,
+    }))), true, "the freight payable journal should balance");
+    assert.deepEqual(expenseJournalLines.map((line) => [
+      line.accountKey, line.debitZmw, line.creditZmw,
+    ]).sort(([left], [right]) => String(left).localeCompare(String(right))), [
+      ["accounts_payable", "0.00", "120.00"],
+      ["landed_cost_clearing", "120.00", "0.00"],
+    ].sort(([left], [right]) => String(left).localeCompare(String(right))));
+
     const receivedLines = await db.select().from(shipmentLines)
       .where(eq(shipmentLines.shipmentId, shipment.id))
       .orderBy(asc(shipmentLines.id));
@@ -151,6 +204,10 @@ test("posts staged consolidated shipment receipts by increment with balanced jou
       receivedLines.map((line, index) => [line.id, partialQuantities[index]]).sort((a, b) => a[0]! - b[0]!),
     );
 
+    const allocatedExpenseByLine = new Map(createdOrderLines.map((line, index) => [
+      line.id, cents(["53.33", "66.67"][index]!),
+    ]));
+    const stockedByOrderLine = new Map(createdOrderLines.map((line) => [line.id, 0]));
     const posted = [];
     for (const line of receivedLines) {
       const { movement } = await request(
@@ -258,22 +315,69 @@ test("posts staged consolidated shipment receipts by increment with balanced jou
         receivedLines.find((shipmentLine) => shipmentLine.id === entry.shipmentLineId)?.purchaseOrderLineId);
       assert.ok(orderLine, `journal ${entry.id} should link to its purchase-order line`);
       const specification = orderSpecifications[productIds.indexOf(movement.productId)]!;
-      const expectedIncrementCost = formatCents(
-        cents(specification.expectedCost) * BigInt(movement.quantityDelta) / BigInt(specification.quantity),
-      );
+      const priorQuantity = stockedByOrderLine.get(orderLine.id)!;
+      const allocatedFreight = allocatedExpenseByLine.get(orderLine.id)!;
+      const allocatedThrough = (quantity: number) =>
+        (allocatedFreight * BigInt(quantity) + BigInt(specification.quantity) / 2n)
+        / BigInt(specification.quantity);
+      const freightIncrement = allocatedThrough(priorQuantity + movement.quantityDelta) - allocatedThrough(priorQuantity);
+      const goodsCost = cents(specification.expectedCost) * BigInt(movement.quantityDelta)
+        / BigInt(specification.quantity);
+      const expectedIncrementCost = formatCents(goodsCost + freightIncrement);
       assert.deepEqual(lines.map((line) => [
         line.accountKey, line.debitZmw, line.creditZmw,
-      ]), [
+      ]).sort(([left], [right]) => String(left).localeCompare(String(right))), [
         ["inventory", expectedIncrementCost, "0.00"],
-        ["accounts_payable", "0.00", expectedIncrementCost],
-      ]);
+        ["accounts_payable", "0.00", formatCents(goodsCost)],
+        ["landed_cost_clearing", "0.00", formatCents(freightIncrement)],
+      ].sort(([left], [right]) => String(left).localeCompare(String(right))));
+      stockedByOrderLine.set(orderLine.id, priorQuantity + movement.quantityDelta);
     }
+    const receiptClearingLines = await db.select({
+      creditZmw: journalLines.creditZmw,
+    }).from(journalEntries)
+      .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(and(
+        eq(journalEntries.sourceType, "stock_receipt"),
+        inArray(journalEntries.sourceId, testMovements.map((movement) => movement.id)),
+        eq(accountingAccounts.systemKey, "landed_cost_clearing"),
+      ));
+    assert.equal(
+      receiptClearingLines.reduce((total, line) => total + cents(line.creditZmw), 0n),
+      cents("120.00"),
+      "receipt journals should clear the shared freight allocation exactly once",
+    );
+    assert.equal(
+      (await db.select().from(journalEntries).where(and(
+        eq(journalEntries.sourceType, "import_expense"),
+        eq(journalEntries.sourceId, expense.id),
+      ))).length,
+      1,
+      "receipt posting and retries must not duplicate the freight payable journal",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (shipmentId) {
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_type = 'import_expense'
+              AND source_id IN (SELECT id FROM import_expenses WHERE shipment_id = $1)
+          )
+        `, [shipmentId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_type = 'import_expense'
+            AND source_id IN (SELECT id FROM import_expenses WHERE shipment_id = $1)
+        `, [shipmentId]);
+        await client.query("DELETE FROM import_expenses WHERE shipment_id = $1", [shipmentId]);
+      }
       if (productIds.length) {
         await client.query(`
           DELETE FROM journal_lines
