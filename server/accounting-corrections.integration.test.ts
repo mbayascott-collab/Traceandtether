@@ -91,6 +91,10 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(fundResult.response.status, 201, JSON.stringify(fundResult.payload));
     const createdFundId = Number(fundResult.payload.transaction.id);
     fundId = createdFundId;
+    const januaryBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-01-31");
+    const yearBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
+    assert.equal(januaryBeforeCorrection.response.status, 200, JSON.stringify(januaryBeforeCorrection.payload));
+    assert.equal(yearBeforeCorrection.response.status, 200, JSON.stringify(yearBeforeCorrection.payload));
     const fundCorrection = await request(`/api/accounting/funds/${createdFundId}/correct`, {
       kind: "business_loan",
       amountZmw: "30.00",
@@ -111,6 +115,21 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(originalFund.kind, "owner_contribution");
     assert.equal(originalFund.transactionDate, "2002-01-12");
 
+    const januaryReport = await request("/api/accounting?from=2002-01-01&to=2002-01-31");
+    assert.equal(januaryReport.response.status, 200, JSON.stringify(januaryReport.payload));
+    const januaryBefore = new Map(januaryBeforeCorrection.payload.trialBalance.map((row: any) => [row.code, row]));
+    const januaryAfter = new Map(januaryReport.payload.trialBalance.map((row: any) => [row.code, row]));
+    assert.equal(
+      (januaryAfter.get("1010") as any)?.balanceZmw,
+      (januaryBefore.get("1010") as any)?.balanceZmw,
+      "a later correction must not change an earlier cash balance",
+    );
+    assert.equal(
+      (januaryAfter.get("3000") as any)?.balanceZmw,
+      (januaryBefore.get("3000") as any)?.balanceZmw,
+      "a later correction must not change earlier owner equity",
+    );
+
     const reportResult = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
     assert.equal(reportResult.response.status, 200, JSON.stringify(reportResult.payload));
     const reportExpense = reportResult.payload.expenses.find((row: any) => row.id === createdExpenseId);
@@ -122,6 +141,15 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(reportFund.effective.kind, "business_loan");
     assert.equal(reportFund.effective.amountZmw, "30.00");
     assert.equal(reportFund.correctionCount, 1);
+    const previousTrialBalance = new Map(yearBeforeCorrection.payload.trialBalance.map((row: any) => [row.code, row]));
+    const finalTrialBalance = new Map(reportResult.payload.trialBalance.map((row: any) => [row.code, row]));
+    const balanceCents = (trialBalance: Map<any, any>, code: string) =>
+      Math.round(Number((trialBalance.get(code) as any)?.balanceZmw ?? "0.00") * 100);
+    assert.equal(balanceCents(finalTrialBalance, "1010") - balanceCents(previousTrialBalance, "1010"), -2_500);
+    assert.equal(balanceCents(finalTrialBalance, "1020") - balanceCents(previousTrialBalance, "1020"), 3_000);
+    assert.equal(balanceCents(finalTrialBalance, "3000") - balanceCents(previousTrialBalance, "3000"), -2_500);
+    assert.equal(balanceCents(finalTrialBalance, "2200") - balanceCents(previousTrialBalance, "2200"), 3_000);
+    assert.equal(reportResult.payload.totals.trialDebitsZmw, reportResult.payload.totals.trialCreditsZmw);
     assert.equal(reportResult.payload.correctionHistory.filter((row: any) =>
       (row.recordType === "business_expense" && row.recordId === createdExpenseId) ||
       (row.recordType === "owner_fund_transaction" && row.recordId === createdFundId)).length, 3);
@@ -145,11 +173,19 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       ),
     ));
     assert.equal(corrections.length, 3);
+    const fundCorrectionRow = corrections.find((correction) =>
+      correction.recordType === "owner_fund_transaction" && correction.recordId === createdFundId);
+    assert.ok(fundCorrectionRow);
+    assert.equal(fundCorrectionRow.previousCorrectionId, null);
     const relatedJournalIds = corrections.flatMap((correction) => [
       correction.reversalEntryId, correction.replacementEntryId,
     ]).filter((id): id is number => id !== null);
     const journalRows = await db.select().from(journalEntries).where(inArray(journalEntries.id, relatedJournalIds));
     assert.equal(journalRows.length, 6);
+    const replacementEntry = journalRows.find((entry) => entry.id === fundCorrectionRow.replacementEntryId);
+    assert.ok(replacementEntry);
+    assert.equal(replacementEntry.sourceType, "accounting_correction");
+    assert.equal(replacementEntry.sourceId, fundCorrectionRow.id);
     for (const entry of journalRows) {
       const lines = await db.select().from(journalLines).where(eq(journalLines.journalEntryId, entry.id));
       const debits = lines.reduce((sum, line) => sum + Math.round(Number(line.debitZmw) * 100), 0);
