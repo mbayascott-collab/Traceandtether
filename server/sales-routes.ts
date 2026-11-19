@@ -15,7 +15,7 @@ import {
   PUBLIC_SHOP_RETRY_MESSAGE, PublicShopProtectionUnavailableError, publicShopProtection,
 } from "./public-shop-protection";
 import {
-  completePublicShopAttemptDays, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
+  completePublicShopAttemptDays, findPublicShopBlockedSpikes, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
 } from "./public-shop-analytics";
 import { recordBusinessAudit, type AuditActor } from "./audit";
 import { matchesDeliveryRequest } from "./sales-delivery-idempotency";
@@ -423,7 +423,8 @@ export function registerSalesRoutes(
     }).from(publicShopOrderAttemptDailyCounts)
       .where(and(gte(publicShopOrderAttemptDailyCounts.day, from), lte(publicShopOrderAttemptDailyCounts.day, to)))
       .orderBy(asc(publicShopOrderAttemptDailyCounts.day));
-    res.json({ days: completePublicShopAttemptDays(from, to, rows) });
+    const days = completePublicShopAttemptDays(from, to, rows);
+    res.json({ days, blockedSpikes: findPublicShopBlockedSpikes(days) });
   });
 
   app.get("/api/customers", owner, async (_req, res) => {

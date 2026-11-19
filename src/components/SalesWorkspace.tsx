@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, publicShopAttemptDaysCsv, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
-  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
+  type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopBlockedSpike, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 import { matchesCustomerPurchaseHistory } from "../lib/customer-purchase-history";
 import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
@@ -36,6 +36,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [shopAttemptFrom, setShopAttemptFrom] = useState(() => publicShopDateOffset(29));
   const [shopAttemptTo, setShopAttemptTo] = useState(() => publicShopDateOffset(0));
   const [shopAttemptDays, setShopAttemptDays] = useState<PublicShopAttemptDay[] | null>(null);
+  const [shopAttemptBlockedSpikes, setShopAttemptBlockedSpikes] = useState<PublicShopBlockedSpike[]>([]);
   const [shopAttemptDaysRange, setShopAttemptDaysRange] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
@@ -82,10 +83,12 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     let alive = true;
     setShopAttemptDays(null);
     setShopAttemptDaysRange(null);
+    setShopAttemptBlockedSpikes([]);
     fetchPublicShopOrderAttemptDays(shopAttemptFrom, shopAttemptTo)
-      .then((days) => {
+      .then(({ days, blockedSpikes }) => {
         if (alive) {
           setShopAttemptDays(days);
+          setShopAttemptBlockedSpikes(blockedSpikes);
           setShopAttemptDaysRange(`${shopAttemptFrom}:${shopAttemptTo}`);
         }
       })
@@ -389,7 +392,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>
         <p className="report-footnote">Only aggregate counts are included in this report; rejected visitor details are not collected or exposed here. Reason tracking starts with this update. Older blocked requests appear under “Reason not recorded.”</p>
         <h3>Daily request activity</h3>
-        <p className="report-footnote">Choose a date range to see accepted and blocked requests per day. Dates use UTC.</p>
+        <p className="report-footnote">Choose a date range to see accepted and blocked requests per day. Dates use UTC. A warning appears when more than 25 requests are blocked on a UTC day.</p>
         <div className="form-grid">
           <label>From date<input type="date" value={shopAttemptFrom} max={shopAttemptTo || undefined} onChange={(event) => setShopAttemptFrom(event.target.value)} /></label>
           <label>Through date<input type="date" value={shopAttemptTo} min={shopAttemptFrom || undefined} onChange={(event) => setShopAttemptTo(event.target.value)} /></label>
@@ -401,6 +404,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           <article className="metric-card"><div className="metric-top"><span>Rate-limited in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.rateLimited}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Challenge or honeypot failed</span></div><strong className="metric-value">{shopAttemptRangeTotals.botCheck}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Reason not recorded in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.unclassifiedBlocked}</strong></article>
+        </div>}
+        {shopAttemptDaysForCurrentRange && shopAttemptBlockedSpikes.length > 0 && <div className="notice-strip" role="alert">
+          <strong>High blocked-request activity</strong>
+          <ul>{shopAttemptBlockedSpikes.map(({ day, blocked }) => <li key={day}>
+            {new Date(`${day}T00:00:00.000Z`).toLocaleDateString("en-ZM", { timeZone: "UTC", dateStyle: "medium" })}: {blocked} requests were blocked, above the warning threshold of 25 per day.
+          </li>)}</ul>
+          <p>These warnings use daily aggregate counts only; visitor identities are not recorded.</p>
         </div>}
         {!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo
           ? <p role="alert">Choose a valid range with the start date on or before the end date.</p>

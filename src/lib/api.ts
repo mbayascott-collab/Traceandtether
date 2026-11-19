@@ -523,9 +523,13 @@ export async function fetchPublicShopOrderAttemptSummary(): Promise<PublicShopAt
   return (await request<{ summary: PublicShopAttemptSummary }>("/api/shop/order-attempt-summary")).summary;
 }
 export type PublicShopAttemptDay = PublicShopAttemptSummary & { day: string };
-export async function fetchPublicShopOrderAttemptDays(from: string, to: string): Promise<PublicShopAttemptDay[]> {
+export type PublicShopBlockedSpike = Pick<PublicShopAttemptDay, "day" | "blocked">;
+export async function fetchPublicShopOrderAttemptDays(from: string, to: string): Promise<{
+  days: PublicShopAttemptDay[];
+  blockedSpikes: PublicShopBlockedSpike[];
+}> {
   const params = new URLSearchParams({ from, to });
-  return (await request<{ days: PublicShopAttemptDay[] }>(`/api/shop/order-attempt-days?${params}`)).days;
+  return request<{ days: PublicShopAttemptDay[]; blockedSpikes: PublicShopBlockedSpike[] }>(`/api/shop/order-attempt-days?${params}`);
 }
 export function publicShopAttemptDaysCsv(days: PublicShopAttemptDay[]): string {
   const rows: unknown[][] = [

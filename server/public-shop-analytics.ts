@@ -10,8 +10,12 @@ export type PublicShopAttemptSummary = {
   unclassifiedBlocked: number;
 };
 export type PublicShopAttemptDay = PublicShopAttemptSummary & { day: string };
+export type PublicShopBlockedSpike = Pick<PublicShopAttemptDay, "day" | "blocked">;
 
 type AttemptCountExecutor = { execute(query: SQL): Promise<unknown> };
+
+// Warn when one UTC day has more than 25 blocked requests, using aggregate totals only.
+export const PUBLIC_SHOP_BLOCKED_REQUEST_WARNING_THRESHOLD = 25;
 
 const emptyAttemptSummary = (): PublicShopAttemptSummary => ({
   accepted: 0,
@@ -53,6 +57,12 @@ export function completePublicShopAttemptDays(
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return days;
+}
+
+export function findPublicShopBlockedSpikes(days: PublicShopAttemptDay[]): PublicShopBlockedSpike[] {
+  return days
+    .filter((day) => day.blocked > PUBLIC_SHOP_BLOCKED_REQUEST_WARNING_THRESHOLD)
+    .map(({ day, blocked }) => ({ day, blocked }));
 }
 
 export function addPublicShopAttempt(

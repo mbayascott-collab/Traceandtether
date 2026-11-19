@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
-  completePublicShopAttemptDays, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
+  completePublicShopAttemptDays, findPublicShopBlockedSpikes, isPublicShopAttemptDateRange, publicShopAttemptSummary, recordPublicShopAttempt,
   type PublicShopAttemptDay, type PublicShopAttemptSummary,
 } from "./public-shop-analytics";
 
@@ -73,6 +73,15 @@ test("daily request activity returns zero-count dates for an empty period", () =
     { day: "2026-02-28", accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
     { day: "2026-03-01", accepted: 0, blocked: 0, rateLimited: 0, botCheck: 0, unclassifiedBlocked: 0 },
   ]);
+});
+
+test("blocked request warnings use only daily aggregate counts above the documented threshold", () => {
+  const days: PublicShopAttemptDay[] = [
+    { day: "2026-11-18", accepted: 1, blocked: 25, rateLimited: 25, botCheck: 0, unclassifiedBlocked: 0 },
+    { day: "2026-11-19", accepted: 0, blocked: 26, rateLimited: 20, botCheck: 6, unclassifiedBlocked: 0 },
+    { day: "2026-11-20", accepted: 0, blocked: 4, rateLimited: 1, botCheck: 3, unclassifiedBlocked: 0 },
+  ];
+  assert.deepEqual(findPublicShopBlockedSpikes(days), [{ day: "2026-11-19", blocked: 26 }]);
 });
 
 test("public shop activity date ranges reject invalid dates and reversed boundaries", () => {
