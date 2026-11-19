@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, publicShopAttemptDaysCsv, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 import { matchesCustomerPurchaseHistory } from "../lib/customer-purchase-history";
@@ -36,6 +36,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [shopAttemptFrom, setShopAttemptFrom] = useState(() => publicShopDateOffset(29));
   const [shopAttemptTo, setShopAttemptTo] = useState(() => publicShopDateOffset(0));
   const [shopAttemptDays, setShopAttemptDays] = useState<PublicShopAttemptDay[] | null>(null);
+  const [shopAttemptDaysRange, setShopAttemptDaysRange] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
@@ -79,11 +80,27 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       return;
     }
     let alive = true;
+    setShopAttemptDays(null);
+    setShopAttemptDaysRange(null);
     fetchPublicShopOrderAttemptDays(shopAttemptFrom, shopAttemptTo)
-      .then((days) => { if (alive) setShopAttemptDays(days); })
+      .then((days) => {
+        if (alive) {
+          setShopAttemptDays(days);
+          setShopAttemptDaysRange(`${shopAttemptFrom}:${shopAttemptTo}`);
+        }
+      })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load public shop request activity."); });
     return () => { alive = false; };
   }, [mode, shopAttemptFrom, shopAttemptTo, reload]);
+  function downloadShopAttemptDaysCsv() {
+    if (!shopAttemptDaysForCurrentRange || !shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo) return;
+    const url = URL.createObjectURL(new Blob([publicShopAttemptDaysCsv(shopAttemptDaysForCurrentRange)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `public-shop-daily-totals-${shopAttemptFrom}-to-${shopAttemptTo}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); const form = event.currentTarget; setError(""); setNotice("");
     try { await action(new FormData(form)); form.reset(); setLines([emptyLine()]); setEditingCustomer(null); setNotice("Saved."); setReload((n) => n + 1); }
@@ -250,7 +267,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     const value = query.trim().toLowerCase();
     return !value || customer.name.toLowerCase().includes(value) || customerCode(customer.id).toLowerCase().includes(value);
   }
-  const shopAttemptRangeTotals = (shopAttemptDays ?? []).reduce(
+  const shopAttemptDaysForCurrentRange = shopAttemptDaysRange === `${shopAttemptFrom}:${shopAttemptTo}` ? shopAttemptDays : null;
+  const shopAttemptRangeTotals = (shopAttemptDaysForCurrentRange ?? []).reduce(
     (totals, day) => ({
       accepted: totals.accepted + day.accepted,
       blocked: totals.blocked + day.blocked,
@@ -375,8 +393,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <div className="form-grid">
           <label>From date<input type="date" value={shopAttemptFrom} max={shopAttemptTo || undefined} onChange={(event) => setShopAttemptFrom(event.target.value)} /></label>
           <label>Through date<input type="date" value={shopAttemptTo} min={shopAttemptFrom || undefined} onChange={(event) => setShopAttemptTo(event.target.value)} /></label>
+          {shopAttemptDaysForCurrentRange && shopAttemptFrom <= shopAttemptTo && <button type="button" className="button button-secondary" onClick={downloadShopAttemptDaysCsv}>Download daily totals CSV</button>}
         </div>
-        {shopAttemptDays && <div className="metric-grid">
+        {shopAttemptDaysForCurrentRange && <div className="metric-grid">
           <article className="metric-card"><div className="metric-top"><span>Accepted in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.accepted}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Blocked in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.blocked}</strong></article>
           <article className="metric-card"><div className="metric-top"><span>Rate-limited in selected dates</span></div><strong className="metric-value">{shopAttemptRangeTotals.rateLimited}</strong></article>
@@ -385,12 +404,12 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         </div>}
         {!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo
           ? <p role="alert">Choose a valid range with the start date on or before the end date.</p>
-          : shopAttemptDays === null
+          : shopAttemptDaysForCurrentRange === null
             ? <p className="report-footnote">Loading daily requests…</p>
             : <div className="data-table-wrap">
               <table>
                 <thead><tr><th>Date (UTC)</th><th>Accepted</th><th>Blocked</th><th>Rate-limited</th><th>Challenge or honeypot failed</th><th>Reason not recorded</th></tr></thead>
-                <tbody>{shopAttemptDays.map((day) => <tr key={day.day}>
+                <tbody>{shopAttemptDaysForCurrentRange.map((day) => <tr key={day.day}>
                   <td>{new Date(`${day.day}T00:00:00.000Z`).toLocaleDateString("en-ZM", { timeZone: "UTC", dateStyle: "medium" })}</td>
                   <td>{day.accepted}</td>
                   <td>{day.blocked}</td>

@@ -527,6 +527,13 @@ export async function fetchPublicShopOrderAttemptDays(from: string, to: string):
   const params = new URLSearchParams({ from, to });
   return (await request<{ days: PublicShopAttemptDay[] }>(`/api/shop/order-attempt-days?${params}`)).days;
 }
+export function publicShopAttemptDaysCsv(days: PublicShopAttemptDay[]): string {
+  const rows: unknown[][] = [
+    ["Date (UTC)", "Accepted", "Blocked"],
+    ...days.map(({ day, accepted, blocked }) => [day, accepted, blocked]),
+  ];
+  return rows.map((row) => row.map((value) => `"${String(value ?? "").replaceAll('"', '""')}"`).join(",")).join("\r\n");
+}
 export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
   return (await request<{ quotes: CustomerQuote[] }>("/api/customer-quotes")).quotes;
 }
