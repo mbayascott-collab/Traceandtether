@@ -109,7 +109,8 @@ export interface PaymentReminderHistoryEntry {
 }
 export interface PaymentOption {
   orderId: number | null; importExpenseId?: number | null; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string; outstandingZmw: string;
-  dueDate: string; overdueDays: number; agingBucket: "not_due" | "1_30_days" | "31_60_days" | "over_60_days";
+  dueDate: string; dueDateSource: "calculated" | "saved" | "recorded";
+  overdueDays: number; agingBucket: "not_due" | "1_30_days" | "31_60_days" | "over_60_days";
   customerEmail?: string | null;
   reminderHistory?: PaymentReminderHistoryEntry[];
 }

@@ -179,13 +179,17 @@ export default function PaymentsWorkspace() {
           <td>{money(item.totalZmw)}</td><td>{money(item.paidZmw)}</td><td><strong>{money(item.outstandingZmw)}</strong></td>
           <td>{agingLabels[item.agingBucket]}{item.overdueDays > 0 ? ` · ${item.overdueDays} days` : ""}</td>
           <td>{item.orderId === null
-            ? item.dueDate
+            ? <div className="form-grid payment-due-date">
+              <span>{item.dueDate}</span>
+              <span className="report-footnote">Expense date</span>
+            </div>
             : <div className="form-grid payment-due-date">
               <input aria-label={`Due date for ${item.orderNumber}`} type="date"
                 value={dueDateDrafts[`${item.direction}-${item.orderId}`] ?? item.dueDate}
                 onChange={(event) => setDueDateDrafts((drafts) => ({ ...drafts, [`${item.direction}-${item.orderId}`]: event.target.value }))} />
               <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
                 onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
+              <span className="report-footnote">{item.dueDateSource === "saved" ? "Manually saved" : "Calculated"}</span>
             </div>}</td>
           <td>{item.direction === "customer_receipt" ? <div className="payment-reminder-cell">
             {item.overdueDays > 0 && <button type="button" className="button button-secondary button-small"

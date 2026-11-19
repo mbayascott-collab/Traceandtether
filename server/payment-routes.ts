@@ -540,6 +540,7 @@ export function registerPaymentRoutes(
       return {
         orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, customerEmail,
         totalZmw: formatCents(netTotal), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
+        dueDateSource: order.dueDate === null ? "calculated" as const : "saved" as const,
         outstandingZmw: formatCents(outstanding), dueDate,
         reminderHistory: (remindersByOrder.get(order.id) ?? []).map((reminder) => ({
           id: reminder.id, status: reminder.status, attemptedAt: reminder.attemptedAt, sentAt: reminder.sentAt,
@@ -551,7 +552,8 @@ export function registerPaymentRoutes(
 
     const bills: Array<{
       orderId: number | null; importExpenseId?: number; orderNumber: string; partyName: string; totalZmw: string; paidZmw: string;
-      outstandingZmw: string; dueDate: string; overdueDays: number; agingBucket: string;
+      outstandingZmw: string; dueDate: string; dueDateSource: "calculated" | "saved" | "recorded";
+      overdueDays: number; agingBucket: string;
     }> = [];
     for (const { order, supplierName, supplierPaymentTermDays } of openPurchaseOrders) {
       const total = await payableForPurchaseOrder(db, order.id, order.orderNumber, accountMap);
@@ -560,7 +562,8 @@ export function registerPaymentRoutes(
       if (total > paid) bills.push({
         orderId: order.id, orderNumber: order.orderNumber, partyName: supplierName,
         totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid),
-        dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
+        dueDate, dueDateSource: order.dueDate === null ? "calculated" : "saved",
+        ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       });
     }
     for (const { expense, shipmentReference, carrier, totalZmw } of sharedExpenseRows) {
@@ -573,7 +576,8 @@ export function registerPaymentRoutes(
         orderNumber: `Forwarder bill · ${shipmentLabel} · ${expense.category}`,
         partyName: "Forwarder",
         totalZmw: formatCents(total), paidZmw: formatCents(paid), outstandingZmw: formatCents(total - paid),
-        dueDate, ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
+        dueDate, dueDateSource: "recorded",
+        ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       });
     }
 

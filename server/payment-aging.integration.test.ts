@@ -149,7 +149,9 @@ test("payment overview derives term dates from deliveries and purchase orders an
     assert.ok(invoice, "customer balance appears in the payment overview");
     assert.ok(bill, "supplier balance appears in the payment overview");
     assert.equal(invoice.dueDate, "2026-11-20", "customer terms start from the latest delivery date");
+    assert.equal(invoice.dueDateSource, "calculated", "customer due date is identified as calculated");
     assert.equal(bill.dueDate, "2026-11-15", "supplier terms start from the purchase-order date");
+    assert.equal(bill.dueDateSource, "calculated", "supplier due date is identified as calculated");
 
     await saveDueDate("customer_receipt", salesOrderId, "2027-01-15");
     await saveDueDate("supplier_payment", purchaseOrderId, "2027-02-20");
@@ -163,9 +165,19 @@ test("payment overview derives term dates from deliveries and purchase orders an
       "a manually saved customer due date takes precedence over changed terms",
     );
     assert.equal(
+      overview.invoices.find((item: any) => item.orderId === salesOrderId)?.dueDateSource,
+      "saved",
+      "customer due date is identified as manually saved",
+    );
+    assert.equal(
       overview.bills.find((item: any) => item.orderId === purchaseOrderId)?.dueDate,
       "2027-02-20",
       "a manually saved supplier due date takes precedence over changed terms",
+    );
+    assert.equal(
+      overview.bills.find((item: any) => item.orderId === purchaseOrderId)?.dueDateSource,
+      "saved",
+      "supplier due date is identified as manually saved",
     );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
