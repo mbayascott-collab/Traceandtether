@@ -57,14 +57,19 @@ test("payment routes post both directions to the selected funds account", {
   let payableJournalKey: string | undefined;
   const paymentIds: number[] = [];
 
-  const request = async (body: unknown) => {
+  const sendPayment = async (body: unknown) => {
     const response = await fetch(`${baseUrl}/api/payments`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     const payload = await response.json() as any;
-    assert.equal(response.status, 201, JSON.stringify(payload));
+    return { status: response.status, payload };
+  };
+
+  const request = async (body: unknown) => {
+    const { status, payload } = await sendPayment(body);
+    assert.equal(status, 201, JSON.stringify(payload));
     return payload.payment as typeof businessPayments.$inferSelect;
   };
 
@@ -232,6 +237,53 @@ test("payment routes post both directions to the selected funds account", {
       await assertPostedToFundsAccount(supplierPayment, fundsAccount, "supplier_payment");
     }
 
+    for (const [direction, orderId] of [
+      ["customer_receipt", salesOrderId],
+      ["supplier_payment", purchaseOrderId],
+    ] as const) {
+      const attempts = [
+        paymentRequest(direction, orderId, "cash"),
+        paymentRequest(direction, orderId, "cash"),
+      ].map((body, index) => ({
+        ...body, amountZmw: "60.00", reference: `CONCURRENT-${direction}-${index}-${suffix}`,
+      }));
+      const results = await Promise.all(attempts.map((body) => sendPayment(body)));
+      assert.deepEqual(
+        results.map(({ status }) => status).sort(),
+        [201, 400],
+        `only one concurrent ${direction} may use the remaining balance`,
+      );
+
+      const savedAttempts = await db.select().from(businessPayments)
+        .where(eq(
+          direction === "customer_receipt" ? businessPayments.salesOrderId : businessPayments.purchaseOrderId,
+          orderId,
+        ));
+      const savedConcurrent = savedAttempts.filter((payment) =>
+        attempts.some((attempt) => attempt.idempotencyKey === payment.idempotencyKey));
+      assert.equal(savedConcurrent.length, 1, `only the accepted ${direction} should persist`);
+      assert.equal(savedConcurrent[0].amountZmw, "60.00");
+      paymentIds.push(savedConcurrent[0].id);
+
+      const rejectedAttempt = attempts.find((attempt) =>
+        results.find((result) => result.payload.payment?.idempotencyKey === attempt.idempotencyKey) === undefined);
+      assert.ok(rejectedAttempt, `one concurrent ${direction} should be rejected`);
+      assert.equal(
+        (await db.select().from(businessPayments)
+          .where(eq(businessPayments.idempotencyKey, rejectedAttempt.idempotencyKey))).length,
+        0,
+        `rejected ${direction} must not persist a payment`,
+      );
+      assert.equal(
+        (await db.select().from(journalEntries)
+          .where(eq(journalEntries.sourceKey, `payment-${savedConcurrent[0].id}`))).length,
+        1,
+        `accepted ${direction} must create exactly one journal`,
+      );
+      const { lines } = await paymentJournal(savedConcurrent[0].id);
+      assert.equal(lines.reduce((total, line) => total + cents(line.debitZmw), 0n), 6_000n);
+    }
+
     assert.deepEqual(
       (await db.select().from(businessPayments).where(eq(businessPayments.id, priorCustomerPayment.id)))[0],
       priorCustomerPaymentSnapshot.payment,
@@ -258,8 +310,13 @@ test("payment routes post both directions to the selected funds account", {
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      const fixturePayments = await client.query<{ id: number }>(
+        "SELECT id FROM business_payments WHERE sales_order_id = $1 OR purchase_order_id = $2",
+        [salesOrderId ?? null, purchaseOrderId ?? null],
+      );
+      for (const payment of fixturePayments.rows) paymentIds.push(payment.id);
       const journalSourceKeys = [
-        ...paymentIds.map((id) => `payment-${id}`),
+        ...[...new Set(paymentIds)].map((id) => `payment-${id}`),
         ...(payableJournalKey ? [payableJournalKey] : []),
       ];
       if (journalSourceKeys.length) {
@@ -270,7 +327,7 @@ test("payment routes post both directions to the selected funds account", {
         await client.query("DELETE FROM journal_entries WHERE source_key = ANY($1::text[])", [journalSourceKeys]);
       }
       if (paymentIds.length) {
-        await client.query("DELETE FROM business_payments WHERE id = ANY($1::int[])", [paymentIds]);
+        await client.query("DELETE FROM business_payments WHERE id = ANY($1::int[])", [[...new Set(paymentIds)]]);
       }
       if (salesOrderId) {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
