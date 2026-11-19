@@ -46,6 +46,21 @@ test("expense routes credit only the selected funds account and preserve prior p
     assert.equal(response.status, 201, JSON.stringify(payload));
     return payload;
   };
+  const getReport = async () => {
+    const response = await fetch(`${baseUrl}/api/accounting?from=2001-02-01&to=2001-03-31`);
+    const payload = await response.json() as any;
+    assert.equal(response.status, 200, JSON.stringify(payload));
+    return payload;
+  };
+  const toCents = (value: string) => {
+    const [whole, fraction = ""] = value.split(".");
+    return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
+  };
+  const netTrialBalance = (report: any, code: string) => {
+    const row = report.trialBalance.find((account: any) => account.code === code);
+    assert.ok(row, `report should include account ${code}`);
+    return toCents(row.debitZmw) - toCents(row.creditZmw);
+  };
   const getPostedEntry = async (entryId: number) => {
     const [entry] = await db.select().from(journalEntries).where(eq(journalEntries.id, entryId));
     const lines = await db.select({
@@ -64,6 +79,7 @@ test("expense routes credit only the selected funds account and preserve prior p
   let historicalExpense: typeof businessExpenses.$inferSelect | undefined;
   let historicalPosting: Awaited<ReturnType<typeof getPostedEntry>> | undefined;
   try {
+    const reportBeforePosting = await getReport();
     const cases = [
       { method: "cash", fundsAccount: "cash_on_hand", expenseDate: "2001-01-01" },
       { method: "bank_transfer", fundsAccount: "bank_account", expenseDate: "2001-02-01" },
@@ -117,6 +133,19 @@ test("expense routes credit only the selected funds account and preserve prior p
         assert.deepEqual(await getPostedEntry(historicalPosting!.entry.id), historicalPosting);
       }
     }
+
+    const reportAfterPosting = await getReport();
+    assert.equal(
+      toCents(reportAfterPosting.totals.expensesZmw) - toCents(reportBeforePosting.totals.expensesZmw),
+      2468n,
+      "the report includes only the bank and mobile-money expenses dated inside the period",
+    );
+    assert.deepEqual(
+      ["1010", "1020", "1030", "1040"].map((code) =>
+        netTrialBalance(reportAfterPosting, code) - netTrialBalance(reportBeforePosting, code)),
+      [-1234n, -1234n, -1234n, 0n],
+      "reported fund balances reflect posted credits through the report end and exclude later postings",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

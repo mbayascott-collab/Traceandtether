@@ -16,12 +16,16 @@ const accounts: AccountingReportAccount[] = [
   { id: 5, code: "4100", name: "Sales revenue", type: "income" },
   { id: 6, code: "5100", name: "Cost of goods sold", type: "expense" },
   { id: 7, code: "6300", name: "Rent expense", type: "expense" },
+  { id: 8, code: "1020", name: "Bank account", type: "asset" },
+  { id: 9, code: "1030", name: "Mobile money", type: "asset" },
+  { id: 10, code: "1040", name: "Other funds", type: "asset" },
 ];
 
 type FixtureLine = AccountingReportLine & { accountKey: string };
 const accountIds = new Map([
   ["cash", 1], ["inventory", 2], ["payable", 3], ["equity", 4],
   ["sales", 5], ["cogs", 6], ["rent", 7],
+  ["bank", 8], ["mobile_money", 9], ["other_funds", 10],
 ]);
 
 function journal(entryDate: string, parts: Array<[string, "debit" | "credit", string]>): FixtureLine[] {
@@ -151,6 +155,45 @@ test("single-day reports include that date's income and expenses but exclude adj
   );
   assert.equal(reports.incomeStatement.find((row) => row.code === "4100")?.amountZmw, "25.00");
   assert.equal(reports.incomeStatement.find((row) => row.code === "6300")?.amountZmw, "4.00");
+});
+
+test("period expense totals and fund balances reconcile to journals across payment methods", () => {
+  const expenseJournals: FixtureLine[] = [
+    ...journal("2026-01-31", [
+      ["rent", "debit", "10.00"], ["cash", "credit", "10.00"],
+    ]),
+    ...journal("2026-02-01", [
+      ["rent", "debit", "12.34"], ["bank", "credit", "12.34"],
+    ]),
+    ...journal("2026-03-15", [
+      ["cogs", "debit", "7.66"], ["mobile_money", "credit", "7.66"],
+    ]),
+    ...journal("2026-03-31", [
+      ["rent", "debit", "5.00"], ["other_funds", "credit", "5.00"],
+    ]),
+    ...journal("2026-04-01", [
+      ["rent", "debit", "100.00"], ["cash", "credit", "100.00"],
+    ]),
+  ];
+  const reports = calculateAccountingReports(accounts, expenseJournals, "2026-02-01", "2026-03-31");
+  const trialByCode = new Map(reports.trialBalance.map((row) => [row.code, row]));
+
+  assert.equal(reports.totals.expensesZmw, "25.00");
+  assert.deepEqual(
+    reports.incomeStatement
+      .filter((row) => row.type === "expense")
+      .map((row) => [row.code, row.amountZmw]),
+    [["5100", "7.66"], ["6300", "17.34"]],
+  );
+  assert.deepEqual(
+    ["1010", "1020", "1030", "1040"].map((code) => trialByCode.get(code)?.creditZmw),
+    ["10.00", "12.34", "7.66", "5.00"],
+    "fund balances include their posted credits through the report end date",
+  );
+  assert.equal(trialByCode.get("1010")?.debitZmw, "0.00");
+  assert.equal(trialByCode.get("1020")?.debitZmw, "0.00");
+  assert.equal(trialByCode.get("1030")?.debitZmw, "0.00");
+  assert.equal(trialByCode.get("1040")?.debitZmw, "0.00");
 });
 
 test("year-end reports keep accumulated losses negative while the balance sheet balances", () => {
