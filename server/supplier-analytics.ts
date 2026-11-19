@@ -4,6 +4,7 @@ export type SupplierDeliveryOrder = {
   id: number;
   supplierId: number;
   supplierName: string;
+  orderNumber?: string;
   status: string;
   expectedAt: string | null;
 };
@@ -11,6 +12,7 @@ export type SupplierDeliveryOrder = {
 export type SupplierDeliveryShipment = {
   id: number;
   purchaseOrderId: number;
+  shipmentReference?: string | null;
   status: string;
   expectedAt: string | null;
   receivedAt: string | null;
@@ -19,6 +21,17 @@ export type SupplierDeliveryShipment = {
 export type SupplierDeliveryLink = {
   shipmentId: number;
   purchaseOrderId: number;
+};
+
+export type SupplierShipmentDetail = {
+  supplierId: number;
+  supplierName: string;
+  orderNumber: string;
+  shipmentId: number;
+  shipmentReference: string | null;
+  status: string;
+  expectedAt: string | null;
+  receivedAt: string | null;
 };
 
 export type SupplierDeliveryMetrics = {
@@ -179,4 +192,48 @@ export function supplierDeliveryMetrics(
   }
 
   return bySupplier;
+}
+
+export function supplierShipmentDetails(
+  orders: SupplierDeliveryOrder[],
+  shipments: SupplierDeliveryShipment[],
+  links: SupplierDeliveryLink[],
+): SupplierShipmentDetail[] {
+  const activeOrders = new Map(
+    orders.filter((order) => order.status !== "cancelled").map((order) => [order.id, order]),
+  );
+  const orderIdsByShipment = new Map<number, Set<number>>();
+  for (const shipment of shipments) {
+    const linked = orderIdsByShipment.get(shipment.id) ?? new Set<number>();
+    linked.add(shipment.purchaseOrderId);
+    orderIdsByShipment.set(shipment.id, linked);
+  }
+  for (const link of links) {
+    const linked = orderIdsByShipment.get(link.shipmentId) ?? new Set<number>();
+    linked.add(link.purchaseOrderId);
+    orderIdsByShipment.set(link.shipmentId, linked);
+  }
+
+  return shipments.flatMap((shipment) => {
+    if (shipment.status === "cancelled") return [];
+    return [...(orderIdsByShipment.get(shipment.id) ?? [])]
+      .flatMap((orderId) => {
+        const order = activeOrders.get(orderId);
+        if (!order) return [];
+        return [{
+          supplierId: order.supplierId,
+          supplierName: order.supplierName,
+          orderNumber: order.orderNumber ?? String(order.id),
+          shipmentId: shipment.id,
+          shipmentReference: shipment.shipmentReference ?? null,
+          status: shipment.status,
+          expectedAt: shipment.expectedAt,
+          receivedAt: shipment.receivedAt,
+        }];
+      });
+  }).sort((a, b) =>
+    a.supplierName.localeCompare(b.supplierName)
+      || a.orderNumber.localeCompare(b.orderNumber)
+      || a.shipmentId - b.shipmentId,
+  );
 }

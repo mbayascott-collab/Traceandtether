@@ -20,6 +20,10 @@ type DashboardData = {
 type SupplierAnalytics = {
   period: { from: string | null; to: string | null };
   monthlySpend: { month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string }[];
+  shipments: {
+    supplierId: number; supplierName: string; orderNumber: string; shipmentId: number;
+    shipmentReference: string | null; status: string; expectedAt: string | null; receivedAt: string | null;
+  }[];
   totals: {
     orderedGoodsZmw: string; importCostsZmw: string; unallocatedImportCostsZmw: string; paymentsZmw: string;
     orders: number; onTimeOrders: number; lateOrders: number; overdueOpenOrders: number;
@@ -248,7 +252,35 @@ export default function BusinessAnalyticsWorkspace() {
           </tr>)}
           {!supplierReport.suppliers.length && <tr><td colSpan={13} className="analytics-supplier-empty">No supplier orders in this period.</td></tr>}
         </tbody></table></div>
-        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis and counted once in the month of the recorded expense date. Supplier payments are reported separately and are not costs. Matched delivery dates use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
+        <section className="analytics-monthly-supplier-spend" aria-labelledby="supplier-shipment-dates-heading">
+          <div className="analytics-monthly-supplier-heading">
+            <div>
+              <h3 id="supplier-shipment-dates-heading">Shipment receipt dates</h3>
+              <p>Only dates recorded on each shipment are shown; missing dates are left blank.</p>
+            </div>
+          </div>
+          <div className="table-wrap analytics-supplier-table-wrap">
+            <table className="analytics-supplier-table">
+              <caption className="analytics-table-caption">Recorded expected and actual receipt dates for shipments linked to orders in the selected period</caption>
+              <thead><tr>
+                <th scope="col">Supplier</th><th scope="col">Purchase order</th><th scope="col">Shipment</th>
+                <th scope="col">Status</th><th scope="col">Expected receipt</th><th scope="col">Actual receipt</th>
+              </tr></thead>
+              <tbody>
+                {supplierReport.shipments.map((shipment) => <tr key={`${shipment.shipmentId}-${shipment.supplierId}-${shipment.orderNumber}`}>
+                  <th scope="row" className="analytics-supplier-name">{shipment.supplierName}</th>
+                  <td>{shipment.orderNumber}</td>
+                  <td>{shipment.shipmentReference || `#${shipment.shipmentId}`}</td>
+                  <td>{shipment.status}</td>
+                  <td>{shipment.expectedAt ?? "—"}</td>
+                  <td>{shipment.receivedAt ?? "—"}</td>
+                </tr>)}
+                {!supplierReport.shipments.length && <tr><td colSpan={6} className="analytics-supplier-empty">No supplier shipments for orders in this period.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis and counted once in the month of the recorded expense date. Supplier payments are reported separately and are not costs. Delivery summaries use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. The shipment detail and export show only dates recorded directly on each shipment. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
       </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
     </>}

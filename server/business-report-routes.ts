@@ -10,7 +10,7 @@ import { forecastCashWithin30Days, suggestedReorderQuantity } from "../shared/bu
 import { allocateLandedCosts } from "../shared/landed-cost";
 import { accountBalance, formatCents } from "./accounting-posting";
 import { db } from "./db";
-import { supplierDeliveryMetrics, supplierMonthlySpend } from "./supplier-analytics";
+import { supplierDeliveryMetrics, supplierMonthlySpend, supplierShipmentDetails } from "./supplier-analytics";
 import { calculateDashboardSales, calculateSalesActivity } from "./sales-analytics";
 
 const cents = (value: string) => {
@@ -216,12 +216,14 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
     const [orders, allOrders, purchaseLines, expenses, payments, shipmentRows, shipmentLinks] = await Promise.all([
       db.select({
         id: purchaseOrders.id, supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
-        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
+        orderNumber: purchaseOrders.orderNumber, status: purchaseOrders.status,
+        expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
       }).from(purchaseOrders).innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
         .where(orderConditions),
       db.select({
         id: purchaseOrders.id, supplierId: purchaseOrders.supplierId, supplierName: suppliers.name,
-        status: purchaseOrders.status, expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
+        orderNumber: purchaseOrders.orderNumber, status: purchaseOrders.status,
+        expectedAt: purchaseOrders.expectedAt, orderedAt: purchaseOrders.orderedAt,
       }).from(purchaseOrders).innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id)),
       db.select({
         lineId: purchaseOrderLines.id, orderId: purchaseOrders.id,
@@ -246,6 +248,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         .where(and(eq(businessPayments.direction, "supplier_payment"), ...paymentConditions)),
       db.select({
         id: shipments.id, purchaseOrderId: shipments.purchaseOrderId, status: shipments.status,
+        shipmentReference: shipments.shipmentReference,
         expectedAt: shipments.expectedAt, receivedAt: shipments.receivedAt,
       }).from(shipments),
       db.select({ shipmentId: shipmentPurchaseOrders.shipmentId, purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
@@ -329,6 +332,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
       }
     }
     const deliveryMetrics = supplierDeliveryMetrics(orders, shipmentRows, shipmentLinks, new Date().toISOString().slice(0, 10));
+    const shipmentDetails = supplierShipmentDetails(orders, shipmentRows, shipmentLinks);
     const monthlySpend = supplierMonthlySpend({
       purchaseLines: purchaseLines.map((line) => ({
         orderedAt: line.orderedAt, status: line.status, totalZmw: line.totalZmw,
@@ -369,6 +373,7 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         incompleteDeliveryOrders: rows.reduce((sum, row) => sum + row.incompleteDeliveryOrders, 0),
       },
       suppliers: rows,
+      shipments: shipmentDetails,
     });
   });
 }

@@ -21,9 +21,21 @@ export type SupplierMonthlySpendRow = {
   paymentsZmw: string;
 };
 
+export type SupplierShipmentDetailRow = {
+  supplierId: number;
+  supplierName: string;
+  orderNumber: string;
+  shipmentId: number;
+  shipmentReference: string | null;
+  status: string;
+  expectedAt: string | null;
+  receivedAt: string | null;
+};
+
 export type SupplierReportCsvData = {
   period: { from: string | null; to: string | null };
   monthlySpend: SupplierMonthlySpendRow[];
+  shipments: SupplierShipmentDetailRow[];
   totals: {
     orderedGoodsZmw: string;
     importCostsZmw: string;
@@ -123,6 +135,19 @@ export function supplierReportCsv(report: SupplierReportCsvData) {
       report.monthlySpend.reduce((total, month) => total + Number(month.importCostsZmw), 0).toFixed(2),
       report.monthlySpend.reduce((total, month) => total + Number(month.paymentsZmw), 0).toFixed(2),
     ],
+    [],
+    ["Supplier shipment receipt dates"],
+    ["Dates below are recorded on the shipment; blank dates are not inferred from purchase orders."],
+    ["Supplier", "Purchase order", "Shipment ID", "Shipment reference", "Status", "Expected receipt date", "Actual receipt date"],
+    ...report.shipments.map((shipment) => [
+      shipment.supplierName,
+      shipment.orderNumber,
+      shipment.shipmentId,
+      shipment.shipmentReference,
+      shipment.status,
+      shipment.expectedAt,
+      shipment.receivedAt,
+    ]),
   ];
   return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }

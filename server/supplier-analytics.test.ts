@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { supplierDeliveryMetrics, supplierMonthlySpend } from "./supplier-analytics";
+import { supplierDeliveryMetrics, supplierMonthlySpend, supplierShipmentDetails } from "./supplier-analytics";
 import { supplierReportCsv } from "../shared/supplier-report-csv";
 
 test("compares recorded shipment dates and uses the purchase order date when shipment expectation is absent", () => {
@@ -81,9 +81,45 @@ test("ignores cancelled orders and shipments and keeps suppliers without date pa
   });
 });
 
+test("shipment details stay within selected orders and leave missing shipment dates blank", () => {
+  const details = supplierShipmentDetails(
+    [
+      { id: 1, supplierId: 7, supplierName: "North", orderNumber: "PO-1", status: "received", expectedAt: "2025-01-10" },
+      { id: 2, supplierId: 8, supplierName: "East", orderNumber: "PO-2", status: "ordered", expectedAt: null },
+      { id: 3, supplierId: 9, supplierName: "West", orderNumber: "PO-3", status: "cancelled", expectedAt: null },
+    ],
+    [
+      { id: 11, purchaseOrderId: 1, shipmentReference: "SHIP-1", status: "received", expectedAt: null, receivedAt: "2025-01-12" },
+      { id: 12, purchaseOrderId: 2, shipmentReference: null, status: "in_transit", expectedAt: null, receivedAt: null },
+      { id: 13, purchaseOrderId: 3, shipmentReference: "SHIP-CANCELLED", status: "cancelled", expectedAt: "2025-01-01", receivedAt: null },
+      { id: 14, purchaseOrderId: 4, shipmentReference: null, status: "received", expectedAt: null, receivedAt: null },
+    ],
+    [{ shipmentId: 11, purchaseOrderId: 2 }],
+  );
+
+  assert.deepEqual(details, [
+    {
+      supplierId: 8, supplierName: "East", orderNumber: "PO-2", shipmentId: 11, shipmentReference: "SHIP-1",
+      status: "received", expectedAt: null, receivedAt: "2025-01-12",
+    },
+    {
+      supplierId: 8, supplierName: "East", orderNumber: "PO-2", shipmentId: 12, shipmentReference: null,
+      status: "in_transit", expectedAt: null, receivedAt: null,
+    },
+    {
+      supplierId: 7, supplierName: "North", orderNumber: "PO-1", shipmentId: 11, shipmentReference: "SHIP-1",
+      status: "received", expectedAt: null, receivedAt: "2025-01-12",
+    },
+  ]);
+});
+
 test("supplier CSV keeps the selected range, supplier delivery values, and unallocated costs separate", () => {
   const csv = supplierReportCsv({
     period: { from: "2025-01-01", to: "2025-01-31" },
+    shipments: [{
+      supplierId: 7, supplierName: "North", orderNumber: "PO-1", shipmentId: 11,
+      shipmentReference: "SHIP-1", status: "received", expectedAt: null, receivedAt: "2025-01-12",
+    }],
     monthlySpend: [{
       month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "35.00", paymentsZmw: "120.00",
     }],
@@ -107,12 +143,16 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
   assert.match(csv, /"Total","2","240\.00","35\.00","120\.00"/);
   assert.match(csv, /"Goods ordered use purchase-order dates; import costs use expense dates; supplier payments use payment dates and are separate from costs\."/);
   assert.match(csv, /"2025-01","240\.00","35\.00","120\.00"/);
+  assert.match(csv, /"Supplier shipment receipt dates"/);
+  assert.match(csv, /"Dates below are recorded on the shipment; blank dates are not inferred from purchase orders\."/);
+  assert.match(csv, /"North","PO-1","11","SHIP-1","received","","2025-01-12"/);
 });
 
 test("supplier CSV protects formula-like supplier names", () => {
   const csv = supplierReportCsv({
     period: { from: null, to: null },
     monthlySpend: [],
+    shipments: [],
     totals: {
       orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
       orders: 0, onTimeOrders: 0, lateOrders: 0, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
