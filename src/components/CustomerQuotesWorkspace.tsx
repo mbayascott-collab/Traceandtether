@@ -2,14 +2,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { convertCustomerQuote, deleteCustomerQuote, emailCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
 import { isCustomerQuoteExpired } from "../../shared/customer-quote-expiry";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
+import CustomerQuotePrintDocument from "./CustomerQuotePrintDocument";
 
 type DraftLine = { productId: string; quantity: string; unitPriceZmw: string };
 const blankLine = (): DraftLine => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const companyName = "Trace and Tether Craft Studio Limited";
-const companyAddress = "164 Mpundu Street, Chelston Extension, Lusaka, Zambia";
-const companyEmail = "traceandtether@gmail.com";
-const companyPhone = "+260-0977-101-967";
 const emptyInput: CustomerQuoteInput = { customerId: 0, validUntil: null, deliveryAddress: null, notes: null, status: "draft", lines: [] };
 
 function isStaleEmailAttempt(quote: CustomerQuote) {
@@ -119,12 +116,6 @@ export default function CustomerQuotesWorkspace() {
       setReload((n) => n + 1);
     }
   }
-  function quoteDate(value: string) {
-    return new Date(value).toLocaleDateString("en-ZM", { day: "numeric", month: "long", year: "numeric" });
-  }
-  function quoteStatusLabel(status: CustomerQuote["status"]) {
-    return status.charAt(0).toUpperCase() + status.slice(1);
-  }
   function isQuoteExpired(quote: CustomerQuote) {
     return isCustomerQuoteExpired(quote.validUntil);
   }
@@ -184,44 +175,7 @@ export default function CustomerQuotesWorkspace() {
           <div><strong id="quote-preview-title">Customer quote preview</strong><span>Choose “Save as PDF” in the print window.</span></div>
           <div><button className="button button-primary" onClick={() => window.print()}>Print / Save PDF</button><button className="button button-secondary" onClick={() => setPrintQuote(null)}>Close</button></div>
         </div>
-        <article className="customer-quote-document" id="customer-quote-print">
-          <header className="customer-quote-document-header">
-            <div className="customer-quote-document-brand">
-              <img src={companyLogo} alt={`${companyName} logo`} />
-              <div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}<br />{companyPhone}</small></div>
-            </div>
-            <div className="customer-quote-document-title">
-              <div><span className="customer-quote-document-kicker">CUSTOMER QUOTATION</span><h1>{printQuote.quoteNumber}</h1></div>
-              <div className="customer-quote-document-meta">
-                <div><span>Quote date</span><strong>{quoteDate(printQuote.createdAt)}</strong></div>
-                <div><span>Status</span><strong className="customer-quote-status">{quoteStatusLabel(printQuote.status)}</strong></div>
-                <div>
-                  <span>Valid until</span>
-                  <strong>{printQuote.validUntil ? quoteDate(printQuote.validUntil) : "No expiry date"}</strong>
-                  {isQuoteExpired(printQuote) && <em className="customer-quote-expired">Expired</em>}
-                </div>
-              </div>
-            </div>
-          </header>
-          <section className="customer-quote-document-customer">
-            <span>PREPARED FOR</span><strong>{printQuote.customerName}</strong>
-            {printQuote.deliveryAddress && <p>{printQuote.deliveryAddress}</p>}
-          </section>
-          <table className="customer-quote-document-table">
-            <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Qty</th><th className="quote-number-cell">Unit price</th><th className="quote-number-cell">Amount</th></tr></thead>
-            <tbody>{printQuote.lines.map((line) => <tr key={line.id}>
-              <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td><td className="quote-number-cell">{money(line.unitPriceZmw)}</td><td className="quote-number-cell">{money(line.lineTotalZmw)}</td>
-            </tr>)}</tbody>
-          </table>
-          {printQuote.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{printQuote.notes}</p></section>}
-          <div className="customer-quote-document-summary">
-            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{money(printQuote.totalZmw)}</strong></div>
-            <div className="customer-quote-document-signoff">
-              <section className="customer-quote-document-acceptance"><strong>Customer approval</strong><div><span>Name and signature</span><span>Date</span></div></section>
-              <footer className="customer-quote-document-footer">All prices are in ZMW. Quote reference: {printQuote.quoteNumber}</footer>
-            </div>
-          </div>
-        </article>
+        <CustomerQuotePrintDocument quote={printQuote} logoSrc={companyLogo} />
       </div>
     </div>}
   </section>;
