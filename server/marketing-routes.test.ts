@@ -10,7 +10,7 @@ import {
   salesOrderLines, salesOrders,
 } from "../shared/schema";
 
-test("marketing report matches posted costs and converted campaign and general expenses", {
+test("marketing report counts partial campaign deliveries once and matches posted costs and expenses", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
   const [{ db, pool }, { registerMarketingRoutes }, { postJournal }] = await Promise.all([
@@ -88,11 +88,11 @@ test("marketing report matches posted costs and converted campaign and general e
     const [fullyCostedOrder] = await db.insert(salesOrders).values({
       orderNumber: `${orderPrefix}-FULL`,
       customerId: customer.id,
-      status: "fulfilled",
+      status: "partially_fulfilled",
       orderDate: reportDate,
     }).returning();
     const [fullyCostedLine] = await db.insert(salesOrderLines).values({
-      salesOrderId: fullyCostedOrder.id, productId: product.id, quantity: 3, unitPriceZmw: "100.00",
+      salesOrderId: fullyCostedOrder.id, productId: product.id, quantity: 4, unitPriceZmw: "100.00",
     }).returning();
     const [missingCostOrder] = await db.insert(salesOrders).values({
       orderNumber: `${orderPrefix}-MISSING`,
@@ -249,6 +249,14 @@ test("marketing report matches posted costs and converted campaign and general e
       netContributionZmw: null,
       missingCostOrders: [missingCostOrder.orderNumber],
     });
+    assert.equal(
+      report.payload.totals.campaignLinkOrders,
+      baseline.payload.totals.campaignLinkOrders + 1,
+    );
+    assert.equal(
+      report.payload.totals.attributedOrders,
+      baseline.payload.totals.attributedOrders + 2,
+    );
     assert.ok(report.payload.ordersMissingProductCost.some(
       (order: { orderNumber: string; campaignName: string }) =>
         order.orderNumber === missingCostOrder.orderNumber
