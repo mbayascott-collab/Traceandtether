@@ -112,6 +112,7 @@ function auditLogWhere({ entityType, actor, from, to }: AuditLogFilters): SQL | 
 export function registerApiRoutes(
   app: import("express").Express,
   businessAccess: RequestHandler = requireBusinessAccess,
+  getCurrentUserId: (req: import("express").Request) => string | null | undefined = (req) => getAuth(req).userId,
 ) {
   app.use("/api", (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
@@ -123,7 +124,7 @@ export function registerApiRoutes(
   });
 
   app.get("/api/me", async (req, res) => {
-    const { userId } = getAuth(req);
+    const userId = getCurrentUserId(req);
     if (!userId) {
       res.status(401).json({ error: "Not signed in." });
       return;

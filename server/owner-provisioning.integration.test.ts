@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import express from "express";
 import test from "node:test";
 import { eq, inArray } from "drizzle-orm";
 import { appUserAccess, appUsers } from "../shared/schema";
@@ -7,10 +9,11 @@ import { appUserAccess, appUsers } from "../shared/schema";
 test("Clerk first sign-in provisions only the configured verified owner", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
-  const [{ db, pool }, { clerkClient }, { resolveUser }] = await Promise.all([
+  const [{ db, pool }, { clerkClient }, { resolveUser, registerApiRoutes }, { createBusinessAccessMiddleware }] = await Promise.all([
     import("./db"),
     import("@clerk/express"),
     import("./routes"),
+    import("./access-control"),
   ]);
   const tables = await pool.query(
     "SELECT to_regclass('public.app_user_access') IS NOT NULL AS access, to_regclass('public.app_users') IS NOT NULL AS users",
@@ -91,9 +94,53 @@ test("Clerk first sign-in provisions only the configured verified owner", {
     return clerkUser as never;
   });
 
+  const app = express();
+  app.use(express.json());
+  const businessAccess = createBusinessAccessMiddleware(resolveUser, () => ownerUserId);
+  registerApiRoutes(app, businessAccess, () => ownerUserId);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const currentUserUrl = `http://127.0.0.1:${address.port}/api/me`;
+  const accessUrl = `http://127.0.0.1:${address.port}/api/user-access`;
+  const originalInsert = db.insert.bind(db);
+  let failOwnerGrantInsert = true;
+  t.mock.method(db, "insert", (table: any) => {
+    if (table === appUserAccess && failOwnerGrantInsert) {
+      failOwnerGrantInsert = false;
+      throw new Error("temporary database error");
+    }
+    return originalInsert(table);
+  });
+
   try {
-    // A verified configured owner gets access on the first sign-in and on repeat sign-in.
+    // A temporary provisioning failure must be retryable from the signed-in current-user endpoint.
     process.env.INITIAL_ADMIN_EMAIL = ` ${ownerEmail.toUpperCase()} `;
+    const failedResponse = await fetch(currentUserUrl);
+    assert.equal(failedResponse.status, 503);
+    assert.deepEqual(await failedResponse.json(), {
+      error: "Account access could not be checked. Try again shortly.",
+    });
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerEmail))).length, 0);
+    assert.equal((await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, ownerUserId))).length, 0);
+
+    const retryResponse = await fetch(currentUserUrl);
+    assert.equal(retryResponse.status, 200);
+    assert.deepEqual(await retryResponse.json(), {
+      authorized: true,
+      email: ownerEmail,
+      role: "owner",
+    });
+
+    const accessResponse = await fetch(accessUrl);
+    assert.equal(accessResponse.status, 200);
+    const accessPayload = await accessResponse.json() as { users: Array<{ email: string; role: string }> };
+    assert.equal(accessPayload.users.filter((user) => user.email === ownerEmail && user.role === "owner").length, 1);
+
+    // A verified configured owner keeps access on repeat sign-in without another grant.
     const firstOwnerSignIn = await resolveUser(ownerUserId);
     assert.deepEqual(firstOwnerSignIn, {
       authorized: true,
@@ -163,6 +210,9 @@ test("Clerk first sign-in provisions only the configured verified owner", {
     else process.env.INITIAL_ADMIN_EMAIL = previousOwnerEmail;
     await db.delete(appUsers).where(inArray(appUsers.clerkUserId, userIds));
     await db.delete(appUserAccess).where(inArray(appUserAccess.email, emails));
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
     await pool.end();
   }
 });
