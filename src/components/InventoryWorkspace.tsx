@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  inventoryMovementEvidenceUrl, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -32,6 +32,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [search, setSearch] = useState("");
   const [openingQuantity, setOpeningQuantity] = useState("");
   const [openingUnitCost, setOpeningUnitCost] = useState("");
+  const [openingEvidence, setOpeningEvidence] = useState<File[]>([]);
   const [correctingMovement, setCorrectingMovement] = useState<InventoryMovement | null>(null);
   const heading = mode === "overview" ? "Inventory" : mode === "receipts" ? "Stock receipts" : mode === "reservations" ? "Reservations" : "Stock adjustments";
   const normalizedSearch = search.trim().toLocaleLowerCase();
@@ -46,6 +47,11 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   })();
   const openingValue = openingValueCents === null ? null
     : `ZMW ${(openingValueCents / 100n).toLocaleString("en-ZM")}.${String(openingValueCents % 100n).padStart(2, "0")}`;
+  const openingEvidenceErrors = openingStockEvidenceErrors(openingEvidence);
+  const openingEvidenceTotalBytes = openingEvidence.reduce((total, file) => total + file.size, 0);
+  const formatFileSize = (bytes: number) => bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 
   useEffect(() => {
     let alive = true;
@@ -181,13 +187,16 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       </form>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => {
         const evidence = d.get("evidence");
+        const selectedEvidence = evidence instanceof FileList ? Array.from(evidence).filter((file) => file.size > 0) : [];
+        const evidenceErrors = openingStockEvidenceErrors(selectedEvidence);
+        if (evidenceErrors.length) throw new Error(evidenceErrors.join(" "));
         return createOpeningStock({
           productId: Number(d.get("productId")), locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),
           unitCostZmw: String(d.get("unitCostZmw")), effectiveAt: String(d.get("effectiveAt")),
           memo: String(d.get("memo")), reference: String(d.get("reference") || "") || null,
-          evidence: evidence instanceof FileList ? Array.from(evidence).filter((file) => file.size > 0) : [],
+          evidence: selectedEvidence,
         });
-      })} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); }}>
+      })} onReset={() => { setOpeningQuantity(""); setOpeningUnitCost(""); setOpeningEvidence([]); }}>
         <h2>Add stock you already have</h2>
         <p className="report-footnote field-full">Enter the counted quantity and reviewed average landed cost per unit in ZMW for this location. The stock value is recorded against opening balance equity, not sales income. Use this once per product at each location; later changes belong in stock adjustments.</p>
         <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku} · currently {p.onHand}</option>)}</select></label>
@@ -198,9 +207,17 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label>Effective date<input name="effectiveAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label>
         <label>Memo<input name="memo" maxLength={500} defaultValue="Reviewed opening stock" required /></label>
         <label>Reference<input name="reference" maxLength={120} placeholder="Opening count or source note" /></label>
-        <label>Count worksheets or photos<input name="evidence" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" /></label>
-        <p className="report-footnote field-full">Optional: attach up to five PDFs or photos, each up to 5 MB. Files are saved with the opening entry and cannot be replaced or removed.</p>
-        <button className="button button-primary">Record opening stock</button>
+        <label>Count worksheets or photos<input name="evidence" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"
+          onChange={(event) => setOpeningEvidence(Array.from(event.currentTarget.files ?? []).filter((file) => file.size > 0))} /></label>
+        <div className="report-footnote field-full" aria-live="polite">
+          <p>Selected files: {openingEvidence.length} of {MAX_OPENING_STOCK_EVIDENCE_FILES} · Total size: {formatFileSize(openingEvidenceTotalBytes)}. Each file must be 5 MB or smaller.</p>
+          {openingEvidence.length > 0 && <ul>{openingEvidence.map((file, index) =>
+            <li key={`${file.name}-${index}`}>{file.name} · {formatFileSize(file.size)}</li>
+          )}</ul>}
+          {openingEvidenceErrors.length > 0 && <ul role="alert">{openingEvidenceErrors.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul>}
+          <p>Files are saved with the opening entry and cannot be replaced or removed.</p>
+        </div>
+        <button className="button button-primary" disabled={openingEvidenceErrors.length > 0}>Record opening stock</button>
       </form>
       {correctingMovement && <form className="panel form-grid" onSubmit={(event) => submit(event, async (d) => {
         await correctOpeningStock(correctingMovement.id, {

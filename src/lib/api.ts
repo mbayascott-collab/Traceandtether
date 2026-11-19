@@ -481,11 +481,27 @@ export async function fulfillReservation(id: number): Promise<void> {
 export async function createInventoryAdjustment(input: { productId: number; locationId: number; quantityDelta: number; reference: string | null; reason: string }): Promise<void> {
   await request("/api/inventory/adjustments", { method: "POST", body: JSON.stringify(input) });
 }
+export const MAX_OPENING_STOCK_EVIDENCE_BYTES = 5 * 1024 * 1024;
+export const MAX_OPENING_STOCK_EVIDENCE_FILES = 5;
+export function openingStockEvidenceErrors(evidence: readonly File[]): string[] {
+  const errors: string[] = [];
+  if (evidence.length > MAX_OPENING_STOCK_EVIDENCE_FILES) {
+    errors.push(`Choose no more than ${MAX_OPENING_STOCK_EVIDENCE_FILES} count files.`);
+  }
+  evidence.forEach((file) => {
+    if (file.size > MAX_OPENING_STOCK_EVIDENCE_BYTES) {
+      errors.push(`${file.name} is larger than 5 MB.`);
+    }
+  });
+  return errors;
+}
 export async function createOpeningStock(input: {
   productId: number; locationId: number; quantity: number; unitCostZmw: string; effectiveAt: string; memo: string; reference: string | null;
   evidence: File[];
 }): Promise<void> {
   const { evidence, ...details } = input;
+  const evidenceErrors = openingStockEvidenceErrors(evidence);
+  if (evidenceErrors.length) throw new Error(evidenceErrors.join(" "));
   if (!evidence.length) {
     await request("/api/inventory/opening-stock", { method: "POST", body: JSON.stringify(details) });
     return;
