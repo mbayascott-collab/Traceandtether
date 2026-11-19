@@ -12,6 +12,7 @@ import { recordBusinessAudit } from "./audit";
 import { cashAccountKeyForMethod, cents, ensureAccountingAccounts, formatCents, postJournal } from "./accounting-posting";
 import { paymentInputSchema } from "./payment-validation";
 import { sendPaymentReminderEmail } from "./payment-reminder-email";
+import { databaseErrorStatus } from "./database-errors";
 import {
   findDuplicateStatementRows, normalizeStatementText, statementImportFingerprint,
   type StatementImportLine,
@@ -87,8 +88,7 @@ function normalizeReference(value: string | null | undefined) {
 }
 
 function isUniqueViolation(error: unknown) {
-  return typeof error === "object" && error !== null && "code" in error
-    && (error as { code?: unknown }).code === "23505";
+  return databaseErrorStatus(error)?.status === 409;
 }
 
 async function payableForPurchaseOrder(tx: any, orderId: number, orderNumber: string, knownAccounts?: Map<string, typeof accountingAccounts.$inferSelect>) {

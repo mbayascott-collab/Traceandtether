@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import test from "node:test";
+import test, { after } from "node:test";
 import { asc, eq, inArray } from "drizzle-orm";
 import {
   businessPayments, customers, journalEntries, journalLines, paymentStatementImportBatches,
   paymentStatementLines, salesOrders,
 } from "../shared/schema";
 import { ensureAccountingAccounts, postJournal } from "./accounting-posting";
+
+const poolsToClose = new Set<{ end: () => Promise<void> }>();
+after(async () => {
+  await Promise.all([...poolsToClose].map((pool) => pool.end()));
+});
 
 test("adding, matching, and unmatching statement lines never changes journals", {
   skip: !process.env.DATABASE_URL,
@@ -20,6 +25,7 @@ test("adding, matching, and unmatching statement lines never changes journals", 
     import("./db"),
     import("./payment-routes"),
   ]);
+  poolsToClose.add(pool);
 
   const suffix = randomUUID();
   const label = suffix.slice(0, 12);
@@ -29,7 +35,6 @@ test("adding, matching, and unmatching statement lines never changes journals", 
   );
   if (!auditTable.rows[0]?.exists) {
     t.skip("requires the business audit database migration");
-    await pool.end();
     return;
   }
 
@@ -153,6 +158,35 @@ test("adding, matching, and unmatching statement lines never changes journals", 
       lineId: secondLineId, paymentId,
     }, 409);
     assert.deepEqual(await journalSnapshot(), before, "rejecting a duplicate match must not change journals");
+
+    await request("/api/payments/reconciliation/match", "PUT", {
+      lineId: firstLineId, paymentId: null,
+    }, 200);
+    assert.deepEqual(await journalSnapshot(), before, "unmatching before a concurrent attempt must not change journals");
+
+    const concurrentLineIds = [firstLineId, statementRows[2]!.id];
+    const concurrentResponses = await Promise.all(concurrentLineIds.map(async (lineId) => {
+      const response = await fetch(`${baseUrl}/api/payments/reconciliation/match`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lineId, paymentId }),
+      });
+      return { lineId, status: response.status, payload: await response.json() };
+    }));
+    assert.deepEqual(
+      concurrentResponses.map(({ status }) => status).sort(),
+      [200, 409],
+      JSON.stringify(concurrentResponses),
+      "simultaneous attempts to match one payment must accept exactly one request",
+    );
+    const concurrentLines = await db.select().from(paymentStatementLines)
+      .where(inArray(paymentStatementLines.id, concurrentLineIds));
+    assert.equal(
+      concurrentLines.filter((line) => line.matchedPaymentId === paymentId).length,
+      1,
+      "one payment must be assigned to exactly one of the concurrent statement rows",
+    );
+    assert.deepEqual(await journalSnapshot(), before, "concurrent matching must not change journal entries or lines");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -175,7 +209,6 @@ test("adding, matching, and unmatching statement lines never changes journals", 
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
 });
@@ -187,6 +220,7 @@ test("CSV statement imports save review rows without changing journals", {
     import("./db"),
     import("./payment-routes"),
   ]);
+  poolsToClose.add(pool);
 
   const suffix = randomUUID();
   const label = suffix.slice(0, 12);
@@ -196,7 +230,6 @@ test("CSV statement imports save review rows without changing journals", {
   );
   if (!auditTable.rows[0]?.exists) {
     t.skip("requires the business audit database migration");
-    await pool.end();
     return;
   }
 
@@ -298,7 +331,6 @@ test("CSV statement imports save review rows without changing journals", {
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
 });
