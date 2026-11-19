@@ -423,11 +423,14 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       landedCostAdjustmentLines,
     );
     const landedCostAdjustmentByOrder = new Map<number, bigint>();
-    const orderByDelivery = new Map(deliveryRows.map(({ deliveryId, orderId }) => [deliveryId, orderId]));
+    const deliveryById = new Map(deliveryRows.map((delivery) => [delivery.deliveryId, delivery]));
     for (const [deliveryId, adjustment] of landedCostAllocations.adjustmentByDelivery) {
-      const orderId = orderByDelivery.get(deliveryId);
-      if (orderId !== undefined) {
-        landedCostAdjustmentByOrder.set(orderId, (landedCostAdjustmentByOrder.get(orderId) ?? 0n) + adjustment);
+      const delivery = deliveryById.get(deliveryId);
+      if (delivery && inRange(delivery.deliveryDate)) {
+        landedCostAdjustmentByOrder.set(
+          delivery.orderId,
+          (landedCostAdjustmentByOrder.get(delivery.orderId) ?? 0n) + adjustment,
+        );
       }
     }
     for (const row of deliveryRows) {
@@ -489,13 +492,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         }
       }
     }
-    const deliveryMetadata = new Map<number, (typeof deliveryRows)[number]>();
-    for (const row of deliveryRows) {
-      if (!deliveryMetadata.has(row.deliveryId)) deliveryMetadata.set(row.deliveryId, row);
-    }
     for (const [deliveryId, adjustment] of landedCostAllocations.adjustmentByDelivery) {
-      const delivery = deliveryMetadata.get(deliveryId);
-      if (!delivery || !deliveredInRange.has(delivery.orderId)) continue;
+      const delivery = deliveryById.get(deliveryId);
+      if (!delivery || !inRange(delivery.deliveryDate)) continue;
       const campaignId = attributedCampaign.get(delivery.orderId)?.campaignId;
       if (campaignId == null || !campaignTotals.has(campaignId)) continue;
       const deliveries = campaignAdjustmentDeliveries.get(campaignId) ?? new Map();

@@ -629,6 +629,170 @@ test("marketing report counts partial campaign deliveries once and matches poste
     );
     assert.equal(completeReport.payload.totals.netContributionZmw, "244.66");
     assert.deepEqual(await readLateAdjustmentJournal(), postedLateAdjustmentJournal);
+
+    const crossPeriodBaseline = await request(
+      "/api/marketing/reports?from=2025-01-10&to=2025-01-10",
+    );
+    assert.equal(crossPeriodBaseline.response.status, 200, JSON.stringify(crossPeriodBaseline.payload));
+
+    const [crossPeriodCampaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} cross-period`, status: "active",
+    }).returning();
+    const [crossPeriodProduct] = await db.insert(products).values({
+      sku: `MKT-${suffix}-CROSS`,
+      name: `${prefix} cross-period product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    const [crossPeriodOrder] = await db.insert(salesOrders).values({
+      orderNumber: `${orderPrefix}-CROSS`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: "2025-01-01",
+    }).returning();
+    const [crossPeriodLine] = await db.insert(salesOrderLines).values({
+      salesOrderId: crossPeriodOrder.id,
+      productId: crossPeriodProduct.id,
+      quantity: 3,
+      unitPriceZmw: "100.00",
+    }).returning();
+    const crossPeriodDeliveries = await Promise.all([
+      db.insert(salesDeliveries).values({
+        deliveryNumber: `MR-${suffix.slice(0, 12)}-C1`,
+        salesOrderId: crossPeriodOrder.id,
+        deliveryDate: "2025-01-10",
+      }).returning(),
+      db.insert(salesDeliveries).values({
+        deliveryNumber: `MR-${suffix.slice(0, 12)}-C2`,
+        salesOrderId: crossPeriodOrder.id,
+        deliveryDate: "2025-01-11",
+      }).returning(),
+      db.insert(salesDeliveries).values({
+        deliveryNumber: `MR-${suffix.slice(0, 12)}-C3`,
+        salesOrderId: crossPeriodOrder.id,
+        deliveryDate: "2025-01-12",
+      }).returning(),
+    ]);
+    const [inRangeDelivery, outOfRangeCostedDelivery, outOfRangeMissingDelivery] =
+      crossPeriodDeliveries.map(([delivery]) => delivery);
+    await db.insert(salesDeliveryLines).values([
+      { deliveryId: inRangeDelivery.id, salesOrderLineId: crossPeriodLine.id, quantity: 1 },
+      { deliveryId: outOfRangeCostedDelivery.id, salesOrderLineId: crossPeriodLine.id, quantity: 1 },
+      { deliveryId: outOfRangeMissingDelivery.id, salesOrderLineId: crossPeriodLine.id, quantity: 1 },
+    ]);
+    await db.insert(marketingAttributions).values({
+      salesOrderId: crossPeriodOrder.id,
+      campaignId: crossPeriodCampaign.id,
+      source: "manual",
+    });
+
+    const postCrossPeriodEntry = (
+      deliveryId: number,
+      kind: "revenue" | "cogs",
+      amount: string,
+      entryDate: string,
+    ) => db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-cross-${kind}-${deliveryId}`,
+      sourceType: kind === "revenue" ? "sales_delivery" : "sales_delivery_cogs",
+      sourceId: deliveryId,
+      memo: `${prefix} cross-period ${kind} posting`,
+      entryDate,
+      lines: kind === "revenue"
+        ? [
+          { accountKey: "accounts_receivable", debitZmw: amount },
+          { accountKey: "sales_revenue", creditZmw: amount },
+        ]
+        : [
+          { accountKey: "cost_of_goods_sold", productId: crossPeriodProduct.id, debitZmw: amount },
+          { accountKey: "inventory", productId: crossPeriodProduct.id, creditZmw: amount },
+        ],
+    }));
+    await Promise.all([
+      postCrossPeriodEntry(inRangeDelivery.id, "revenue", "100.00", "2025-01-10"),
+      postCrossPeriodEntry(outOfRangeCostedDelivery.id, "revenue", "100.00", "2025-01-11"),
+      postCrossPeriodEntry(outOfRangeMissingDelivery.id, "revenue", "100.00", "2025-01-12"),
+      postCrossPeriodEntry(inRangeDelivery.id, "cogs", "10.00", "2025-02-01"),
+      postCrossPeriodEntry(outOfRangeCostedDelivery.id, "cogs", "30.00", "2025-01-05"),
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-cross-late-adjustment`,
+        sourceType: "landed_cost_adjustment",
+        sourceId: crossPeriodProduct.id,
+        memo: `${prefix} cross-period landed-cost adjustment`,
+        entryDate: "2025-02-02",
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: crossPeriodProduct.id, debitZmw: "20.00" },
+          { accountKey: "inventory", productId: crossPeriodProduct.id, creditZmw: "20.00" },
+        ],
+      })),
+    ]);
+
+    const crossPeriodReport = await request(
+      "/api/marketing/reports?from=2025-01-10&to=2025-01-10",
+    );
+    assert.equal(crossPeriodReport.response.status, 200, JSON.stringify(crossPeriodReport.payload));
+    const crossPeriodCampaignReport = crossPeriodReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    assert.deepEqual({
+      orderCount: crossPeriodCampaignReport.orderCount,
+      attributedRevenueZmw: crossPeriodCampaignReport.attributedRevenueZmw,
+      productCostZmw: crossPeriodCampaignReport.productCostZmw,
+      landedCostAdjustmentZmw: crossPeriodCampaignReport.landedCostAdjustmentZmw,
+      landedCostAdjustmentDeliveries: crossPeriodCampaignReport.landedCostAdjustmentDeliveries.map(
+        (delivery: { deliveryDate: string; adjustmentZmw: string }) => [delivery.deliveryDate, delivery.adjustmentZmw],
+      ),
+      netContributionZmw: crossPeriodCampaignReport.netContributionZmw,
+      missingCostOrders: crossPeriodCampaignReport.missingCostOrders,
+    }, {
+      orderCount: 1,
+      attributedRevenueZmw: "100.00",
+      productCostZmw: "15.00",
+      landedCostAdjustmentZmw: "5.00",
+      landedCostAdjustmentDeliveries: [["2025-01-10", "5.00"]],
+      netContributionZmw: "85.00",
+      missingCostOrders: [],
+    });
+
+    const centsDelta = (current: string, baselineValue: string) =>
+      (BigInt(current.replace(".", "")) - BigInt(baselineValue.replace(".", ""))).toString();
+    assert.equal(
+      centsDelta(crossPeriodReport.payload.totals.attributedRevenueZmw, crossPeriodBaseline.payload.totals.attributedRevenueZmw),
+      "10000",
+    );
+    assert.equal(
+      centsDelta(crossPeriodReport.payload.totals.productCostZmw, crossPeriodBaseline.payload.totals.productCostZmw),
+      "1500",
+    );
+    assert.equal(
+      centsDelta(crossPeriodReport.payload.totals.landedCostAdjustmentZmw, crossPeriodBaseline.payload.totals.landedCostAdjustmentZmw),
+      "500",
+    );
+    assert.equal(
+      crossPeriodReport.payload.totals.missingCostOrders,
+      crossPeriodBaseline.payload.totals.missingCostOrders,
+    );
+    assert.equal(
+      crossPeriodReport.payload.totals.netContributionZmw === null
+        ? null
+        : crossPeriodBaseline.payload.totals.netContributionZmw === null
+          ? "unexpected non-null total"
+          : centsDelta(
+            crossPeriodReport.payload.totals.netContributionZmw,
+            crossPeriodBaseline.payload.totals.netContributionZmw,
+          ),
+      crossPeriodBaseline.payload.totals.netContributionZmw === null ? null : "8500",
+    );
+    assert.equal(
+      BigInt(centsDelta(
+        crossPeriodReport.payload.totals.attributedRevenueZmw,
+        crossPeriodBaseline.payload.totals.attributedRevenueZmw,
+      ))
+        - BigInt(centsDelta(
+          crossPeriodReport.payload.totals.productCostZmw,
+          crossPeriodBaseline.payload.totals.productCostZmw,
+        )),
+      8500n,
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -692,7 +856,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
       await client.query("DELETE FROM sales_orders WHERE order_number LIKE $1", [`${orderPrefix}-%`]);
       await client.query("DELETE FROM marketing_campaigns WHERE name LIKE $1", [`${prefix}%`]);
       await client.query("DELETE FROM customers WHERE name = $1", [`${prefix} customer`]);
-      await client.query("DELETE FROM products WHERE sku = $1", [`MKT-${suffix}`]);
+      await client.query("DELETE FROM products WHERE sku LIKE $1", [`MKT-${suffix}%`]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
