@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
-  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryMovement, type InventoryReceipt,
+  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -18,6 +18,7 @@ const money = (value: string) => {
 
 export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [locationTotals, setLocationTotals] = useState<InventoryLocationTotal[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [receipts, setReceipts] = useState<InventoryReceipt[]>([]);
   const [reservations, setReservations] = useState<InventoryReservation[]>([]);
@@ -47,8 +48,9 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   useEffect(() => {
     let alive = true;
     Promise.all([fetchInventory(), fetchInventoryMovements(), fetchInventoryReceipts(), fetchReservations(), fetchInventoryLocations()])
-      .then(([i, m, r, v, l]) => { if (alive) {
-        setInventory(i); setMovements(m); setReceipts(r); setReservations(v); setLocations(l);
+      .then(([overview, m, r, v, l]) => { if (alive) {
+        setInventory(overview.inventory); setLocationTotals(overview.locationTotals);
+        setMovements(m); setReceipts(r); setReservations(v); setLocations(l);
         setReceiptLocations((old) => Object.fromEntries(r.map((row) => [row.id, old[row.id] ?? l[0]?.id ?? 0])));
       } })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load inventory."); });
@@ -76,6 +78,15 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <button className="button button-primary">Add location</button>
         <p className="report-footnote field-full">{locations.map((location) => location.name).join(" · ") || "Main location will be created when stock is first recorded."}</p>
       </form>
+      <section className="panel inventory-location-summary" aria-labelledby="inventory-location-totals-heading">
+        <h2 id="inventory-location-totals-heading">Total inventory value by location</h2>
+        <p className="report-footnote">Totals include all products, even when the product list is filtered. Locations without stock show ZMW 0.00.</p>
+        {locationTotals.length
+          ? <ul className="inventory-location-totals">{locationTotals.map((location) =>
+            <li key={location.id ?? "unassigned"}><span>{location.name}</span><strong>{money(location.stockValueZmw)}</strong></li>
+          )}</ul>
+          : <p>No stock locations are set up yet.</p>}
+      </section>
       <div className="toolbar">
         <label className="search-field"><Search aria-hidden="true" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name or SKU" aria-label="Search inventory by product name or SKU" /></label>
         <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>

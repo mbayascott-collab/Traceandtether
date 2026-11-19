@@ -47,6 +47,7 @@ export interface InventoryItem {
   stockValueZmw: string; averageUnitCostZmw: string;
   locations: { id: number | null; name: string; onHand: number; reserved: number; available: number; stockValueZmw: string }[];
 }
+export interface InventoryLocationTotal { id: number | null; name: string; stockValueZmw: string; }
 export interface InventoryMovementEvidence { id: number | null; fileName: string; mimeType: string; }
 export interface InventoryMovement { id: number; productId: number; productName: string; sku: string; kind: string; quantityDelta: number; reason: string; reference: string | null; locationId: number | null; locationName: string | null; salesDeliveryLineId: number | null; correctionOfMovementId: number | null; createdAt: string; evidenceFiles: InventoryMovementEvidence[]; }
 export interface InventoryLocation { id: number; name: string; active: boolean; }
@@ -405,8 +406,8 @@ export async function postLandedCostAdjustment(
     }),
   });
 }
-export async function fetchInventory(): Promise<InventoryItem[]> {
-  return (await request<{ inventory: InventoryItem[] }>("/api/inventory")).inventory;
+export async function fetchInventory(): Promise<{ inventory: InventoryItem[]; locationTotals: InventoryLocationTotal[] }> {
+  return request<{ inventory: InventoryItem[]; locationTotals: InventoryLocationTotal[] }>("/api/inventory");
 }
 export async function fetchInventoryMovements(): Promise<InventoryMovement[]> {
   return (await request<{ movements: InventoryMovement[] }>("/api/inventory/movements")).movements;

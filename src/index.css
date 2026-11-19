@@ -2670,6 +2670,29 @@ textarea:focus-visible {
 .business-dashboard-data { display: grid; gap: 16px; margin: 18px 0; }
 .business-dashboard-data .metric-value { font-size: clamp(18px, 2vw, 25px); }
 .report-footnote { margin: 10px 0 16px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.inventory-location-summary { margin: 14px 0; padding: 16px; }
+.inventory-location-summary h2 { margin: 0; color: var(--ink); font: 700 13px var(--font-display); }
+.inventory-location-summary .report-footnote { margin: 7px 0 12px; }
+.inventory-location-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.inventory-location-totals li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.inventory-location-totals strong { color: var(--ink); font-size: 12px; white-space: nowrap; }
 .cash-forecast-panel { overflow: hidden; }
 
 .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }

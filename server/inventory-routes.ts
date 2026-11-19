@@ -86,7 +86,8 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       stockValue.set(row.productId,
         (stockValue.get(row.productId) ?? 0n) + cents(row.debitZmw) - cents(row.creditZmw));
     });
-    res.json({ inventory: items.map((item) => {
+    const locationValueTotals = new Map<number | null, bigint>(locations.map((location) => [location.id, 0n]));
+    const inventory = items.map((item) => {
       const stock = onHand.get(item.id) ?? 0, held = reserved.get(item.id) ?? 0;
       const value = stockValue.get(item.id) ?? 0n;
       const unassignedOnHand = byLocation.get(`${item.id}:null`) ?? 0;
@@ -116,13 +117,24 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
           stockValueZmw: formatCents(valueByLocation.get(null) ?? 0n),
         });
       }
+      for (const location of locationValues) {
+        locationValueTotals.set(location.id, (locationValueTotals.get(location.id) ?? 0n) + cents(location.stockValueZmw));
+      }
       return {
         ...item, onHand: stock, reserved: held, available: stock - held,
         stockValueZmw: formatCents(value),
         averageUnitCostZmw: formatCents(weightedAverageUnitCostCents(value, stock)),
         locations: locationValues,
       };
-    }) });
+    });
+    const locationTotals = [...locationValueTotals.entries()]
+      .map(([id, value]) => ({
+        id,
+        name: id === null ? "Unassigned" : locations.find((location) => location.id === id)?.name ?? "Unknown",
+        stockValueZmw: formatCents(value),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ inventory, locationTotals });
   });
 
   app.get("/api/inventory/movements", owner, async (_req, res) => {
