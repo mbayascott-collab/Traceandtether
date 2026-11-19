@@ -6,7 +6,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import test from "node:test";
 import {
   businessAuditLogs, businessExpenses, customers, inventoryLocations, inventoryMovements,
-  marketingCustomerGroups, paymentStatementLines, products, purchaseOrders, salesOrders, suppliers,
+  marketingCampaigns, marketingCustomerGroups, paymentStatementLines, products, purchaseOrders, salesOrders, suppliers,
 } from "../shared/schema";
 
 test("route mutations across business areas keep their audit history and actor", {
@@ -152,6 +152,7 @@ test("route mutations across business areas keep their audit history and actor",
   let salesOrderId: number | undefined;
   let purchaseOrderId: number | undefined;
   let customerGroupId: number | undefined;
+  let marketingCampaignId: number | undefined;
   let statementLineId: number | undefined;
   let publicOrderNumber: string | undefined;
   let publicCustomerId: number | undefined;
@@ -278,7 +279,33 @@ test("route mutations across business areas keep their audit history and actor",
       ...groupBody, name: `Updated audit route group ${suffix}`,
     }, "PATCH", 200);
     await expectAudit("marketing_customer_group", createdCustomerGroupId, "updated");
-    await expectStatus(`/api/marketing/customer-groups/${createdCustomerGroupId}`, undefined, "DELETE", 204);
+    const [linkedCampaign] = await db.insert(marketingCampaigns).values({
+      name: `Audit route linked campaign ${suffix}`,
+      status: "draft",
+      customerGroupId: createdCustomerGroupId,
+    }).returning();
+    marketingCampaignId = linkedCampaign.id;
+    const deletionImpact = await expectStatus(
+      `/api/marketing/customer-groups/${createdCustomerGroupId}/deletion-impact`,
+      undefined,
+      "GET",
+      200,
+    );
+    assert.deepEqual(deletionImpact.campaigns.map((campaign: { id: number }) => campaign.id), [linkedCampaign.id]);
+    const stillLinked = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, linkedCampaign.id));
+    assert.equal(stillLinked[0]?.customerGroupId, createdCustomerGroupId);
+    const staleDelete = await request(`/api/marketing/customer-groups/${createdCustomerGroupId}`, {
+      campaignIds: [],
+    }, "DELETE");
+    assert.equal(staleDelete.response.status, 409, JSON.stringify(staleDelete.payload));
+    const afterStaleDelete = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, linkedCampaign.id));
+    assert.equal(afterStaleDelete[0]?.customerGroupId, createdCustomerGroupId);
+    await expectStatus(`/api/marketing/customer-groups/${createdCustomerGroupId}`, {
+      campaignIds: [linkedCampaign.id],
+    }, "DELETE", 204);
+    const afterDelete = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, linkedCampaign.id));
+    assert.equal(afterDelete[0]?.customerGroupId, null);
+    await expectAudit("marketing_campaign", linkedCampaign.id, "updated");
     await expectAudit("marketing_customer_group", createdCustomerGroupId, "deleted");
 
     // Public shop: attribute its customer and order to the unauthenticated actor.
@@ -385,6 +412,9 @@ test("route mutations across business areas keep their audit history and actor",
       );
       if (customerGroupId) await client.query(
         "DELETE FROM marketing_customer_groups WHERE id = $1", [customerGroupId],
+      );
+      if (marketingCampaignId) await client.query(
+        "DELETE FROM marketing_campaigns WHERE id = $1", [marketingCampaignId],
       );
       if (purchaseOrderId) {
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);

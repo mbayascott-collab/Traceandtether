@@ -157,12 +157,23 @@ export default function MarketingWorkspace() {
     });
   }
   async function deleteCustomerGroup(group: CustomerGroup) {
-    if (!window.confirm(`Remove the customer group “${group.name}”?`)) return;
     setError(""); setMessage("");
     try {
-      await request(`/api/marketing/customer-groups/${group.id}`, "DELETE");
+      const preview = await request(`/api/marketing/customer-groups/${group.id}/deletion-impact`);
+      const linkedCampaigns: Campaign[] = preview.campaigns;
+      const campaignNames = linkedCampaigns.map((campaign) => `• ${campaign.name}`).join("\n");
+      const warning = linkedCampaigns.length
+        ? `Remove the customer group “${group.name}”?\n\nThese campaigns will be unlinked:\n${campaignNames}\n\nHistorical orders and their campaign sales attribution will not change.`
+        : `Remove the customer group “${group.name}”?\n\nHistorical orders and their campaign sales attribution will not change.`;
+      if (!window.confirm(warning)) return;
+      await request(`/api/marketing/customer-groups/${group.id}`, "DELETE", {
+        campaignIds: linkedCampaigns.map((campaign) => campaign.id),
+      });
       if (selectedCustomerGroup === group.id) { setSelectedCustomerGroup(null); setCustomerGroupMembers([]); }
-      setMessage("Customer group removed."); await load();
+      setMessage(linkedCampaigns.length
+        ? `Customer group removed. Unlinked campaigns: ${linkedCampaigns.map((campaign) => campaign.name).join(", ")}. Historical orders were not changed.`
+        : "Customer group removed. Historical orders were not changed.");
+      await load();
     } catch (reason) { setError(displayError(reason)); }
   }
   async function copyShopLink(campaign: Campaign) {

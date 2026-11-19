@@ -299,21 +299,64 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     if (!group) return res.status(404).json({ error: "Customer group not found." });
     res.json({ group });
   });
+  app.get("/api/marketing/customer-groups/:id/deletion-impact", owner, ownerOnly, async (req, res) => {
+    const group = await findCustomerGroup(req, res);
+    if (!group) return;
+    const campaigns = await db.select({
+      id: marketingCampaigns.id,
+      name: marketingCampaigns.name,
+    }).from(marketingCampaigns)
+      .where(eq(marketingCampaigns.customerGroupId, group.id))
+      .orderBy(asc(marketingCampaigns.name), asc(marketingCampaigns.id));
+    res.json({ campaigns });
+  });
   app.delete("/api/marketing/customer-groups/:id", owner, ownerOnly, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
-    const [group] = await db.transaction(async (tx) => {
+    const campaignIds = req.body?.campaignIds;
+    if (!Array.isArray(campaignIds) || !campaignIds.every((campaignId: unknown) =>
+      Number.isSafeInteger(campaignId) && Number(campaignId) > 0)) {
+      return res.status(400).json({ error: "Review the linked campaigns before deleting this group." });
+    }
+    const result = await db.transaction(async (tx) => {
       const [existing] = await tx.select({ id: marketingCustomerGroups.id, name: marketingCustomerGroups.name })
         .from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
-      if (!existing) return [];
+      if (!existing) return null;
+      const linkedCampaigns = await tx.select({
+        id: marketingCampaigns.id,
+        name: marketingCampaigns.name,
+      }).from(marketingCampaigns)
+        .where(eq(marketingCampaigns.customerGroupId, id))
+        .orderBy(asc(marketingCampaigns.name), asc(marketingCampaigns.id));
+      const expectedIds = [...campaignIds].sort((a: number, b: number) => a - b);
+      const actualIds = linkedCampaigns.map((campaign) => campaign.id).sort((a, b) => a - b);
+      if (expectedIds.length !== actualIds.length || expectedIds.some((campaignId, index) => campaignId !== actualIds[index])) {
+        return { conflict: true as const, campaigns: linkedCampaigns };
+      }
+      const unlinkedCampaigns = await tx.update(marketingCampaigns)
+        .set({ customerGroupId: null, updatedAt: new Date() })
+        .where(eq(marketingCampaigns.customerGroupId, id))
+        .returning({ id: marketingCampaigns.id, name: marketingCampaigns.name });
+      for (const campaign of unlinkedCampaigns) {
+        await recordBusinessAudit(tx, {
+          entityType: "marketing_campaign", entityId: campaign.id, recordLabel: campaign.name,
+          actor: res.locals.actor, action: "updated", changedFields: ["customerGroupId"],
+        });
+      }
       await recordBusinessAudit(tx, {
         entityType: "marketing_customer_group", entityId: existing.id, recordLabel: existing.name,
         actor: res.locals.actor, action: "deleted",
       });
-      return await tx.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id))
-        .returning({ id: marketingCustomerGroups.id });
+      await tx.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id));
+      return { conflict: false as const };
     });
-    if (!group) return res.status(404).json({ error: "Customer group not found." });
+    if (!result) return res.status(404).json({ error: "Customer group not found." });
+    if (result.conflict) {
+      return res.status(409).json({
+        error: "Campaign links changed after the warning. Review the updated campaign links and try again.",
+        campaigns: result.campaigns,
+      });
+    }
     res.status(204).end();
   });
 
