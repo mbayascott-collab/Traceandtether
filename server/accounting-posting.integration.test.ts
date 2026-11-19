@@ -865,6 +865,28 @@ test("customer receipts wait for an in-flight reminder send to finish", {
       .where(eq(paymentReminders.id, reminderPayload.reminder.id));
     assert.equal(savedReminder.status, "sent");
     assert.ok(savedReminder.sentAt);
+
+    const [failedReminder] = await db.insert(paymentReminders).values({
+      salesOrderId,
+      recipientEmail: `failed-${suffix}@example.test`,
+      outstandingZmw: "175.00",
+      dueDate: "2020-01-01",
+      status: "failed",
+      sendError: "Mailbox unavailable",
+    }).returning();
+    const overviewResponse = await fetch(`${baseUrl}/api/payments`);
+    const overview = await overviewResponse.json() as any;
+    assert.equal(overviewResponse.status, 200, JSON.stringify(overview));
+    const invoice = overview.invoices.find((item: any) => item.orderId === salesOrderId);
+    assert.ok(invoice, "the unpaid order remains in the outstanding-balance list");
+    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.id), [failedReminder.id, savedReminder.id]);
+    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.status), ["failed", "sent"]);
+    assert.equal(invoice.reminderHistory[0].recipientEmail, failedReminder.recipientEmail);
+    assert.equal(invoice.reminderHistory[0].outstandingZmw, "175.00");
+    assert.equal(invoice.reminderHistory[0].error, "Mailbox unavailable");
+    assert.equal(invoice.reminderHistory[1].outstandingZmw, "200.00");
+    assert.equal(overview.payments.filter((payment: any) => payment.orderNumber === order.orderNumber).length, 1,
+      "viewing reminder history does not create or alter payment records");
   } finally {
     releaseSender();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

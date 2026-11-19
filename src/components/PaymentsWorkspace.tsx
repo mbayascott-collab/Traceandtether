@@ -187,20 +187,22 @@ export default function PaymentsWorkspace() {
               <button className="button button-secondary button-small" disabled={savingDueDate === `${item.direction}-${item.orderId}`}
                 onClick={() => saveDueDate(item.direction, item)}>{savingDueDate === `${item.direction}-${item.orderId}` ? "Saving…" : "Save date"}</button>
             </div>}</td>
-          <td>{item.direction === "customer_receipt" && item.overdueDays > 0 ? <div className="form-grid">
-            <button type="button" className="button button-secondary button-small"
+          <td>{item.direction === "customer_receipt" ? <div className="payment-reminder-cell">
+            {item.overdueDays > 0 && <button type="button" className="button button-secondary button-small"
               disabled={!item.customerEmail || sendingReminder === String(item.orderId)}
               title={!item.customerEmail ? "Add a saved email address to this customer before sending." : undefined}
-              onClick={() => prepareReminder(item)}>
-              {item.lastReminder?.status === "sent" ? "Prepare another" : "Prepare reminder"}
-            </button>
-            {item.lastReminder && <small className="report-footnote">
-              {item.lastReminder.status === "sent"
-                ? `Sent ${item.lastReminder.sentAt ? new Date(item.lastReminder.sentAt).toLocaleString("en-ZM") : ""}`
-                : item.lastReminder.status === "sending"
-                  ? `Sending · started ${new Date(item.lastReminder.attemptedAt).toLocaleString("en-ZM")}`
-                  : `Last attempt failed${item.lastReminder.error ? `: ${item.lastReminder.error}` : ""}`}
-            </small>}
+              onClick={() => prepareReminder(item)}>Prepare reminder</button>}
+            {!!item.reminderHistory?.length && <details className="payment-reminder-history">
+              <summary>Reminder history ({item.reminderHistory.length})</summary>
+              <ol>{item.reminderHistory.map((reminder) => <li key={reminder.id}>
+                <strong>{reminder.status === "sent" ? "Sent" : reminder.status === "failed" ? "Failed" : "Sending"}</strong>
+                <span>{new Date(reminder.attemptedAt).toLocaleString("en-ZM")}</span>
+                {reminder.status === "sent" && reminder.sentAt && <span>Sent at {new Date(reminder.sentAt).toLocaleString("en-ZM")}</span>}
+                <span>To: {reminder.recipientEmail}</span>
+                <span>Amount snapshot: {money(reminder.outstandingZmw)}</span>
+                {reminder.error && <span>Result: {reminder.error}</span>}
+              </li>)}</ol>
+            </details>}
           </div> : "—"}</td>
         </tr>)}</tbody>
       </table>

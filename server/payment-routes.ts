@@ -494,9 +494,11 @@ export function registerPaymentRoutes(
     const payments = await db.select().from(businessPayments);
     const reminderRows = await db.select().from(paymentReminders)
       .orderBy(desc(paymentReminders.attemptedAt), desc(paymentReminders.id));
-    const latestReminderByOrder = new Map<number, typeof paymentReminders.$inferSelect>();
+    const remindersByOrder = new Map<number, typeof paymentReminders.$inferSelect[]>();
     for (const reminder of reminderRows) {
-      if (!latestReminderByOrder.has(reminder.salesOrderId)) latestReminderByOrder.set(reminder.salesOrderId, reminder);
+      const orderReminders = remindersByOrder.get(reminder.salesOrderId) ?? [];
+      orderReminders.push(reminder);
+      remindersByOrder.set(reminder.salesOrderId, orderReminders);
     }
     const paidSales = new Map<number, bigint>();
     const paidPurchases = new Map<number, bigint>();
@@ -539,13 +541,10 @@ export function registerPaymentRoutes(
         orderId: order.id, orderNumber: order.orderNumber, partyName: customerName, customerEmail,
         totalZmw: formatCents(netTotal), paidZmw: formatCents(paidSales.get(order.id) ?? 0n),
         outstandingZmw: formatCents(outstanding), dueDate,
-        lastReminder: latestReminderByOrder.has(order.id) ? (() => {
-          const reminder = latestReminderByOrder.get(order.id)!;
-          return {
-            status: reminder.status, attemptedAt: reminder.attemptedAt, sentAt: reminder.sentAt,
-            recipientEmail: reminder.recipientEmail, error: reminder.sendError,
-          };
-        })() : null,
+        reminderHistory: (remindersByOrder.get(order.id) ?? []).map((reminder) => ({
+          id: reminder.id, status: reminder.status, attemptedAt: reminder.attemptedAt, sentAt: reminder.sentAt,
+          recipientEmail: reminder.recipientEmail, outstandingZmw: reminder.outstandingZmw, error: reminder.sendError,
+        })),
         ...paymentAging(dueDate, new Date().toISOString().slice(0, 10)),
       };
     }).filter((item) => cents(item.outstandingZmw) > 0n);
