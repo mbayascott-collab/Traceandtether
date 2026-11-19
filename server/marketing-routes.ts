@@ -61,6 +61,7 @@ async function loadCustomerHistory() {
 
 export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   const ownerOnly = requireBusinessOwner("Only the business owner can manage customer groups.");
+  const campaignLinkOwnerOnly = requireBusinessOwner("Only the business owner can replace campaign tracking links.");
 
   async function hasCampaign(id: number | null | undefined) {
     if (!id) return true;
@@ -108,7 +109,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     if (!campaign) return res.status(404).json({ error: "Campaign not found." });
     res.json({ campaign });
   });
-  app.post("/api/marketing/campaigns/:id/replace-link", owner, ownerOnly, async (req, res) => {
+  app.post("/api/marketing/campaigns/:id/replace-link", owner, campaignLinkOwnerOnly, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
     const [campaign] = await db.transaction(async (tx) => {

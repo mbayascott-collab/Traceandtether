@@ -10,6 +10,98 @@ import {
   salesOrderLines, salesOrders,
 } from "../shared/schema";
 
+test("campaign link replacement is owner-only while managers retain ordinary campaign access", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }, { createBusinessAccessMiddleware }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+    import("./access-control"),
+  ]);
+  const suffix = randomUUID();
+  const prefix = `campaign-link-access-${suffix}`;
+  const actorEmails = [`${prefix}-owner@example.test`, `${prefix}-manager@example.test`];
+  const app = express();
+  app.use(express.json());
+  const access = createBusinessAccessMiddleware(
+    async (userId) => ({
+      authorized: true as const,
+      actor: {
+        clerkUserId: userId,
+        email: userId === "test-manager" ? actorEmails[1] : actorEmails[0],
+        role: userId === "test-manager" ? "manager" as const : "owner" as const,
+      },
+    }),
+    (req) => req.header("x-test-user"),
+  );
+  registerMarketingRoutes(app, access);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let campaignId: number | undefined;
+  let managerCreatedCampaignId: number | undefined;
+  const request = async (userId: string, path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        "x-test-user": userId,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { response, payload: await response.json() as any };
+  };
+
+  try {
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} original`,
+      status: "active",
+      trackingCode: suffix,
+    }).returning();
+    campaignId = campaign.id;
+
+    const managerCampaigns = await request("test-manager", "/api/marketing/campaigns");
+    assert.equal(managerCampaigns.response.status, 200, JSON.stringify(managerCampaigns.payload));
+    assert.ok(managerCampaigns.payload.campaigns.some((item: { id: number }) => item.id === campaign.id));
+
+    const managerCreate = await request("test-manager", "/api/marketing/campaigns", "POST", {
+      name: `${prefix} manager-created`,
+      status: "draft",
+    });
+    assert.equal(managerCreate.response.status, 201, JSON.stringify(managerCreate.payload));
+    managerCreatedCampaignId = managerCreate.payload.campaign.id;
+
+    const managerPatch = await request("test-manager", `/api/marketing/campaigns/${campaign.id}`, "PATCH", {
+      name: `${prefix} manager edit`,
+      status: "active",
+    });
+    assert.equal(managerPatch.response.status, 200, JSON.stringify(managerPatch.payload));
+
+    const managerReplace = await request("test-manager", `/api/marketing/campaigns/${campaign.id}/replace-link`, "POST");
+    assert.equal(managerReplace.response.status, 403, JSON.stringify(managerReplace.payload));
+    assert.match(managerReplace.payload.error, /business owner/i);
+    assert.match(managerReplace.payload.error, /tracking links/i);
+
+    const [unchangedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(unchangedCampaign.trackingCode, suffix);
+
+    const ownerReplace = await request("test-owner", `/api/marketing/campaigns/${campaign.id}/replace-link`, "POST");
+    assert.equal(ownerReplace.response.status, 200, JSON.stringify(ownerReplace.payload));
+    assert.notEqual(ownerReplace.payload.campaign.trackingCode, suffix);
+
+    const managerCampaignsAfterReplacement = await request("test-manager", "/api/marketing/campaigns");
+    assert.equal(managerCampaignsAfterReplacement.response.status, 200, JSON.stringify(managerCampaignsAfterReplacement.payload));
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (managerCreatedCampaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, managerCreatedCampaignId));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    await db.delete(businessAuditLogs).where(inArray(businessAuditLogs.actorEmail, actorEmails));
+  }
+});
+
 test("customer-group CSV downloads are limited to owners", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
