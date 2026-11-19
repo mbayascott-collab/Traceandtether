@@ -39,6 +39,9 @@ const cashInSchema = z.object({
   reference: z.string().trim().max(120).optional().default(""),
   notes: z.string().trim().max(500).optional().default(""),
 });
+const ownerFundCreateSchema = cashInSchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(80),
+});
 const expenseSchema = z.object({
   category: z.enum(["rent", "office_supplies", "utilities", "transport", "repairs", "other"]),
   description: z.string().trim().min(2).max(240),
@@ -481,12 +484,19 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.post("/api/accounting/funds", owner, async (req, res) => {
-    const parsed = cashInSchema.safeParse(req.body);
+    const parsed = ownerFundCreateSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Check the cash-in details." });
       return;
     }
     const input = parsed.data;
+    const requestMatches = (transaction: typeof ownerFundTransactions.$inferSelect) =>
+      transaction.kind === input.kind
+      && cents(transaction.amountZmw) === cents(input.amountZmw)
+      && transaction.transactionDate === input.receivedAt
+      && transaction.method === input.method
+      && (transaction.reference ?? "") === input.reference
+      && (transaction.notes ?? "") === input.notes;
     let amount: bigint;
     try { amount = cents(input.amountZmw); } catch { amount = 0n; }
     if (amount <= 0n) {
@@ -494,6 +504,18 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       return;
     }
     const result = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(ownerFundTransactions)
+        .where(eq(ownerFundTransactions.idempotencyKey, input.idempotencyKey)).limit(1);
+      if (existing) {
+        if (!requestMatches(existing)) {
+          return { error: "This save key was already used for different owner-fund details.", status: 409 as const };
+        }
+        const [journal] = await tx.select().from(journalEntries)
+          .where(eq(journalEntries.sourceKey, `owner-fund-${existing.id}`)).limit(1);
+        if (!journal) throw new Error("The journal entry for this owner-fund transaction could not be found.");
+        return { transaction: existing, journal, duplicate: true };
+      }
+
       const accountMap = await ensureAccountingAccounts(tx);
       const cashAccountKey = cashAccountKeyForMethod(input.method);
       const cashAccount = accountMap.get(cashAccountKey);
@@ -508,7 +530,20 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         method: input.method,
         reference: input.reference || null,
         notes: input.notes || null,
-      }).returning();
+        idempotencyKey: input.idempotencyKey,
+      }).onConflictDoNothing({ target: ownerFundTransactions.idempotencyKey }).returning();
+      if (!transaction) {
+        const [concurrent] = await tx.select().from(ownerFundTransactions)
+          .where(eq(ownerFundTransactions.idempotencyKey, input.idempotencyKey)).limit(1);
+        if (!concurrent) throw new Error("The owner-fund transaction could not be recorded.");
+        if (!requestMatches(concurrent)) {
+          return { error: "This save key was already used for different owner-fund details.", status: 409 as const };
+        }
+        const [journal] = await tx.select().from(journalEntries)
+          .where(eq(journalEntries.sourceKey, `owner-fund-${concurrent.id}`)).limit(1);
+        if (!journal) throw new Error("The journal entry for this owner-fund transaction could not be found.");
+        return { transaction: concurrent, journal, duplicate: true };
+      }
       await recordBusinessAudit(tx, {
         entityType: "owner_fund_transaction", entityId: transaction.id,
         recordLabel: input.reference || input.kind,
@@ -528,9 +563,13 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         memo: `${memo}${input.reference ? ` · ${input.reference}` : ""}`,
         lines,
       });
-      return { transaction, journal };
+      return { transaction, journal, duplicate: false };
     });
-    res.status(201).json(result);
+    if ("error" in result) {
+      res.status(result.status ?? 409).json({ error: result.error });
+      return;
+    }
+    res.status(result.duplicate ? 200 : 201).json({ transaction: result.transaction, journal: result.journal });
   });
 
   app.post("/api/accounting/funds/:transactionId/correct", owner, ownerOnly, async (req, res) => {

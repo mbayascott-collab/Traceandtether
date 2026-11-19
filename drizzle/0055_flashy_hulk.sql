@@ -1,0 +1,2 @@
+ALTER TABLE "owner_fund_transactions" ADD COLUMN "idempotency_key" varchar(80) DEFAULT gen_random_uuid()::text NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "owner_fund_transactions_idempotency_key_unique" ON "owner_fund_transactions" USING btree ("idempotency_key");

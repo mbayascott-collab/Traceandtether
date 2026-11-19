@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { accountingReportExportRows } from "../../shared/accounting-reports";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
@@ -93,6 +93,7 @@ export default function AccountingWorkspace() {
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [editingCorrection, setEditingCorrection] = useState<{ type: "expense" | "fund"; id: number } | null>(null);
+  const pendingOwnerFundAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -112,12 +113,18 @@ export default function AccountingWorkspace() {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form).entries());
+    const fingerprint = JSON.stringify(values);
+    if (pendingOwnerFundAttempt.current?.fingerprint !== fingerprint) {
+      pendingOwnerFundAttempt.current = { fingerprint, key: window.crypto.randomUUID() };
+    }
     try {
       const response = await fetch("/api/accounting/funds", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...values, idempotencyKey: pendingOwnerFundAttempt.current.key }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Owner transaction could not be recorded.");
+      pendingOwnerFundAttempt.current = null;
       form.reset();
       setNotice("Owner transaction recorded and added to the journal.");
       setRange((current) => ({ ...current }));

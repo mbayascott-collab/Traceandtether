@@ -868,6 +868,7 @@ export const ownerFundTransactions = pgTable(
   "owner_fund_transactions",
   {
     id: serial("id").primaryKey(),
+    idempotencyKey: varchar("idempotency_key", { length: 80 }).notNull().default(sql`gen_random_uuid()::text`),
     kind: varchar("kind", { length: 40 }).notNull(),
     accountId: integer("account_id").notNull().references(() => accountingAccounts.id, { onDelete: "restrict" }),
     amountZmw: numeric("amount_zmw", { precision: 14, scale: 2 }).notNull(),
@@ -879,6 +880,7 @@ export const ownerFundTransactions = pgTable(
   },
   (table) => [
     index("owner_fund_transactions_date_idx").on(table.transactionDate),
+    uniqueIndex("owner_fund_transactions_idempotency_key_unique").on(table.idempotencyKey),
     check("owner_fund_transactions_positive_amount", sql`${table.amountZmw} > 0`),
     check(
       "owner_fund_transactions_kind",

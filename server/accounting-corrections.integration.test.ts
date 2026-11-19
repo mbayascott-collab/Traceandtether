@@ -80,6 +80,7 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(secondExpenseCorrection.response.status, 201, JSON.stringify(secondExpenseCorrection.payload));
 
     const fundResult = await request("/api/accounting/funds", {
+      idempotencyKey: randomUUID(),
       kind: "owner_contribution",
       amountZmw: "25.00",
       receivedAt: "2002-01-12",

@@ -386,6 +386,13 @@
       "when": 1795067083274,
       "tag": "0054_wooden_butterfly",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1795095569453,
+      "tag": "0055_flashy_hulk",
+      "breakpoints": true
     }
   ]
 }

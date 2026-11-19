@@ -78,6 +78,7 @@ test("owner-fund routes save one linked, balanced journal entry and roll back fa
     for (const { kind, method, receivedAt } of cases) {
       const reference = `${kind}-${suffix}`;
       const { response, payload } = await request("/api/accounting/funds", {
+        idempotencyKey: randomUUID(),
         kind,
         amountZmw: "25.50",
         receivedAt,
@@ -123,11 +124,64 @@ test("owner-fund routes save one linked, balanced journal entry and roll back fa
       );
     }
 
+    const retryKey = randomUUID();
+    const retryBody = {
+      idempotencyKey: retryKey,
+      kind: "owner_contribution",
+      amountZmw: "31.25",
+      receivedAt: "2001-09-10",
+      method: "cash",
+      reference: `retry-${suffix}`,
+      notes: `Retry test ${suffix}`,
+    };
+    const firstAttempt = await request("/api/accounting/funds", retryBody);
+    assert.equal(firstAttempt.response.status, 201, JSON.stringify(firstAttempt.payload));
+    const repeatedAttempt = await request("/api/accounting/funds", retryBody);
+    assert.equal(repeatedAttempt.response.status, 200, JSON.stringify(repeatedAttempt.payload));
+    assert.equal(repeatedAttempt.payload.transaction.id, firstAttempt.payload.transaction.id);
+    assert.equal(repeatedAttempt.payload.journal.id, firstAttempt.payload.journal.id);
+    savedTransactionIds.push(firstAttempt.payload.transaction.id);
+    savedJournalIds.push(firstAttempt.payload.journal.id);
+
+    const mismatchedAttempt = await request("/api/accounting/funds", { ...retryBody, amountZmw: "31.26" });
+    assert.equal(mismatchedAttempt.response.status, 409, JSON.stringify(mismatchedAttempt.payload));
+    assert.match(mismatchedAttempt.payload.error, /different owner-fund details/i);
+
+    const concurrentKey = randomUUID();
+    const concurrentBody = {
+      idempotencyKey: concurrentKey,
+      kind: "business_loan",
+      amountZmw: "42.00",
+      receivedAt: "2001-10-11",
+      method: "bank_transfer",
+      reference: `concurrent-${suffix}`,
+      notes: `Concurrent test ${suffix}`,
+    };
+    const concurrentAttempts = await Promise.all([
+      request("/api/accounting/funds", concurrentBody),
+      request("/api/accounting/funds", concurrentBody),
+    ]);
+    assert.deepEqual(concurrentAttempts.map(({ response }) => response.status).sort(), [200, 201]);
+    assert.equal(concurrentAttempts[0].payload.transaction.id, concurrentAttempts[1].payload.transaction.id);
+    assert.equal(concurrentAttempts[0].payload.journal.id, concurrentAttempts[1].payload.journal.id);
+    savedTransactionIds.push(concurrentAttempts[0].payload.transaction.id);
+    savedJournalIds.push(concurrentAttempts[0].payload.journal.id);
+    const concurrentTransactions = await db.select().from(ownerFundTransactions)
+      .where(eq(ownerFundTransactions.idempotencyKey, concurrentKey));
+    assert.equal(concurrentTransactions.length, 1, "concurrent retries should create only one owner-fund transaction");
+    const concurrentJournals = await db.select().from(journalEntries)
+      .where(and(
+        eq(journalEntries.sourceType, "business_loan"),
+        eq(journalEntries.sourceId, concurrentTransactions[0].id),
+      ));
+    assert.equal(concurrentJournals.length, 1, "concurrent retries should create only one journal entry");
+
     const failedReference = `failed-${suffix}`;
     const failedResponse = await fetch(`${baseUrl}/api/accounting/funds`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        idempotencyKey: randomUUID(),
         kind: "owner_contribution",
         amountZmw: "40.00",
         receivedAt: "2001-11-12",
