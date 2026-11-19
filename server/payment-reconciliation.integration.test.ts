@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { asc, inArray } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import {
-  businessPayments, customers, journalEntries, journalLines,
+  businessPayments, customers, journalEntries, journalLines, paymentStatementImportBatches,
   paymentStatementLines, salesOrders,
 } from "../shared/schema";
 import { ensureAccountingAccounts, postJournal } from "./accounting-posting";
@@ -68,7 +68,6 @@ test("adding, matching, and unmatching statement lines never changes journals", 
     ]);
     return { entries, lines };
   };
-
   try {
     const [customer] = await db.insert(customers).values({
       name: `Reconciliation test customer ${suffix}`,
@@ -170,6 +169,129 @@ test("adding, matching, and unmatching statement lines never changes journals", 
       if (paymentId) await client.query("DELETE FROM business_payments WHERE id = $1", [paymentId]);
       if (orderId) await client.query("DELETE FROM sales_orders WHERE id = $1", [orderId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  }
+});
+
+test("CSV statement imports save review rows without changing journals", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerPaymentRoutes }] = await Promise.all([
+    import("./db"),
+    import("./payment-routes"),
+  ]);
+
+  const suffix = randomUUID();
+  const label = suffix.slice(0, 12);
+  const email = `csv-reconciliation-${suffix}@example.test`;
+  const auditTable = await pool.query(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    t.skip("requires the business audit database migration");
+    await pool.end();
+    return;
+  }
+
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email, role: "owner" };
+    next();
+  };
+  registerPaymentRoutes(app, owner);
+  app.use(((error: unknown, _req, res, _next) => {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
+  }) as express.ErrorRequestHandler);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let importBatchId: number | undefined;
+
+  const request = async (path: string, body: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as any;
+    assert.equal(response.status, 201, JSON.stringify(payload));
+    return payload;
+  };
+  const journalSnapshot = async () => {
+    const [entries, lines] = await Promise.all([
+      db.select().from(journalEntries).orderBy(asc(journalEntries.id)),
+      db.select().from(journalLines).orderBy(asc(journalLines.id)),
+    ]);
+    return { entries, lines };
+  };
+  const paymentSnapshot = async () =>
+    db.select({ id: businessPayments.id }).from(businessPayments).orderBy(asc(businessPayments.id));
+
+  try {
+    const accounts = await ensureAccountingAccounts(db);
+    const bankAccount = accounts.get("bank_account");
+    assert.ok(bankAccount);
+    const before = await journalSnapshot();
+    const paymentsBefore = await paymentSnapshot();
+    const csvLines = [
+      { transactionDate: "2026-11-10", flow: "in", amountZmw: "72.50", description: "CSV review row", reference: `CSV-${suffix}` },
+      { transactionDate: "2026-11-11", flow: "out", amountZmw: "8.25", description: "CSV review row two", reference: `CSV-OUT-${suffix}` },
+    ] as const;
+    const imported = await request("/api/payments/reconciliation/imports", {
+      accountId: bankAccount.id,
+      fileName: `reconciliation-${label}.csv`,
+      from: "2026-11-10",
+      to: "2026-11-11",
+      lines: csvLines,
+      includedIndexes: [0, 1],
+      allowDuplicateBatch: false,
+    });
+    importBatchId = Number(imported.batch.id);
+    assert.equal(imported.added, csvLines.length);
+    assert.equal(imported.batch.lineCount, csvLines.length);
+    assert.deepEqual(await journalSnapshot(), before, "CSV import must not create journal entries or journal lines");
+    assert.deepEqual(await paymentSnapshot(), paymentsBefore, "CSV import must save review rows, not payment records");
+
+    const importedRows = await db.select().from(paymentStatementLines)
+      .where(inArray(paymentStatementLines.reference, csvLines.map((line) => line.reference)))
+      .orderBy(asc(paymentStatementLines.id));
+    assert.equal(importedRows.length, csvLines.length);
+    assert.deepEqual(importedRows.map((line) => ({
+      transactionDate: line.transactionDate,
+      flow: line.flow,
+      amountZmw: line.amountZmw,
+      description: line.description,
+      reference: line.reference,
+      importBatchId: line.importBatchId,
+      matchedPaymentId: line.matchedPaymentId,
+    })), csvLines.map((line) => ({
+      ...line,
+      importBatchId,
+      matchedPaymentId: null,
+    })), "CSV rows must be saved as unmatched statement review data");
+    const batches = await db.select().from(paymentStatementImportBatches)
+      .where(eq(paymentStatementImportBatches.id, importBatchId));
+    assert.equal(batches.length, 1);
+    assert.equal(batches[0]?.fileName, `reconciliation-${label}.csv`);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [email]);
+      if (importBatchId) {
+        await client.query("DELETE FROM payment_statement_import_batches WHERE id = $1", [importBatchId]);
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
