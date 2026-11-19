@@ -54,6 +54,10 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     });
     return { status: response.status, payload: await response.json() as any };
   };
+  const get = async (path: string) => {
+    const response = await fetch(`${baseUrl}${path}`);
+    return { status: response.status, payload: await response.json() as any };
+  };
 
   try {
     const originalLines = buildOpeningBalanceLines({
@@ -155,7 +159,106 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     assert.equal(reversal.sourceId, original.id);
     assert.equal(original.sourceType, "opening_balances");
 
+    assert.equal(
+      (await post(`/api/accounting/opening-balances/${replacement.id}/reverse`, reversalBody)).status,
+      201,
+      "a replacement may be reversed for a later correction",
+    );
+    const secondReversalRows = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "opening_balance_reversal"),
+      eq(journalEntries.sourceId, replacement.id),
+    ));
+    assert.equal(secondReversalRows.length, 1, "the replacement must have exactly one reversal");
+    const secondReversal = secondReversalRows[0]!;
+    fixtureEntryIds.push(secondReversal.id);
+
+    const secondReplacementBody = {
+      ...replacementBody,
+      reversalEntryId: secondReversal.id,
+      cashOnHandZmw: "175.00",
+      memo: `Second corrected opening balances ${suffix}`,
+    };
+    assert.equal((await post("/api/accounting/opening-balances", secondReplacementBody)).status, 201);
+    const secondReplacementRows = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "opening_balances"),
+      eq(journalEntries.sourceId, secondReversal.id),
+    ));
+    assert.equal(secondReplacementRows.length, 1, "the second replacement must link to its reversal");
+    const secondReplacement = secondReplacementRows[0]!;
+    fixtureEntryIds.push(secondReplacement.id);
+
+    assert.equal(secondReversal.sourceId, replacement.id);
+    assert.equal(secondReplacement.sourceKey, `opening-balance-replacement-${secondReversal.id}`);
+
+    const historyResponse = await get("/api/accounting?from=2026-11-18&to=2026-11-19");
+    assert.equal(historyResponse.status, 200, JSON.stringify(historyResponse.payload));
+    const openingHistory = historyResponse.payload.openingBalances.history;
+    assert.equal(openingHistory.length, 5, "history must return the original and both correction cycles exactly once");
+    assert.deepEqual(
+      openingHistory.map((entry: { id: number }) => entry.id).sort((a: number, b: number) => a - b),
+      [original.id, reversal.id, replacement.id, secondReversal.id, secondReplacement.id].sort((a, b) => a - b),
+    );
+    assert.equal(new Set(openingHistory.map((entry: { id: number }) => entry.id)).size, 5);
+
+    type OpeningHistoryEntry = {
+      id: number;
+      entryDate: string;
+      entryNumber: string;
+      memo: string;
+      kind: string;
+      relatedEntryId: number | null;
+      reversalEntryId: number | null;
+      reversed: boolean;
+      active: boolean;
+    };
+    const historyById = new Map<number, OpeningHistoryEntry>(
+      openingHistory.map((entry: OpeningHistoryEntry) => [entry.id, entry]),
+    );
+    assert.deepEqual(historyById.get(original.id), {
+      id: original.id,
+      entryDate: original.entryDate,
+      entryNumber: original.entryNumber,
+      memo: original.memo,
+      kind: "opening_balance",
+      relatedEntryId: null,
+      reversalEntryId: reversal.id,
+      reversed: true,
+      active: false,
+    });
+    assert.equal(historyById.get(reversal.id)?.kind, "reversal");
+    assert.equal(historyById.get(reversal.id)?.relatedEntryId, original.id);
+    assert.equal(historyById.get(reversal.id)?.active, false);
+    assert.equal(historyById.get(replacement.id)?.kind, "replacement");
+    assert.equal(historyById.get(replacement.id)?.relatedEntryId, reversal.id);
+    assert.equal(historyById.get(replacement.id)?.reversalEntryId, secondReversal.id);
+    assert.equal(historyById.get(replacement.id)?.reversed, true);
+    assert.equal(historyById.get(replacement.id)?.active, false);
+    assert.equal(historyById.get(secondReversal.id)?.kind, "reversal");
+    assert.equal(historyById.get(secondReversal.id)?.relatedEntryId, replacement.id);
+    assert.equal(historyById.get(secondReversal.id)?.active, false);
+    assert.equal(historyById.get(secondReplacement.id)?.kind, "replacement");
+    assert.equal(historyById.get(secondReplacement.id)?.relatedEntryId, secondReversal.id);
+    assert.equal(historyById.get(secondReplacement.id)?.reversalEntryId, null);
+    assert.equal(historyById.get(secondReplacement.id)?.reversed, false);
+    assert.equal(historyById.get(secondReplacement.id)?.active, true);
+    assert.equal(historyResponse.payload.openingBalances.activeEntryId, secondReplacement.id);
+
     for (const entry of [original, reversal, replacement]) {
+      const lines = await db.select({
+        accountKey: accountingAccounts.systemKey,
+        debitZmw: journalLines.debitZmw,
+        creditZmw: journalLines.creditZmw,
+      }).from(journalLines)
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .where(eq(journalLines.journalEntryId, entry.id));
+      assert.ok(lines.length > 0, `journal entry ${entry.id} must have linked lines`);
+      assert.equal(journalLinesAreBalanced(lines.map((line) => ({
+        accountKey: line.accountKey ?? "",
+        debitZmw: line.debitZmw,
+        creditZmw: line.creditZmw,
+      }))), true, `journal entry ${entry.id} must remain balanced`);
+    }
+    for (const entry of [secondReversal, secondReplacement]) {
       const lines = await db.select({
         accountKey: accountingAccounts.systemKey,
         debitZmw: journalLines.debitZmw,

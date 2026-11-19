@@ -766,11 +766,28 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
           relatedEntryId: entry.sourceId,
           reversalEntryId: linkedReversal?.id ?? null,
           reversed: Boolean(linkedReversal),
+          active: entry.id === activeOpeningEntry?.id,
         };
       });
-      const correctionRows = await tx.select().from(accountingCorrections)
+      const correctionRows = await tx.select({
+        id: accountingCorrections.id,
+        recordType: accountingCorrections.recordType,
+        recordId: accountingCorrections.recordId,
+        previousCorrectionId: accountingCorrections.previousCorrectionId,
+        reversalEntryId: accountingCorrections.reversalEntryId,
+        replacementEntryId: accountingCorrections.replacementEntryId,
+        category: accountingCorrections.category,
+        kind: accountingCorrections.kind,
+        description: accountingCorrections.description,
+        amountZmw: accountingCorrections.amountZmw,
+        effectiveDate: accountingCorrections.effectiveDate,
+        method: accountingCorrections.method,
+        reference: accountingCorrections.reference,
+        notes: accountingCorrections.notes,
+        reason: accountingCorrections.reason,
+      }).from(accountingCorrections)
         .orderBy(accountingCorrections.id);
-      const latestCorrections = new Map<string, typeof accountingCorrections.$inferSelect>();
+      const latestCorrections = new Map<string, (typeof correctionRows)[number]>();
       const correctionCounts = new Map<string, number>();
       for (const correction of correctionRows) {
         const key = `${correction.recordType}:${correction.recordId}`;
