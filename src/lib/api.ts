@@ -495,6 +495,11 @@ export async function createOpeningStock(input: {
   evidence.forEach((file) => form.append("evidence", file, file.name));
   await request("/api/inventory/opening-stock", { method: "POST", body: form });
 }
+export async function appendOpeningStockEvidence(id: number, evidence: File[]): Promise<void> {
+  const form = new FormData();
+  evidence.forEach((file) => form.append("evidence", file, file.name));
+  await request(`/api/inventory/opening-stock/${id}/evidence`, { method: "POST", body: form });
+}
 export async function correctOpeningStock(id: number, input: {
   quantity: number; unitCostZmw: string; effectiveAt: string; reason: string; reference: string | null;
 }): Promise<void> {

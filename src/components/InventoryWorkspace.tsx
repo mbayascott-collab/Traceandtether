@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Search } from "lucide-react";
 import {
-  correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
+  appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
   inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
@@ -225,12 +225,19 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       <MovementTable
         movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock" || m.kind === "opening_stock_reversal")}
         onCorrect={setCorrectingMovement}
+        onSubmit={submit}
       />
     </>}
   </section>;
 }
 
-function MovementTable({ movements, onCorrect }: { movements: InventoryMovement[]; onCorrect: (movement: InventoryMovement) => void }) {
+function MovementTable({
+  movements, onCorrect, onSubmit,
+}: {
+  movements: InventoryMovement[];
+  onCorrect: (movement: InventoryMovement) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) => Promise<void>;
+}) {
   const correctedBy = new Map(movements.filter((movement) => movement.correctionOfMovementId !== null)
     .map((movement) => [movement.correctionOfMovementId!, movement]));
   return <div className="panel data-table-wrap"><h2>Movement history</h2><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => {
@@ -240,6 +247,19 @@ function MovementTable({ movements, onCorrect }: { movements: InventoryMovement[
       : m.correctionOfMovementId !== null
         ? `Replaces reversal #${m.correctionOfMovementId}`
         : child ? `Corrected by #${child.id}` : "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>{m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>) : "—"}</td></tr>;
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !child && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
+      {m.evidenceFiles.length ? m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>) : "—"}
+      {m.kind === "opening_stock" && m.evidenceFiles.length < 5 && <form className="inventory-evidence-append" onSubmit={(event) => onSubmit(event, async (data) => {
+        const selected = data.get("additionalEvidence");
+        const evidence = selected instanceof FileList ? Array.from(selected).filter((file) => file.size > 0) : [];
+        if (!evidence.length) throw new Error("Choose at least one count worksheet or photo.");
+        if (m.evidenceFiles.length + evidence.length > 5) throw new Error(`Choose no more than ${5 - m.evidenceFiles.length} additional file${5 - m.evidenceFiles.length === 1 ? "" : "s"}.`);
+        await appendOpeningStockEvidence(m.id, evidence);
+      })}>
+        <label>Add evidence<input name="additionalEvidence" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" /></label>
+        <button className="button button-secondary button-small">Add files</button>
+        <small>Files are added permanently; the count and existing files stay unchanged. Up to {5 - m.evidenceFiles.length} more.</small>
+      </form>}
+      </td></tr>;
   })}{!movements.length && <tr><td colSpan={9}>No stock movements yet.</td></tr>}</tbody></table></div>;
 }

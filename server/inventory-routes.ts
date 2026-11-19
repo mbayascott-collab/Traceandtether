@@ -752,6 +752,58 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     res.status(201).json({ movement: result.movement });
   });
 
+  app.post("/api/inventory/opening-stock/:id/evidence", owner, async (req, res) => {
+    const id = getId(req.params.id);
+    if (!id) return bad(res, "Invalid opening-stock entry.");
+    if (!Buffer.isBuffer(req.body) || !req.is("multipart/form-data")) {
+      return bad(res, "Choose one or more count worksheets or photos to add.");
+    }
+    const parsedMultipart = parseOpeningStockEvidenceMultipart(req.body, req.get("content-type") ?? "");
+    if ("error" in parsedMultipart) return bad(res, parsedMultipart.error ?? "The count evidence upload is invalid.");
+    if (Object.keys(parsedMultipart.fields).length || !parsedMultipart.files.length) {
+      return bad(res, "Choose one or more count worksheets or photos to add.");
+    }
+    const checkedEvidence = parsedMultipart.files.map((file) => ({
+      data: file.data,
+      result: inspectOpeningStockEvidence(file.data, file.fileName),
+    }));
+    const invalidEvidence = checkedEvidence.find((item) => "error" in item.result);
+    if (invalidEvidence && "error" in invalidEvidence.result) {
+      return bad(res, invalidEvidence.result.error ?? "Invalid count evidence.");
+    }
+
+    const result = await db.transaction(async (tx) => {
+      const [movement] = await tx.select({
+        id: inventoryMovements.id,
+        kind: inventoryMovements.kind,
+        evidenceFileName: inventoryMovements.evidenceFileName,
+      }).from(inventoryMovements).where(eq(inventoryMovements.id, id)).for("update").limit(1);
+      if (!movement || movement.kind !== "opening_stock") {
+        return { error: "This is not a saved opening-stock entry.", status: 404 };
+      }
+      const existingEvidence = await tx.select({ id: inventoryMovementEvidence.id })
+        .from(inventoryMovementEvidence).where(eq(inventoryMovementEvidence.movementId, id));
+      const existingCount = existingEvidence.length + (movement.evidenceFileName ? 1 : 0);
+      if (existingCount + checkedEvidence.length > MAX_OPENING_STOCK_EVIDENCE_FILES) {
+        return {
+          error: `This count can have no more than ${MAX_OPENING_STOCK_EVIDENCE_FILES} evidence files in total.`,
+          status: 400,
+        };
+      }
+      const evidenceRows = await tx.insert(inventoryMovementEvidence).values(checkedEvidence.map(({ data, result: evidence }) => {
+        if ("error" in evidence) throw new Error(evidence.error);
+        return { movementId: movement.id, fileName: evidence.fileName, mimeType: evidence.mimeType, data };
+      })).returning({ id: inventoryMovementEvidence.id, fileName: inventoryMovementEvidence.fileName });
+      await recordBusinessAudit(tx, {
+        entityType: "inventory_movement", entityId: movement.id, recordLabel: `Opening stock evidence · movement #${movement.id}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["evidence"],
+      });
+      return { evidenceFiles: evidenceRows };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    return res.status(201).json(result);
+  });
+
   app.post("/api/inventory/opening-stock/:id/correct", owner, async (req, res) => {
     const id = getId(req.params.id);
     if (!id) return bad(res, "Invalid opening-stock entry.");
