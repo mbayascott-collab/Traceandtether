@@ -3077,7 +3077,9 @@ textarea:focus-visible {
     padding: 0 !important;
     box-shadow: none !important;
   }
-  #customer-quote-print {
+  #customer-quote-print,
+  #sales-invoice-print,
+  #delivery-note-print {
     break-inside: auto;
     page-break-inside: auto;
   }
@@ -3086,8 +3088,10 @@ textarea:focus-visible {
   .customer-quote-document-title,
   .customer-quote-document-customer,
   .customer-quote-document-total,
+  .customer-quote-document-footer,
   .customer-quote-document-summary,
-  .customer-quote-document-signoff {
+  .customer-quote-document-signoff,
+  .delivery-note-signatures {
     break-inside: avoid;
     page-break-inside: avoid;
   }
