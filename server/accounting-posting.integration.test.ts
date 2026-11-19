@@ -51,6 +51,9 @@ test("database flow adjusts late import costs across partial receipts and sales"
   let purchaseOrderId: number | undefined;
   let shipmentId: number | undefined;
   let shipmentLineId: number | undefined;
+  let mismatchPurchaseOrderId: number | undefined;
+  let mismatchShipmentId: number | undefined;
+  let mismatchShipmentLineId: number | undefined;
   let salesOrderId: number | undefined;
   let deliveryId: number | undefined;
   const request = async (path: string, body: unknown, expectedStatus: number) => {
@@ -444,6 +447,105 @@ test("database flow adjusts late import costs across partial receipts and sales"
       }).from(journalLines).where(eq(journalLines.journalEntryId, entry.id));
       assert.equal(journalLinesAreBalanced(lines.map((line) => ({ ...line, accountKey: "return-test" }))), true);
     }
+
+    const { order: mismatchOrder } = await request("/api/purchase-orders", {
+      supplierId,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [{ productId, quantityOrdered: 10, unitPrice: "100.00" }],
+    }, 201);
+    mismatchPurchaseOrderId = mismatchOrder.id;
+    const [mismatchOrderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, mismatchPurchaseOrderId!));
+    const { shipment: mismatchShipment } = await request("/api/shipments", {
+      purchaseOrderIds: [mismatchPurchaseOrderId],
+      shipmentReference: `ACC-MISMATCH-SHIP-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: [{ purchaseOrderLineId: mismatchOrderLine.id, quantityShipped: 10 }],
+    }, 201);
+    mismatchShipmentId = mismatchShipment.id;
+    const [mismatchShipmentLine] = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, mismatchShipmentId!));
+    mismatchShipmentLineId = mismatchShipmentLine.id;
+    await request("/api/import-expenses", {
+      purchaseOrderId: mismatchPurchaseOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Receipt clearing mismatch ${suffix}`,
+      amount: "100.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    await patch(`/api/shipments/${mismatchShipmentId}/receive`, {
+      lines: [{ shipmentLineId: mismatchShipmentLineId, quantityReceived: 4 }],
+    }, 200);
+    await request(`/api/inventory/receipts/${mismatchShipmentLineId}/post`, { locationId }, 201);
+    const [mismatchMovement] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${mismatchShipmentLineId}-to-4`));
+    const [mismatchReceiptEntry] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, mismatchMovement.id),
+    ));
+    const [clearingAccount] = await db.select().from(accountingAccounts)
+      .where(eq(accountingAccounts.systemKey, "landed_cost_clearing"));
+    const [receiptClearingLine] = await db.select().from(journalLines).where(and(
+      eq(journalLines.journalEntryId, mismatchReceiptEntry.id),
+      eq(journalLines.accountId, clearingAccount.id),
+    ));
+    // The receipt should clear 400.00 ZMW; corrupt it by one ZMW to simulate
+    // a product-level difference in the posted receipt history.
+    await db.update(journalLines).set({ creditZmw: "401.00" })
+      .where(eq(journalLines.id, receiptClearingLine.id));
+
+    const { orders: [mismatchPreviewOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${mismatchPurchaseOrderId}`, undefined, 200,
+    );
+    const mismatchPreview = mismatchPreviewOrder.adjustmentPreview;
+    assert.equal(mismatchPreview.hasNegativeLine, true);
+    assert.equal(mismatchPreview.canPost, false);
+    assert.equal(mismatchPreview.adjustmentAvailableZmw, "0.00");
+    assert.deepEqual(mismatchPreview.lines.map((line: any) => [
+      line.stockedQuantity, line.adjustmentZmw,
+    ]), [[4, "-1.00"]]);
+
+    const mismatchAdjustmentRequest = {
+      reviewedAmountZmw: mismatchPreview.adjustmentAvailableZmw,
+      reviewedLines: mismatchPreview.lines.map((line: any) => ({
+        lineId: line.lineId,
+        adjustmentZmw: "0.00",
+        inventoryZmw: "0.00",
+        cogsZmw: "0.00",
+      })),
+      note: "Review receipt clearing mismatch",
+    };
+    const [adjustmentsBeforeMismatchRequest] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "landed_cost_adjustment"),
+      eq(journalEntries.sourceId, mismatchPurchaseOrderId!),
+    ));
+    assert.equal(adjustmentsBeforeMismatchRequest, undefined);
+    const mismatchResponse = await fetch(`${baseUrl}/api/landed-costs/${mismatchPurchaseOrderId}/adjust`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(mismatchAdjustmentRequest),
+    });
+    const mismatchPayload = await mismatchResponse.json() as any;
+    assert.equal(mismatchResponse.status, 409, JSON.stringify(mismatchPayload));
+    assert.match(mismatchPayload.error, /product-level clearing difference/i);
+    const adjustmentsAfterMismatchRequest = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "landed_cost_adjustment"),
+      eq(journalEntries.sourceId, mismatchPurchaseOrderId!),
+    ));
+    assert.equal(adjustmentsAfterMismatchRequest.length, 0);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -461,12 +563,12 @@ test("database flow adjusts late import costs across partial receipts and sales"
           WHERE journal_entry_id IN (
             SELECT id FROM journal_entries
             WHERE (source_type = 'import_expense' AND source_id IN (
-              SELECT id FROM import_expenses WHERE purchase_order_id = $1
+              SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4)
             ))
             OR (source_type = 'stock_receipt' AND source_id IN (
               SELECT id FROM inventory_movements WHERE product_id = $2
             ))
-            OR (source_type = 'landed_cost_adjustment' AND source_id = $1)
+            OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4))
             OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
               SELECT id FROM sales_deliveries WHERE sales_order_id = $3
             ))
@@ -478,16 +580,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
               )
             ))
           )
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0]);
+        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0]);
         await client.query(`
           DELETE FROM journal_entries
           WHERE (source_type = 'import_expense' AND source_id IN (
-            SELECT id FROM import_expenses WHERE purchase_order_id = $1
+            SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4)
           ))
           OR (source_type = 'stock_receipt' AND source_id IN (
             SELECT id FROM inventory_movements WHERE product_id = $2
           ))
-          OR (source_type = 'landed_cost_adjustment' AND source_id = $1)
+          OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4))
           OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
             SELECT id FROM sales_deliveries WHERE sales_order_id = $3
           ))
@@ -498,7 +600,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
               )
             )
           ))
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0]);
+        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
       }
       if (deliveryId) await client.query(
@@ -520,6 +622,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
         }
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (mismatchPurchaseOrderId) {
+        await client.query("DELETE FROM import_expenses WHERE purchase_order_id = $1", [mismatchPurchaseOrderId]);
+        if (mismatchShipmentId) {
+          await client.query("DELETE FROM shipment_lines WHERE shipment_id = $1", [mismatchShipmentId]);
+          await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [mismatchShipmentId]);
+          await client.query("DELETE FROM shipments WHERE id = $1", [mismatchShipmentId]);
+        }
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [mismatchPurchaseOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [mismatchPurchaseOrderId]);
       }
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
