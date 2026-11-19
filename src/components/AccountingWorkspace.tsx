@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { accountingReportExportRows } from "../../shared/accounting-reports";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
@@ -27,8 +27,8 @@ type OwnerFundTransaction = {
 };
 type ReportData = {
   entries: JournalEntry[];
-  expenses: ExpenseEntry[];
-  ownerTransactions: OwnerFundTransaction[];
+  expenses?: ExpenseEntry[];
+  ownerTransactions?: OwnerFundTransaction[];
   canCorrectRecords: boolean;
   correctionHistory: Array<{
     id: number; recordType: string; recordId: number; previousCorrectionId: number | null;
@@ -52,6 +52,21 @@ type ReportData = {
   balanceSheet: ReportRow[];
   totals: { trialDebitsZmw: string; trialCreditsZmw: string; incomeZmw: string; expensesZmw: string; netIncomeZmw: string };
 };
+
+type AccountingListRowsProps<T> = {
+  rows?: T[];
+  colSpan: number;
+  emptyMessage: string;
+  renderRow: (row: T) => ReactNode;
+};
+
+export function AccountingListRows<T>({ rows, colSpan, emptyMessage, renderRow }: AccountingListRowsProps<T>) {
+  const records = rows ?? [];
+  return <>
+    {records.map(renderRow)}
+    {!records.length && <tr><td colSpan={colSpan}>{emptyMessage}</td></tr>}
+  </>;
+}
 
 const currentYear = new Date().getFullYear();
 const money = (value: string) => `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -194,8 +209,8 @@ export default function AccountingWorkspace() {
   const exportTrialBalance = () => exportRows && downloadCsv("trial-balance.csv", exportRows.trialBalance);
   const exportIncome = () => exportRows && downloadCsv("income-statement.csv", exportRows.incomeStatement);
   const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
-  const expenses = data?.expenses ?? [];
-  const ownerTransactions = data?.ownerTransactions ?? [];
+  const expenses = data?.expenses;
+  const ownerTransactions = data?.ownerTransactions;
   const correctionHistory = data?.correctionHistory ?? [];
   const openingBalanceHistory = data?.openingBalances.history ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
@@ -226,9 +241,11 @@ export default function AccountingWorkspace() {
       <button className="button button-primary">Save transaction</button>
     </form>
     <section className="panel" style={{ marginBottom: 16 }}>
-      <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{ownerTransactions.length} records</span></div>
+      <div className="panel-heading"><h2>Owner funds and loans in period</h2><span>{ownerTransactions?.length ?? 0} records</span></div>
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Method</th><th>Reference</th><th>Amount</th><th /></tr></thead><tbody>
-        {ownerTransactions.map((transaction) => <Fragment key={transaction.id}>
+        <AccountingListRows rows={ownerTransactions} colSpan={7}
+          emptyMessage="No owner funds, withdrawals, or loans recorded in this period."
+          renderRow={(transaction) => <Fragment key={transaction.id}>
           <tr>
             <td>{transaction.effective.transactionDate}{transaction.correctionCount > 0 && <small><br />Originally {transaction.transactionDate}</small>}</td>
             <td>{transaction.effective.kind.replaceAll("_", " ")}</td>
@@ -264,8 +281,7 @@ export default function AccountingWorkspace() {
               <button className="button button-primary">Post correction</button>
             </form></td></tr>
           )}
-        </Fragment>)}
-        {!ownerTransactions.length && <tr><td colSpan={7}>No owner funds, withdrawals, or loans recorded in this period.</td></tr>}
+          </Fragment>} />
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
@@ -292,9 +308,11 @@ export default function AccountingWorkspace() {
       </form>
     </section>
     <section className="panel" style={{ marginBottom: 16 }}>
-      <div className="panel-heading"><h2>Business expenses in period</h2><span>{expenses.length} records</span></div>
+      <div className="panel-heading"><h2>Business expenses in period</h2><span>{expenses?.length ?? 0} records</span></div>
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th><th /></tr></thead><tbody>
-        {expenses.map((expense) => <Fragment key={expense.id}>
+        <AccountingListRows rows={expenses} colSpan={7}
+          emptyMessage="No business expenses recorded in this period."
+          renderRow={(expense) => <Fragment key={expense.id}>
           <tr>
             <td>{expense.effective.expenseDate}{expense.correctionCount > 0 && <small><br />Originally {expense.expenseDate}</small>}</td>
             <td>{expense.effective.category.replaceAll("_", " ")}</td>
@@ -330,8 +348,7 @@ export default function AccountingWorkspace() {
               <button className="button button-primary">Post correction</button>
             </form></td></tr>
           )}
-        </Fragment>)}
-        {!expenses.length && <tr><td colSpan={7}>No business expenses recorded in this period.</td></tr>}
+          </Fragment>} />
       </tbody></table></div>
     </section>
     <section className="panel" style={{ marginBottom: 16 }}>
