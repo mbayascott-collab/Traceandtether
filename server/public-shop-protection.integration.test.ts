@@ -46,6 +46,13 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
   const mismatchIpHash = createHash("sha256").update(mismatchIp).digest("hex");
   const expiredIp = `public-shop-challenge-expired-${suffix}`;
   const expiredIpHash = createHash("sha256").update(expiredIp).digest("hex");
+  const cleanupTriggerIp = `public-shop-cleanup-trigger-${suffix}`;
+  const cleanupTriggerIpHash = createHash("sha256").update(cleanupTriggerIp).digest("hex");
+  const cleanupExpiredIpHash = createHash("sha256")
+    .update(`public-shop-cleanup-expired-${suffix}`)
+    .digest("hex");
+  const cleanupActiveIp = `public-shop-cleanup-active-${suffix}`;
+  const cleanupActiveIpHash = createHash("sha256").update(cleanupActiveIp).digest("hex");
   const independentIps = [
     `public-shop-independent-a-${suffix}`,
     `public-shop-independent-b-${suffix}`,
@@ -165,6 +172,69 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
     );
     assert.equal(counter.rows[0]?.hit_count, 1);
 
+    await pool.query(
+      `INSERT INTO public_shop_order_limits (ip_hash, window_started_at, hit_count, expires_at)
+       VALUES
+         ($1, statement_timestamp() - interval '2 minutes', 2, statement_timestamp() - interval '1 minute'),
+         ($2, statement_timestamp(), $3, statement_timestamp() + interval '1 hour')`,
+      [cleanupExpiredIpHash, cleanupActiveIpHash, orderLimit],
+    );
+
+    const cleanupProtection = new PublicShopProtection({
+      orderLimit,
+      orderWindowMs: 60_000,
+      minimumFormAgeMs: 0,
+      challengeStore: new MemoryChallengeStore(),
+    });
+    const cleanupToken = await cleanupProtection.issueChallenge(cleanupTriggerIp);
+    assert.deepEqual(
+      await cleanupProtection.checkSubmission(cleanupTriggerIp, cleanupToken, ""),
+      { ok: true },
+      "a separate visitor's submission should run expired-counter cleanup",
+    );
+
+    const afterCleanup = await pool.query<{ ip_hash: string; hit_count: number }>(
+      "SELECT ip_hash, hit_count FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
+      [[cleanupExpiredIpHash, cleanupActiveIpHash]],
+    );
+    const afterCleanupByIpHash = new Map(afterCleanup.rows.map((row) => [row.ip_hash, row.hit_count]));
+    assert.equal(
+      afterCleanupByIpHash.has(cleanupExpiredIpHash),
+      false,
+      "cleanup must remove expired visitor counters",
+    );
+    assert.equal(
+      afterCleanupByIpHash.get(cleanupActiveIpHash),
+      orderLimit,
+      "cleanup must preserve an active visitor's counter",
+    );
+
+    const activeVisitorProtection = new PublicShopProtection({
+      orderLimit,
+      orderWindowMs: 60_000,
+      minimumFormAgeMs: 0,
+      challengeStore: new MemoryChallengeStore(),
+    });
+    const activeVisitorToken = await activeVisitorProtection.issueChallenge(cleanupActiveIp);
+    const activeVisitorResult = await activeVisitorProtection.checkSubmission(
+      cleanupActiveIp,
+      activeVisitorToken,
+      "",
+    );
+    assert.equal(
+      activeVisitorResult.ok,
+      false,
+      "an active visitor at the configured limit must remain blocked after cleanup",
+    );
+    if (!activeVisitorResult.ok) {
+      assert.equal(activeVisitorResult.reason, "rate_limited");
+    }
+    const activeVisitorCounter = await pool.query<{ hit_count: number }>(
+      "SELECT hit_count FROM public_shop_order_limits WHERE ip_hash = $1",
+      [cleanupActiveIpHash],
+    );
+    assert.equal(activeVisitorCounter.rows[0]?.hit_count, orderLimit + 1);
+
     let now = Date.now();
     const challengeLifetimeMs = 5_000;
     const createChallengeProtection = () => new PublicShopProtection({
@@ -216,7 +286,16 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
     try {
       await pool.query(
         "DELETE FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
-        [[ipHash, challengeIpHash, mismatchIpHash, expiredIpHash, ...independentIpHashes]],
+        [[
+          ipHash,
+          challengeIpHash,
+          mismatchIpHash,
+          expiredIpHash,
+          cleanupTriggerIpHash,
+          cleanupExpiredIpHash,
+          cleanupActiveIpHash,
+          ...independentIpHashes,
+        ]],
       );
       await pool.query(
         "DELETE FROM public_shop_challenges WHERE ip_hash = ANY($1::text[])",
