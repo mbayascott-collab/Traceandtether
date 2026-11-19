@@ -90,6 +90,39 @@ export default function MarketingWorkspace() {
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    let refreshing = false;
+    async function refreshGroups() {
+      if (refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        const groups = await request("/api/marketing/customer-groups");
+        setCustomerGroups(groups.groups);
+        setCanManageCustomerGroups(groups.canManage);
+        setCanViewCustomerGroupMembers(groups.canViewMembers);
+        if (selectedCustomerGroup !== null && groups.canViewMembers) {
+          const members = await request(`/api/marketing/customer-groups/${selectedCustomerGroup}/members`);
+          setCustomerGroupMembers(members.members);
+        }
+        setError("");
+      } catch (reason) {
+        setError(displayError(reason));
+      } finally {
+        refreshing = false;
+      }
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshGroups();
+    };
+    const interval = window.setInterval(() => void refreshGroups(), 30_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [selectedCustomerGroup]);
   async function runReport() {
     setError(""); setReportLoading(true);
     try {
