@@ -90,7 +90,10 @@ function validationMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Check the submitted values and try again.";
 }
 
-export function registerApiRoutes(app: import("express").Express) {
+export function registerApiRoutes(
+  app: import("express").Express,
+  businessAccess: RequestHandler = requireBusinessAccess,
+) {
   app.use("/api", (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     next();
@@ -123,12 +126,12 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/user-access", requireBusinessAccess, async (_req, res) => {
+  app.get("/api/user-access", businessAccess, async (_req, res) => {
     const users = await db.select().from(appUserAccess).orderBy(asc(appUserAccess.email));
     res.json({ users });
   });
 
-  app.get("/api/audit-logs", requireBusinessAccess, async (req, res) => {
+  app.get("/api/audit-logs", businessAccess, async (req, res) => {
     const parsed = auditLogQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -168,7 +171,7 @@ export function registerApiRoutes(app: import("express").Express) {
     });
   });
 
-  app.post("/api/user-access", requireBusinessAccess, requireAccessManager(), async (req, res) => {
+  app.post("/api/user-access", businessAccess, requireAccessManager(), async (req, res) => {
     const parsed = z.object({
       email: z.string().trim().email().max(320),
       displayName: z.string().trim().max(120).nullable().optional(),
@@ -198,7 +201,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.status(201).json({ email, displayName: parsed.data.displayName || null, role: "manager", active: true });
   });
 
-  app.patch("/api/user-access/:email", requireBusinessAccess, requireAccessManager(), async (req, res) => {
+  app.patch("/api/user-access/:email", businessAccess, requireAccessManager(), async (req, res) => {
     const parsed = z.object({ active: z.boolean() }).safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Choose whether this account should have access." });
@@ -220,7 +223,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json(updated);
   });
 
-  app.get("/api/categories", requireBusinessAccess, async (_req, res) => {
+  app.get("/api/categories", businessAccess, async (_req, res) => {
     const categories = await db
       .select()
       .from(productCategories)
@@ -228,7 +231,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ categories });
   });
 
-  app.get("/api/suppliers", requireBusinessAccess, async (req, res) => {
+  app.get("/api/suppliers", businessAccess, async (req, res) => {
     const parsed = z.object({
       q: z.string().trim().max(160).optional(),
       status: z.enum(["all", "active", "inactive"]).default("all"),
@@ -249,7 +252,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ suppliers: rows });
   });
 
-  app.post("/api/suppliers", requireBusinessAccess, async (req, res) => {
+  app.post("/api/suppliers", businessAccess, async (req, res) => {
     const parsed = supplierInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -275,7 +278,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/suppliers/:id", requireBusinessAccess, async (req, res) => {
+  app.patch("/api/suppliers/:id", businessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid supplier identifier." });
@@ -288,12 +291,19 @@ export function registerApiRoutes(app: import("express").Express) {
     }
     try {
       const [supplier] = await db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(suppliers).where(eq(suppliers.id, id)).limit(1);
+        if (!existing) return [undefined];
+        const changedFields = Object.keys(parsed.data).filter(
+          (key) =>
+            existing[key as keyof typeof existing] !==
+            parsed.data[key as keyof typeof parsed.data],
+        );
         const [updated] = await tx.update(suppliers)
           .set({ ...parsed.data, updatedAt: new Date() })
           .where(eq(suppliers.id, id)).returning();
-        if (updated) await recordBusinessAudit(tx, {
+        if (updated && changedFields.length > 0) await recordBusinessAudit(tx, {
           entityType: "supplier", entityId: updated.id, recordLabel: updated.name,
-          actor: res.locals.actor as Actor, action: "updated", changedFields: Object.keys(parsed.data),
+          actor: res.locals.actor as Actor, action: "updated", changedFields,
         });
         return [updated];
       });
@@ -312,7 +322,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/supplier-quotes", requireBusinessAccess, async (req, res) => {
+  app.get("/api/supplier-quotes", businessAccess, async (req, res) => {
     const parsed = z.object({ productId: z.string().regex(/^\d+$/).optional() }).safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid product filter." });
@@ -333,7 +343,7 @@ export function registerApiRoutes(app: import("express").Express) {
     res.json({ quotes: rows });
   });
 
-  app.post("/api/supplier-quotes", requireBusinessAccess, async (req, res) => {
+  app.post("/api/supplier-quotes", businessAccess, async (req, res) => {
     const parsed = supplierQuoteInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -369,7 +379,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/supplier-quotes/:id", requireBusinessAccess, async (req, res) => {
+  app.patch("/api/supplier-quotes/:id", businessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid quotation identifier." });
@@ -420,7 +430,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.post("/api/categories", requireBusinessAccess, async (req, res) => {
+  app.post("/api/categories", businessAccess, async (req, res) => {
     const parsed = categoryInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -447,7 +457,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.patch("/api/categories/:id", requireBusinessAccess, async (req, res) => {
+  app.patch("/api/categories/:id", businessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid category identifier." });
@@ -485,7 +495,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.get("/api/products", requireBusinessAccess, async (req, res) => {
+  app.get("/api/products", businessAccess, async (req, res) => {
     const parsedFilters = productFiltersSchema.safeParse(req.query);
     if (!parsedFilters.success) {
       res.status(400).json({ error: validationMessage(parsedFilters.error) });
@@ -535,7 +545,7 @@ export function registerApiRoutes(app: import("express").Express) {
     });
   });
 
-  app.post("/api/products", requireBusinessAccess, async (req, res) => {
+  app.post("/api/products", businessAccess, async (req, res) => {
     const parsed = productInputSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: validationMessage(parsed.error) });
@@ -563,7 +573,7 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  app.put("/api/products/:id", requireBusinessAccess, async (req, res) => {
+  app.put("/api/products/:id", businessAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid product identifier." });
@@ -616,11 +626,11 @@ export function registerApiRoutes(app: import("express").Express) {
     }
   });
 
-  registerProcurementRoutes(app, requireBusinessAccess);
-  registerInventoryRoutes(app, requireBusinessAccess);
-  registerSalesRoutes(app, requireBusinessAccess);
-  registerAccountingRoutes(app, requireBusinessAccess);
-  registerMarketingRoutes(app, requireBusinessAccess);
-  registerBusinessReportRoutes(app, requireBusinessAccess);
-  registerPaymentRoutes(app, requireBusinessAccess);
+  registerProcurementRoutes(app, businessAccess);
+  registerInventoryRoutes(app, businessAccess);
+  registerSalesRoutes(app, businessAccess);
+  registerAccountingRoutes(app, businessAccess);
+  registerMarketingRoutes(app, businessAccess);
+  registerBusinessReportRoutes(app, businessAccess);
+  registerPaymentRoutes(app, businessAccess);
 }

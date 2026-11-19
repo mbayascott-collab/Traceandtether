@@ -6,7 +6,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import test from "node:test";
 import {
   businessAuditLogs, businessExpenses, customers, inventoryLocations, inventoryMovements,
-  marketingCampaigns, marketingCustomerGroups, paymentStatementLines, products, purchaseOrders, salesOrders, suppliers,
+  marketingCampaigns, marketingCustomerGroups, paymentStatementLines, purchaseOrders, salesOrders,
 } from "../shared/schema";
 
 test("route mutations across business areas keep their audit history and actor", {
@@ -14,20 +14,10 @@ test("route mutations across business areas keep their audit history and actor",
 }, async (t) => {
   const [
     { db, pool },
-    { registerInventoryRoutes },
-    { registerSalesRoutes },
-    { registerProcurementRoutes },
-    { registerAccountingRoutes },
-    { registerPaymentRoutes },
-    { registerMarketingRoutes },
+    { registerApiRoutes },
   ] = await Promise.all([
     import("./db"),
-    import("./inventory-routes"),
-    import("./sales-routes"),
-    import("./procurement-routes"),
-    import("./accounting-routes"),
-    import("./payment-routes"),
-    import("./marketing-routes"),
+    import("./routes"),
   ]);
 
   const auditTable = await pool.query(
@@ -38,6 +28,10 @@ test("route mutations across business areas keep their audit history and actor",
     await pool.end();
     return;
   }
+  const publicShopTables = await pool.query(
+    "SELECT to_regclass('public.public_shop_challenges') IS NOT NULL AS exists",
+  );
+  const publicShopAvailable = Boolean(publicShopTables.rows[0]?.exists);
   const requiredColumns = new Set([
     "business_audit_logs.actor_clerk_user_id",
     "business_audit_logs.actor_email",
@@ -88,12 +82,7 @@ test("route mutations across business areas keep their audit history and actor",
     res.locals.actor = { clerkUserId: actorId, email: actorEmail, role: "owner" };
     next();
   };
-  registerInventoryRoutes(app, owner);
-  registerSalesRoutes(app, owner);
-  registerProcurementRoutes(app, owner);
-  registerAccountingRoutes(app, owner);
-  registerPaymentRoutes(app, owner);
-  registerMarketingRoutes(app, owner);
+  registerApiRoutes(app, owner);
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
   });
@@ -132,6 +121,7 @@ test("route mutations across business areas keep their audit history and actor",
     action: "created" | "updated" | "deleted",
     expectedActorId: string | null = actorId,
     expectedEmail = actorEmail,
+    expectedChangedFields?: string[],
   ) => {
     const [entry] = await db.select().from(businessAuditLogs).where(and(
       eq(businessAuditLogs.entityType, entityType),
@@ -143,6 +133,10 @@ test("route mutations across business areas keep their audit history and actor",
       eq(businessAuditLogs.actorEmail, expectedEmail),
     )).limit(1);
     assert.ok(entry, `missing ${action} audit record for ${entityType} #${entityId}`);
+    if (expectedChangedFields) {
+      assert.deepEqual(entry.changedFields, expectedChangedFields);
+    }
+    return entry;
   };
 
   let productId: number | undefined;
@@ -161,17 +155,74 @@ test("route mutations across business areas keep their audit history and actor",
   let triggerCreated = false;
 
   try {
-    const [product] = await db.insert(products).values({
+    const productBody = {
       sku: `AUD-${safeSuffix}`,
       name: `Audit route product ${suffix}`,
-      status: "active",
+      description: null,
+      imageUrl: null,
+      brand: `Audit brand ${suffix}`,
+      categoryId: null,
+      supplierName: null,
+      supplierProductCode: null,
+      purchaseCurrency: "CNY",
+      purchasePrice: "10.00",
+      estimatedLandedCostZmw: "25.00",
       sellingPriceZmw: "50.00",
-    }).returning();
-    productId = product.id;
-    const [supplier] = await db.insert(suppliers).values({
+      reorderThreshold: 0,
+      unit: "piece",
+      status: "active" as const,
+    };
+    const createdProduct = await expectStatus("/api/products", productBody, "POST", 201);
+    const createdProductId = createdProduct.product.id as number;
+    productId = createdProductId;
+    const productCreateFields = [
+      "sku", "name", "description", "imageUrl", "brand", "categoryId", "supplierName",
+      "supplierProductCode", "purchaseCurrency", "purchasePrice", "estimatedLandedCostZmw",
+      "sellingPriceZmw", "reorderThreshold", "unit", "status",
+    ];
+    await expectAudit("product", createdProductId, "created", actorId, actorEmail, productCreateFields);
+    const updatedProductBody = {
+      ...productBody,
+      name: `Updated audit route product ${suffix}`,
+      brand: `Updated audit brand ${suffix}`,
+    };
+    const updatedProduct = await expectStatus(
+      `/api/products/${createdProductId}`, updatedProductBody, "PUT", 200,
+    );
+    assert.equal(updatedProduct.product.name, updatedProductBody.name);
+    await expectAudit("product", createdProductId, "updated", actorId, actorEmail, ["name", "brand"]);
+
+    const supplierBody = {
       name: `Audit route supplier ${suffix}`,
-    }).returning();
-    supplierId = supplier.id;
+      country: "China",
+      contactName: `Contact ${suffix}`,
+      email: null,
+      phone: null,
+      website: null,
+      paymentTerms: null,
+      paymentTermDays: null,
+      defaultLeadTimeDays: 0,
+      notes: null,
+      status: "active" as const,
+    };
+    const createdSupplier = await expectStatus("/api/suppliers", supplierBody, "POST", 201);
+    const createdSupplierId = createdSupplier.supplier.id as number;
+    supplierId = createdSupplierId;
+    const supplierCreateFields = [
+      "name", "country", "contactName", "email", "phone", "website", "paymentTerms",
+      "paymentTermDays", "defaultLeadTimeDays", "notes", "status",
+    ];
+    await expectAudit("supplier", createdSupplierId, "created", actorId, actorEmail, supplierCreateFields);
+    const updatedSupplierBody = {
+      ...supplierBody,
+      name: `Updated audit route supplier ${suffix}`,
+      notes: `Updated supplier notes ${suffix}`,
+    };
+    const updatedSupplier = await expectStatus(
+      `/api/suppliers/${createdSupplierId}`, updatedSupplierBody, "PATCH", 200,
+    );
+    assert.equal(updatedSupplier.supplier.name, updatedSupplierBody.name);
+    await expectAudit("supplier", createdSupplierId, "updated", actorId, actorEmail, ["name", "notes"]);
     const [customer] = await db.insert(customers).values({
       name: `Audit route customer ${suffix}`,
     }).returning();
@@ -309,31 +360,33 @@ test("route mutations across business areas keep their audit history and actor",
     await expectAudit("marketing_customer_group", createdCustomerGroupId, "deleted");
 
     // Public shop: attribute its customer and order to the unauthenticated actor.
-    const shop = await request("/api/shop/products");
-    assert.equal(shop.response.status, 200, JSON.stringify(shop.payload));
-    assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
-    await new Promise((resolve) => setTimeout(resolve, 1_600));
-    const publicOrder = await expectStatus("/api/shop/orders", {
-      name: publicCustomerName,
-      phone: "+260 977 000 001",
-      email: "",
-      address: "",
-      notes: "",
-      lines: [{ productId, quantity: 1 }],
-      challenge: shop.payload.challenge,
-      website: "",
-    }, "POST", 201);
-    publicOrderNumber = publicOrder.orderNumber;
-    publicOrderAccepted = true;
-    const [publicCustomer] = await db.select().from(customers)
-      .where(eq(customers.name, publicCustomerName));
-    assert.ok(publicCustomer);
-    publicCustomerId = publicCustomer.id;
-    const [publicSalesOrder] = await db.select().from(salesOrders)
-      .where(eq(salesOrders.orderNumber, publicOrderNumber!));
-    assert.ok(publicSalesOrder);
-    await expectAudit("customer", publicCustomerId, "created", null, "Public shop");
-    await expectAudit("sales_order", publicSalesOrder.id, "created", null, "Public shop");
+    if (publicShopAvailable) {
+      const shop = await request("/api/shop/products");
+      assert.equal(shop.response.status, 200, JSON.stringify(shop.payload));
+      assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      const publicOrder = await expectStatus("/api/shop/orders", {
+        name: publicCustomerName,
+        phone: "+260 977 000 001",
+        email: "",
+        address: "",
+        notes: "",
+        lines: [{ productId, quantity: 1 }],
+        challenge: shop.payload.challenge,
+        website: "",
+      }, "POST", 201);
+      publicOrderNumber = publicOrder.orderNumber;
+      publicOrderAccepted = true;
+      const [publicCustomer] = await db.select().from(customers)
+        .where(eq(customers.name, publicCustomerName));
+      assert.ok(publicCustomer);
+      publicCustomerId = publicCustomer.id;
+      const [publicSalesOrder] = await db.select().from(salesOrders)
+        .where(eq(salesOrders.orderNumber, publicOrderNumber!));
+      assert.ok(publicSalesOrder);
+      await expectAudit("customer", publicCustomerId, "created", null, "Public shop");
+      await expectAudit("sales_order", publicSalesOrder.id, "created", null, "Public shop");
+    }
 
     // Fail after the accounting route writes its audit row. The transaction must roll both back.
     await pool.query(`
