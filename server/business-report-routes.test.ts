@@ -3,7 +3,7 @@ import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
 
-test("profitability endpoint rejects malformed, impossible, and reversed date ranges", async () => {
+test("business report endpoints reject invalid date ranges at the HTTP boundary", async () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL ??= "postgres://test:test@127.0.0.1:1/test";
   const [{ registerBusinessReportRoutes }, { pool }] = await Promise.all([
@@ -22,20 +22,27 @@ test("profitability endpoint rejects malformed, impossible, and reversed date ra
 
   try {
     const invalidRequests = [
-      ["malformed start date", "?from=2025-2-01"],
-      ["malformed end date", "?to=2025-2-01"],
-      ["impossible start date", "?from=2025-02-29"],
-      ["impossible end date", "?to=2025-04-31"],
-      ["empty supplied date", "?from="],
-      ["repeated date parameter", "?from=2025-01-01&from=2025-01-02"],
-      ["reversed date range", "?from=2025-03-01&to=2025-02-28"],
+      ["/api/profitability", "?from=2025-2-01", "Choose a valid date range.", "malformed start date"],
+      ["/api/profitability", "?to=2025-2-01", "Choose a valid date range.", "malformed end date"],
+      ["/api/profitability", "?from=2025-02-29", "Choose a valid date range.", "impossible start date"],
+      ["/api/profitability", "?to=2025-04-31", "Choose a valid date range.", "impossible end date"],
+      ["/api/profitability", "?from=", "Choose a valid date range.", "empty supplied date"],
+      ["/api/profitability", "?from=2025-01-01&from=2025-01-02", "Choose a valid date range.", "repeated date parameter"],
+      ["/api/profitability", "?from=2025-03-01&to=2025-02-28", "Choose a valid date range.", "reversed date range"],
+      ["/api/supplier-analytics", "?from=", "Choose a valid supplier report date range.", "supplier empty supplied date"],
+      ["/api/supplier-analytics", "?from=2025-01-01&from=2025-01-02", "Choose a valid supplier report date range.", "supplier repeated start date"],
+      ["/api/supplier-analytics", "?to=2025-01-01&to=2025-01-02", "Choose a valid supplier report date range.", "supplier repeated end date"],
+      ["/api/supplier-analytics", "?from=2025-2-01", "Choose a valid supplier report date range.", "supplier malformed start date"],
+      ["/api/supplier-analytics", "?to=2025-2-01", "Choose a valid supplier report date range.", "supplier malformed end date"],
+      ["/api/supplier-analytics", "?from=2025-02-29", "Choose a valid supplier report date range.", "supplier impossible start date"],
+      ["/api/supplier-analytics", "?to=2025-04-31", "Choose a valid supplier report date range.", "supplier impossible end date"],
     ];
 
-    for (const [description, query] of invalidRequests) {
-      const response = await fetch(`${baseUrl}/api/profitability${query}`);
+    for (const [path, query, expectedError, description] of invalidRequests) {
+      const response = await fetch(`${baseUrl}${path}${query}`);
       const payload = await response.json() as { error?: string };
       assert.equal(response.status, 400, description);
-      assert.equal(payload.error, "Choose a valid date range.", description);
+      assert.equal(payload.error, expectedError, description);
     }
   } finally {
     await new Promise<void>((resolve, reject) => {

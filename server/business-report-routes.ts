@@ -195,9 +195,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
   });
 
   app.get("/api/supplier-analytics", owner, async (req, res) => {
-    const fromDate = typeof req.query.from === "string" ? req.query.from : "";
-    const toDate = typeof req.query.to === "string" ? req.query.to : "";
-    if ((fromDate && !validDate(fromDate)) || (toDate && !validDate(toDate)) || (fromDate && toDate && fromDate > toDate)) {
+    const fromDate = reportDateParam(req.query.from);
+    const toDate = reportDateParam(req.query.to);
+    if (fromDate === null || toDate === null
+      || (fromDate !== "" && !validDate(fromDate))
+      || (toDate !== "" && !validDate(toDate))
+      || (fromDate !== "" && toDate !== "" && fromDate > toDate)) {
       return res.status(400).json({ error: "Choose a valid supplier report date range." });
     }
     const dateConditions = [

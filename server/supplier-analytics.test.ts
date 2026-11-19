@@ -355,12 +355,14 @@ test("supplier analytics monthly totals reconcile with selected-period totals", 
       `${baseUrl}/api/supplier-analytics?from=2097-01-01&to=2097-03-31`,
     );
     const payload = await response.json() as {
+      period: { from: string | null; to: string | null };
       totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
       monthlySpend: {
         month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
       }[];
     };
     assert.equal(response.status, 200, JSON.stringify(payload));
+    assert.deepEqual(payload.period, { from: "2097-01-01", to: "2097-03-31" });
 
     const cents = (value: string) => {
       const [whole, fraction = ""] = value.split(".");
