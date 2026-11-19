@@ -178,7 +178,7 @@ test("public shop campaign links attribute orders and reports count them without
     const baseline = before.payload.totals;
 
     const challenges = [];
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       const shop = await request("/api/shop/products");
       assert.equal(shop.response.status, 200);
       assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
@@ -213,6 +213,8 @@ test("public shop campaign links attribute orders and reports count them without
     await submitOrder(1, trackingCode, challenges[1]);
     await submitOrder(2, replacementCode, challenges[2]);
     await submitOrder(3, undefined, challenges[3]);
+    await db.update(marketingCampaigns).set({ status: "paused" }).where(eq(marketingCampaigns.id, campaignId));
+    await submitOrder(4, replacementCode, challenges[4]);
 
     const testOrders = await db.select({ id: salesOrders.id, orderNumber: salesOrders.orderNumber })
       .from(salesOrders).where(inArray(salesOrders.orderNumber, orderNumbers));
@@ -260,7 +262,7 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(report.payload.totals.campaignLinkOrders - baseline.campaignLinkOrders, 2);
     assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 2);
     assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 3);
-    assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 1);
+    assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
