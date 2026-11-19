@@ -683,8 +683,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         const key = `business_expense:${expense.id}`;
         const correction = latestCorrections.get(key);
         const effectiveDate = correction?.effectiveDate ?? expense.expenseDate;
-        if ((expense.expenseDate < from || expense.expenseDate > to) &&
-            (effectiveDate < from || effectiveDate > to)) return [];
+        if (effectiveDate < from || effectiveDate > to) return [];
         return [{
           ...expense,
           effective: {

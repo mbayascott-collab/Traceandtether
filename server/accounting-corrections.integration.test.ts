@@ -172,6 +172,10 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     const yearBeforeCorrection = await request("/api/accounting?from=2002-01-01&to=2002-12-31");
     assert.equal(januaryBeforeCorrection.response.status, 200, JSON.stringify(januaryBeforeCorrection.payload));
     assert.equal(yearBeforeCorrection.response.status, 200, JSON.stringify(yearBeforeCorrection.payload));
+    assert.ok(
+      januaryBeforeCorrection.payload.expenses.some((row: any) => row.id === createdExpenseId),
+      "the original expense must appear in its original reporting period before correction",
+    );
     const concurrentCorrections = await Promise.all([
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
         category: "rent",
@@ -227,6 +231,12 @@ test("expense and owner-fund corrections preserve originals and post linked bala
 
     const januaryReport = await request("/api/accounting?from=2002-01-01&to=2002-01-31");
     assert.equal(januaryReport.response.status, 200, JSON.stringify(januaryReport.payload));
+    assert.ok(
+      !januaryReport.payload.expenses.some((row: any) => row.id === createdExpenseId),
+      "the corrected expense must be excluded from its original reporting period",
+    );
+    assert.equal(januaryReport.payload.correctionHistory.filter((row: any) =>
+      row.recordType === "business_expense" && row.recordId === createdExpenseId).length, 0);
     const januaryBefore = new Map(januaryBeforeCorrection.payload.trialBalance.map((row: any) => [row.code, row]));
     const januaryAfter = new Map(januaryReport.payload.trialBalance.map((row: any) => [row.code, row]));
     assert.equal(
@@ -289,6 +299,11 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       `/api/accounting?from=${latestExpenseCorrection.effectiveDate}&to=${latestExpenseCorrection.effectiveDate}`,
     );
     assert.equal(marchReport.response.status, 200, JSON.stringify(marchReport.payload));
+    const marchExpense = marchReport.payload.expenses.find((row: any) => row.id === createdExpenseId);
+    assert.equal(marchExpense?.effective.expenseDate, latestExpenseCorrection.effectiveDate);
+    assert.equal(marchExpense?.effective.amountZmw, latestExpenseCorrection.amountZmw);
+    assert.equal(marchReport.payload.correctionHistory.filter((row: any) =>
+      row.recordType === "business_expense" && row.recordId === createdExpenseId).length, expenseCorrections.length);
     const expenseAccount = reportResult.payload.accounts.find((account: any) =>
       account.systemKey === operatingExpenseAccountKey(latestExpenseCorrection.category ?? "other"));
     assert.equal(
