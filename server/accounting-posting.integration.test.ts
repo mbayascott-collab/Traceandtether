@@ -926,7 +926,7 @@ test("customer receipts wait for an in-flight reminder send to finish", {
   }
 });
 
-test("shipment bill retries do not create duplicate expenses or payable journals", {
+test("simultaneous shipment bill saves and retries do not create duplicate expenses or payable journals", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
   const [{ db, pool }, { registerProcurementRoutes }] = await Promise.all([
@@ -970,6 +970,14 @@ test("shipment bill retries do not create duplicate expenses or payable journals
     const payload = await response.json() as any;
     assert.equal(response.status, expectedStatus, JSON.stringify(payload));
     return payload;
+  };
+  const simultaneousRequest = async (body: unknown) => {
+    const response = await fetch(`${baseUrl}/api/import-expenses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, payload: await response.json() as any };
   };
 
   try {
@@ -1034,6 +1042,43 @@ test("shipment bill retries do not create duplicate expenses or payable journals
     const duplicateBlankReference = await request(blankReferenceBill, 409);
     assert.match(duplicateBlankReference.error, /already recorded for this shipment/i);
 
+    const concurrentBill = {
+      ...referencedBill,
+      description: `Concurrent forwarder bill ${suffix}`,
+      amount: "35.00",
+      reference: `FW-CONCURRENT-${suffix}`,
+    };
+    const concurrentResults = await Promise.all([
+      simultaneousRequest(concurrentBill),
+      simultaneousRequest(concurrentBill),
+    ]);
+    assert.deepEqual(concurrentResults.map((result) => result.status).sort(), [201, 409],
+      "exactly one simultaneous save should create the bill");
+    const winningResult = concurrentResults.find((result) => result.status === 201)!;
+    const losingResult = concurrentResults.find((result) => result.status === 409)!;
+    assert.ok(winningResult.payload.expense?.id, "the winning save should return its recorded expense");
+    assert.match(losingResult.payload.error, /already recorded for this shipment/i,
+      "the losing save should receive the already-recorded response");
+    const concurrentExpenses = await db.select().from(importExpenses).where(and(
+      eq(importExpenses.shipmentId, shipmentId!),
+      eq(importExpenses.description, concurrentBill.description),
+    ));
+    assert.equal(concurrentExpenses.length, 1, "simultaneous saves should leave one recorded expense");
+    assert.equal(concurrentExpenses[0]!.id, winningResult.payload.expense.id);
+    const concurrentEntries = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "import_expense"),
+      eq(journalEntries.sourceId, concurrentExpenses[0]!.id),
+    ));
+    assert.equal(concurrentEntries.length, 1, "the concurrent bill should post one payable journal entry");
+    const concurrentPayableLines = await db.select({ systemKey: accountingAccounts.systemKey })
+      .from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(and(
+        eq(journalLines.journalEntryId, concurrentEntries[0]!.id),
+        eq(accountingAccounts.systemKey, "accounts_payable"),
+      ));
+    assert.equal(concurrentPayableLines.length, 1, "the concurrent bill should credit accounts payable once");
+
     for (const expense of [referencedExpense, blankReferenceExpense]) {
       const persistedExpenses = await db.select().from(importExpenses).where(and(
         eq(importExpenses.shipmentId, shipmentId!),
@@ -1070,7 +1115,7 @@ test("shipment bill retries do not create duplicate expenses or payable journals
     const { expense: distinctExpense } = await request(distinctBill, 201);
     const shipmentExpenses = await db.select().from(importExpenses)
       .where(eq(importExpenses.shipmentId, shipmentId!));
-    assert.equal(shipmentExpenses.length, 3, "a distinct bill for the same shipment should be saved");
+    assert.equal(shipmentExpenses.length, 4, "the distinct bill should save without duplicating the concurrent bill");
     const distinctEntries = await db.select().from(journalEntries).where(and(
       eq(journalEntries.sourceType, "import_expense"),
       eq(journalEntries.sourceId, distinctExpense.id),
