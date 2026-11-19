@@ -48,7 +48,9 @@ test("concurrent stock reservations cannot overbook the same location", {
   let customerId: number | undefined;
   let productId: number | undefined;
   let manualRaceProductId: number | undefined;
+  let transferRaceProductId: number | undefined;
   let locationId: number | undefined;
+  let transferDestinationLocationId: number | undefined;
   const orderIds: number[] = [];
   const manualRaceOrderIds: number[] = [];
   const request = async (path: string, body: unknown, expectedStatus: number) => {
@@ -84,6 +86,10 @@ test("concurrent stock reservations cannot overbook the same location", {
       name: `Concurrent confirmation location ${suffix}`,
     }).returning();
     locationId = location.id;
+    const [transferDestinationLocation] = await db.insert(inventoryLocations).values({
+      name: `Concurrent transfer destination ${suffix}`,
+    }).returning();
+    transferDestinationLocationId = transferDestinationLocation.id;
     await db.insert(inventoryMovements).values({
       productId,
       locationId,
@@ -217,6 +223,97 @@ test("concurrent stock reservations cannot overbook the same location", {
     assert.equal(manualRaceReservations.length, 1, "only the winning request should create an active reservation");
     assert.equal(totalActiveReserved, 4);
     assert.ok(totalActiveReserved <= Number(manualRaceOnHand.quantity), "active reservations must not exceed on-hand stock");
+
+    const [transferRaceProduct] = await db.insert(products).values({
+      sku: `STRANS-${suffix}`,
+      name: `Concurrent transfer race product ${suffix}`,
+      status: "active",
+    }).returning();
+    transferRaceProductId = transferRaceProduct.id;
+    await db.insert(inventoryMovements).values({
+      productId: transferRaceProductId,
+      locationId,
+      kind: "opening_stock",
+      quantityDelta: 5,
+      reason: `Concurrent transfer race test ${suffix}`,
+      sourceKey: `stock-transfer-confirmation-race-${suffix}`,
+    });
+    const { order: transferRaceOrder } = await request("/api/sales-orders", {
+      customerId,
+      deliveryAddress: null,
+      notes: null,
+      lines: [{ productId: transferRaceProductId, quantity: 4, unitPriceZmw: "10.00" }],
+    }, 201);
+    orderIds.push(transferRaceOrder.id);
+
+    const [transferResponse, transferConfirmationResponse] = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/transfers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: transferRaceProductId,
+          fromLocationId: locationId,
+          toLocationId: transferDestinationLocationId,
+          quantity: 3,
+          reason: `Concurrent transfer race test ${suffix}`,
+          reference: null,
+        }),
+      }),
+      fetch(`${baseUrl}/api/sales-orders/${transferRaceOrder.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ locations: [{ productId: transferRaceProductId, locationId }] }),
+      }),
+    ]);
+    const [transferResult, transferConfirmationResult] = await Promise.all([
+      transferResponse.json() as Promise<any>,
+      transferConfirmationResponse.json() as Promise<any>,
+    ]);
+    assert.ok(
+      (transferResponse.status === 201 && transferConfirmationResponse.status === 409)
+        || (transferResponse.status === 409 && transferConfirmationResponse.status === 200),
+      `expected transfer and confirmation to serialize, received ${transferResponse.status} and ${transferConfirmationResponse.status}`,
+    );
+    if (transferResponse.status === 409) {
+      assert.match(transferResult.error, /not have enough unreserved stock/i);
+    }
+    if (transferConfirmationResponse.status === 409) {
+      assert.match(transferConfirmationResult.error, /units available .*; 4 requested/i);
+    }
+
+    const balanceAt = async (balanceLocationId: number) => {
+      const [onHand] = await db.select({
+        quantity: sum(inventoryMovements.quantityDelta),
+      }).from(inventoryMovements).where(and(
+        eq(inventoryMovements.productId, transferRaceProductId!),
+        eq(inventoryMovements.locationId, balanceLocationId),
+      ));
+      const [reserved] = await db.select({
+        quantity: sum(inventoryReservations.quantity),
+      }).from(inventoryReservations).where(and(
+        eq(inventoryReservations.productId, transferRaceProductId!),
+        eq(inventoryReservations.locationId, balanceLocationId),
+        eq(inventoryReservations.status, "active"),
+      ));
+      return {
+        onHand: Number(onHand.quantity ?? 0),
+        reserved: Number(reserved.quantity ?? 0),
+      };
+    };
+    const [sourceBalance, destinationBalance] = await Promise.all([
+      balanceAt(locationId),
+      balanceAt(transferDestinationLocationId),
+    ]);
+    assert.ok(sourceBalance.reserved <= sourceBalance.onHand, "source reservations must not exceed source stock");
+    assert.ok(destinationBalance.reserved <= destinationBalance.onHand, "destination reservations must not exceed destination stock");
+
+    if (transferResponse.status === 201) {
+      assert.deepEqual(sourceBalance, { onHand: 2, reserved: 0 }, "a completed transfer leaves two unreserved units at the source");
+      assert.deepEqual(destinationBalance, { onHand: 3, reserved: 0 }, "a completed transfer adds three units at the destination");
+    } else {
+      assert.deepEqual(sourceBalance, { onHand: 5, reserved: 4 }, "a completed confirmation keeps all five units at the source and reserves four");
+      assert.deepEqual(destinationBalance, { onHand: 0, reserved: 0 }, "a blocked transfer leaves the destination unchanged");
+    }
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -231,13 +328,14 @@ test("concurrent stock reservations cannot overbook the same location", {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1::int[])", [allOrderIds]);
         await client.query("DELETE FROM sales_orders WHERE id = ANY($1::int[])", [allOrderIds]);
       }
-      const allProductIds = [productId, manualRaceProductId].filter((id): id is number => id !== undefined);
+      const allProductIds = [productId, manualRaceProductId, transferRaceProductId].filter((id): id is number => id !== undefined);
       if (allProductIds.length) {
         await client.query("DELETE FROM inventory_reservations WHERE product_id = ANY($1::int[])", [allProductIds]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [allProductIds]);
         await client.query("DELETE FROM products WHERE id = ANY($1::int[])", [allProductIds]);
       }
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      if (transferDestinationLocationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [transferDestinationLocationId]);
       if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
       await client.query("COMMIT");
     } catch (error) {
