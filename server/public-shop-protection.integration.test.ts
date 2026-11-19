@@ -46,6 +46,12 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
   const mismatchIpHash = createHash("sha256").update(mismatchIp).digest("hex");
   const expiredIp = `public-shop-challenge-expired-${suffix}`;
   const expiredIpHash = createHash("sha256").update(expiredIp).digest("hex");
+  const independentIps = [
+    `public-shop-independent-a-${suffix}`,
+    `public-shop-independent-b-${suffix}`,
+  ];
+  const independentIpHashes = independentIps.map((visitorIp) =>
+    createHash("sha256").update(visitorIp).digest("hex"));
   const orderLimit = 5;
   const protections = Array.from({ length: 20 }, () => new PublicShopProtection({
     orderLimit,
@@ -64,6 +70,80 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
     const blocked = results.filter((result) => !result.ok);
     assert.equal(blocked.length, protections.length - orderLimit);
     assert.ok(blocked.every((result) => result.reason === "rate_limited"));
+
+    const attemptsPerVisitor = orderLimit + 2;
+    const independentResults = await Promise.all(independentIps.flatMap((visitorIp) =>
+      Array.from({ length: attemptsPerVisitor }, async () => {
+        const protection = new PublicShopProtection({
+          orderLimit,
+          orderWindowMs: 60_000,
+          minimumFormAgeMs: 0,
+          challengeStore: new MemoryChallengeStore(),
+        });
+        const token = await protection.issueChallenge(visitorIp);
+        return { visitorIp, result: await protection.checkSubmission(visitorIp, token, "") };
+      })));
+
+    for (const visitorIp of independentIps) {
+      const visitorResults = independentResults
+        .filter((attempt) => attempt.visitorIp === visitorIp)
+        .map((attempt) => attempt.result);
+      assert.equal(
+        visitorResults.filter((result) => result.ok).length,
+        orderLimit,
+        `visitor ${visitorIp} must receive its full allowance`,
+      );
+      assert.equal(
+        visitorResults.filter((result) => !result.ok && result.reason === "rate_limited").length,
+        attemptsPerVisitor - orderLimit,
+        `visitor ${visitorIp} must be limited only after its own allowance`,
+      );
+    }
+
+    const independentCounters = await pool.query<{ ip_hash: string; hit_count: number }>(
+      "SELECT ip_hash, hit_count FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
+      [independentIpHashes],
+    );
+    const counterByIpHash = new Map(
+      independentCounters.rows.map((row) => [row.ip_hash, row.hit_count]),
+    );
+    for (const ipHash of independentIpHashes) {
+      assert.equal(
+        counterByIpHash.get(ipHash),
+        orderLimit + 1,
+        "each visitor must have an independent database counter, including its first blocked attempt",
+      );
+    }
+
+    await pool.query(
+      "UPDATE public_shop_order_limits SET expires_at = statement_timestamp() WHERE ip_hash = $1",
+      [independentIpHashes[0]],
+    );
+    const resetProtection = new PublicShopProtection({
+      orderLimit,
+      orderWindowMs: 60_000,
+      minimumFormAgeMs: 0,
+      challengeStore: new MemoryChallengeStore(),
+    });
+    const resetToken = await resetProtection.issueChallenge(independentIps[0]);
+    assert.deepEqual(
+      await resetProtection.checkSubmission(independentIps[0], resetToken, ""),
+      { ok: true },
+      "an expired visitor window must grant that visitor a fresh allowance",
+    );
+    const countersAfterIndependentReset = await pool.query<{ ip_hash: string; hit_count: number }>(
+      "SELECT ip_hash, hit_count FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
+      [independentIpHashes],
+    );
+    const countersAfterResetByIpHash = new Map(
+      countersAfterIndependentReset.rows.map((row) => [row.ip_hash, row.hit_count]),
+    );
+    assert.equal(countersAfterResetByIpHash.get(independentIpHashes[0]), 1);
+    assert.equal(
+      countersAfterResetByIpHash.get(independentIpHashes[1]),
+      orderLimit + 1,
+      "resetting one visitor's window must not change another visitor's counter",
+    );
 
     await pool.query(
       "UPDATE public_shop_order_limits SET expires_at = statement_timestamp() WHERE ip_hash = $1",
@@ -136,7 +216,7 @@ test("PostgreSQL public shop protection shares challenges and order limits acros
     try {
       await pool.query(
         "DELETE FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
-        [[ipHash, challengeIpHash, mismatchIpHash, expiredIpHash]],
+        [[ipHash, challengeIpHash, mismatchIpHash, expiredIpHash, ...independentIpHashes]],
       );
       await pool.query(
         "DELETE FROM public_shop_challenges WHERE ip_hash = ANY($1::text[])",
