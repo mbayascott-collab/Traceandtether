@@ -925,3 +925,205 @@ test("customer receipts wait for an in-flight reminder send to finish", {
     }
   }
 });
+
+test("shipment bill retries do not create duplicate expenses or payable journals", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerProcurementRoutes }] = await Promise.all([
+    import("./db"),
+    import("./procurement-routes"),
+  ]);
+  if (!closeIntegrationPool) closeIntegrationPool = () => pool.end();
+  const auditTable = await pool.query<{ exists: boolean }>(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    t.skip("requires the business audit migration used by shipment routes");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const actorEmail = `forwarder-bill-retry-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerProcurementRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let productId: number | undefined;
+  let supplierId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  let shipmentId: number | undefined;
+  const request = async (body: unknown, expectedStatus: number) => {
+    const response = await fetch(`${baseUrl}/api/import-expenses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as any;
+    assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+    return payload;
+  };
+
+  try {
+    const [supplier] = await db.insert(suppliers).values({
+      name: `Forwarder bill retry supplier ${suffix}`,
+    }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `FBR-${suffix}`,
+      name: `Forwarder bill retry product ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const { order } = await requestToRoute(baseUrl, "/api/purchase-orders", {
+      supplierId: supplier.id,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [{ productId: product.id, quantityOrdered: 5, unitPrice: "100.00" }],
+    }, 201);
+    purchaseOrderId = order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, order.id));
+    const { shipment } = await requestToRoute(baseUrl, "/api/shipments", {
+      purchaseOrderIds: [order.id],
+      shipmentReference: `FBR-SHIP-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: [{ purchaseOrderLineId: orderLine.id, quantityShipped: 5 }],
+    }, 201);
+    shipmentId = shipment.id;
+
+    const referencedBill = {
+      purchaseOrderId: null,
+      shipmentId,
+      category: "Freight",
+      description: `Forwarder bill ${suffix}`,
+      amount: "20.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: `FW-${suffix}`,
+      notes: null,
+    };
+    const { expense: referencedExpense } = await request(referencedBill, 201);
+    const duplicateReferenced = await request(referencedBill, 409);
+    assert.match(duplicateReferenced.error, /already recorded for this shipment/i);
+
+    const blankReferenceBill = {
+      ...referencedBill,
+      description: `Unreferenced forwarder bill ${suffix}`,
+      amount: "30.00",
+      reference: null,
+    };
+    const { expense: blankReferenceExpense } = await request(blankReferenceBill, 201);
+    const duplicateBlankReference = await request(blankReferenceBill, 409);
+    assert.match(duplicateBlankReference.error, /already recorded for this shipment/i);
+
+    for (const expense of [referencedExpense, blankReferenceExpense]) {
+      const persistedExpenses = await db.select().from(importExpenses).where(and(
+        eq(importExpenses.shipmentId, shipmentId!),
+        eq(importExpenses.description, expense.description),
+      ));
+      assert.equal(persistedExpenses.length, 1, `bill ${expense.description} should have one expense`);
+      assert.equal(persistedExpenses[0]!.id, expense.id);
+      const entries = await db.select().from(journalEntries).where(and(
+        eq(journalEntries.sourceType, "import_expense"),
+        eq(journalEntries.sourceId, expense.id),
+      ));
+      assert.equal(entries.length, 1, `bill ${expense.description} should have one linked journal entry`);
+      const payableLines = await db.select({
+        systemKey: accountingAccounts.systemKey,
+        debitZmw: journalLines.debitZmw,
+        creditZmw: journalLines.creditZmw,
+      }).from(journalLines)
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .where(eq(journalLines.journalEntryId, entries[0]!.id));
+      assert.deepEqual(payableLines.map((line) => [
+        line.systemKey, line.debitZmw, line.creditZmw,
+      ]).sort(([left], [right]) => String(left).localeCompare(String(right))), [
+        ["landed_cost_clearing", (Number(expense.amount) * Number(expense.exchangeRateToZmw)).toFixed(2), "0.00"],
+        ["accounts_payable", "0.00", (Number(expense.amount) * Number(expense.exchangeRateToZmw)).toFixed(2)],
+      ].sort(([left], [right]) => String(left).localeCompare(String(right))));
+    }
+
+    const distinctBill = {
+      ...referencedBill,
+      description: `Second distinct forwarder bill ${suffix}`,
+      amount: "40.00",
+      reference: `FW-SECOND-${suffix}`,
+    };
+    const { expense: distinctExpense } = await request(distinctBill, 201);
+    const shipmentExpenses = await db.select().from(importExpenses)
+      .where(eq(importExpenses.shipmentId, shipmentId!));
+    assert.equal(shipmentExpenses.length, 3, "a distinct bill for the same shipment should be saved");
+    const distinctEntries = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "import_expense"),
+      eq(journalEntries.sourceId, distinctExpense.id),
+    ));
+    assert.equal(distinctEntries.length, 1, "the distinct bill should receive one payable journal entry");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (shipmentId) {
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_type = 'import_expense'
+              AND source_id IN (SELECT id FROM import_expenses WHERE shipment_id = $1)
+          )
+        `, [shipmentId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_type = 'import_expense'
+            AND source_id IN (SELECT id FROM import_expenses WHERE shipment_id = $1)
+        `, [shipmentId]);
+        await client.query("DELETE FROM import_expenses WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipment_lines WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipments WHERE id = $1", [shipmentId]);
+      }
+      if (purchaseOrderId) {
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+});
+
+async function requestToRoute(baseUrl: string, path: string, body: unknown, expectedStatus: number) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json() as any;
+  assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+  return payload;
+}
