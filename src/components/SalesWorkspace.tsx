@@ -4,6 +4,7 @@ import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
+import { matchesCustomerPurchaseHistory } from "../lib/customer-purchase-history";
 import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
 
 type Mode = "customers" | "orders";
@@ -38,6 +39,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
+  const [purchaseHistorySearch, setPurchaseHistorySearch] = useState("");
   const [customerSearch, setCustomerSearch] = useState("");
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
@@ -285,14 +287,22 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       <label>Search customers by name or ID<input type="search" placeholder="Name or ID, such as CUS-00001" value={customerSearch} onChange={(event) => {
         const value = event.target.value;
         setCustomerSearch(value);
-        if (historyCustomer && !matchesCustomer(historyCustomer, value)) setHistoryCustomer(null);
+        if (historyCustomer && !matchesCustomer(historyCustomer, value)) {
+          setHistoryCustomer(null);
+          setPurchaseHistorySearch("");
+        }
       }} /></label>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => setHistoryCustomer(historyCustomer?.id === c.id ? null : c)}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => {
+        const closing = historyCustomer?.id === c.id;
+        setHistoryCustomer(closing ? null : c);
+        setPurchaseHistorySearch("");
+      }}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
       {historyCustomer && filteredCustomers.some((item) => item.id === historyCustomer.id) && (() => {
         const customer = customers.find((item) => item.id === historyCustomer.id) ?? historyCustomer;
         const purchases = orders
           .filter((order) => order.customerId === customer.id && Number(order.deliveredZmw) > 0)
           .sort((a, b) => b.orderDate.localeCompare(a.orderDate));
+        const matchingPurchases = purchases.filter((order) => matchesCustomerPurchaseHistory(order, purchaseHistorySearch));
         return <div className="panel data-table-wrap">
           <div className="panel-heading"><div><p className="eyebrow">Customer account</p><h2>{customer.name}</h2><p>Customer ID: <strong>{customerCode(customer.id)}</strong></p></div><div><button className="button button-secondary button-small" onClick={() => setEditingCustomer(customer)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close customer</button></div></div>
           <p><strong>Contact person:</strong> {customer.contactPerson || "—"}</p>
@@ -303,8 +313,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           <p><strong>Status:</strong> {customer.status}</p>
           {customer.notes && <p><strong>Notes:</strong> {customer.notes}</p>}
           <h3>Past purchases</h3><p className="report-footnote">Only items already delivered are counted as purchases.</p>
+          <label>Find a purchase by order, delivery note, or date<input
+            type="search"
+            placeholder="Order number, delivery note, or date"
+            value={purchaseHistorySearch}
+            onChange={(event) => setPurchaseHistorySearch(event.target.value)}
+          /></label>
           <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Delivery notes and proof</th><th>Status</th></tr></thead>
-            <tbody>{purchases.map((order) => <tr key={order.id}>
+            <tbody>{matchingPurchases.map((order) => <tr key={order.id}>
               <td>{order.orderNumber}</td><td>{new Date(order.orderDate).toLocaleDateString("en-ZM")}</td>
               <td>{order.lines.filter((line) => line.deliveredQuantity > 0).map((line) => `${line.productName} × ${line.deliveredQuantity}`).join(", ")}</td>
               <td>{zmw(order.deliveredZmw)}</td>
@@ -337,7 +353,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
               <td>{order.status.replace("_", " ")}</td>
             </tr>)}</tbody>
           </table>
-          {!purchases.length && <p className="report-footnote">This customer has no delivered purchases yet.</p>}
+          {!purchases.length
+            ? <p className="report-footnote">This customer has no delivered purchases yet.</p>
+            : !matchingPurchases.length && <p className="report-footnote">No delivered purchases match “{purchaseHistorySearch}”. Try an order number, delivery note number, or date.</p>}
         </div>;
       })()}
     </>}
