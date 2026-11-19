@@ -43,6 +43,7 @@ test("builds a Gmail-ready customer quote with its saved recipient and full pric
   const { raw, body, pdf, attachmentHeaders } = decodeRaw(buildCustomerQuoteEmail(quote));
   assert.match(raw, /^To: customer@example\.test\r\n/);
   assert.match(raw, /Subject: Customer quote CQ-2026-ABC123/);
+  assert.match(raw, /X-Trace-Tether-Quote-Number: CQ-2026-ABC123/);
   assert.match(body, /Dear Customer,/);
   assert.match(body, /Handmade bag \(BAG-1\): 2 × ZMW 625\.25 = ZMW 1,250\.50/);
   assert.match(body, /Total: ZMW 1,250\.50/);
@@ -57,6 +58,15 @@ test("builds a Gmail-ready customer quote with its saved recipient and full pric
   for (const required of ["CQ-2026-ABC123", "Handmade bag", "BAG-1", "ZMW 1,250.50", "Valid until: 2026-12-31", "Delivery address: Lusaka"]) {
     assert.ok(printableText.includes(required), `Printable PDF is missing ${required}.`);
   }
+});
+
+test("includes a safe send-attempt marker for matching Gmail bounce reports", () => {
+  const withAttempt = buildCustomerQuoteEmail({
+    ...quote,
+    emailAttemptedAt: "2026-11-19T09:30:00.123Z",
+  });
+  const { raw } = decodeRaw(withAttempt);
+  assert.match(raw, /X-Trace-Tether-Email-Attempt: 2026-11-19T09:30:00\.123Z/);
 });
 
 test("sends the encoded message using Gmail and reports provider errors", async () => {

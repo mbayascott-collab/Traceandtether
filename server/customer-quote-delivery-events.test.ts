@@ -6,6 +6,7 @@ import {
 } from "./customer-quote-delivery-events";
 
 const now = new Date("2026-11-18T12:00:00.000Z");
+const validSecret = "correct-secret-with-at-least-32-characters";
 const event = customerQuoteDeliveryEventSchema.parse({
   provider: "gmail",
   eventId: "event-1",
@@ -15,10 +16,11 @@ const event = customerQuoteDeliveryEventSchema.parse({
 });
 
 test("requires an authenticated provider event and rejects malformed payloads", () => {
-  assert.equal(hasValidDeliveryWebhookToken("Bearer correct-secret", "correct-secret"), true);
-  assert.equal(hasValidDeliveryWebhookToken("Bearer wrong-secret", "correct-secret"), false);
-  assert.equal(hasValidDeliveryWebhookToken(undefined, "correct-secret"), false);
+  assert.equal(hasValidDeliveryWebhookToken(`Bearer ${validSecret}`, validSecret), true);
+  assert.equal(hasValidDeliveryWebhookToken("Bearer wrong-secret", validSecret), false);
+  assert.equal(hasValidDeliveryWebhookToken(undefined, validSecret), false);
   assert.equal(hasValidDeliveryWebhookToken("Bearer correct-secret", undefined), false);
+  assert.equal(hasValidDeliveryWebhookToken("Bearer short-secret", "short-secret"), false);
   assert.equal(customerQuoteDeliveryEventSchema.safeParse({ ...event, status: "queued" }).success, false);
   assert.equal(customerQuoteDeliveryEventSchema.safeParse({ ...event, unexpected: true }).success, false);
 });

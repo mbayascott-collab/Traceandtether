@@ -16,7 +16,8 @@ export function hasValidDeliveryWebhookToken(
   authorizationHeader: string | undefined,
   configuredSecret: string | undefined,
 ): boolean {
-  if (!configuredSecret || !authorizationHeader?.startsWith("Bearer ")) return false;
+  if (!configuredSecret || Buffer.byteLength(configuredSecret, "utf8") < 32
+    || !authorizationHeader?.startsWith("Bearer ")) return false;
   const supplied = Buffer.from(authorizationHeader.slice("Bearer ".length), "utf8");
   const expected = Buffer.from(configuredSecret, "utf8");
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);

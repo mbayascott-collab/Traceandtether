@@ -3,6 +3,7 @@ import { ReplitConnectors } from "@replit/connectors-sdk";
 
 export type CustomerQuoteEmailContent = {
   quoteNumber: string;
+  emailAttemptedAt?: string;
   customerName: string;
   customerEmail: string;
   validUntil: string | null;
@@ -169,6 +170,7 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
 
 function buildCustomerQuoteEmailWithPdf(content: CustomerQuoteEmailContent, pdf: Buffer) {
   const safeQuoteNumber = content.quoteNumber.replace(/[\r\n]+/g, " ").slice(0, 100);
+  const safeAttemptedAt = content.emailAttemptedAt?.replace(/[\r\n]+/g, "").slice(0, 40);
   const attachmentName = safeQuoteNumber.replace(/[^A-Za-z0-9._-]+/g, "_") || "customer-quote";
   const boundary = `customer-quote-${randomUUID()}`;
   const itemLines = content.lines.map((line) =>
@@ -195,6 +197,8 @@ function buildCustomerQuoteEmailWithPdf(content: CustomerQuoteEmailContent, pdf:
   const raw = [
     `To: ${content.customerEmail}`,
     `Subject: Customer quote ${safeQuoteNumber}`,
+    `X-Trace-Tether-Quote-Number: ${safeQuoteNumber}`,
+    ...(safeAttemptedAt ? [`X-Trace-Tether-Email-Attempt: ${safeAttemptedAt}`] : []),
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     "",

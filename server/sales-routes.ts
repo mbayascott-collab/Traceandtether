@@ -273,7 +273,6 @@ export function registerSalesRoutes(
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
   });
-
   app.get("/api/shop/products", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const rows = await db.select({
@@ -878,7 +877,8 @@ export function registerSalesRoutes(
       return {
         quote: claimed,
         content: {
-          quoteNumber: quote.quoteNumber, customerName: customer.name, customerEmail: customer.email,
+          quoteNumber: quote.quoteNumber, emailAttemptedAt: attemptedAt.toISOString(),
+          customerName: customer.name, customerEmail: customer.email,
           validUntil: quote.validUntil, deliveryAddress: quote.deliveryAddress, notes: quote.notes,
           totalZmw, lines: lineContent,
         },
