@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { eq } from "drizzle-orm";
 import { customers, customerQuoteLines, customerQuotes, products } from "../shared/schema";
-import { buildCustomerQuoteEmail, sendCustomerQuoteEmail, type CustomerQuoteEmailContent } from "./customer-quote-email";
+import { buildCustomerQuoteEmail, buildCustomerQuotePdf, sendCustomerQuoteEmail, type CustomerQuoteEmailContent } from "./customer-quote-email";
 
 const quote: CustomerQuoteEmailContent = {
   quoteNumber: "CQ-2026-ABC123",
@@ -28,12 +28,19 @@ function decodeRaw(value: string) {
   const raw = Buffer.from(value, "base64url").toString("utf8");
   const separator = raw.indexOf("\r\n\r\n");
   assert.notEqual(separator, -1);
-  const encodedBody = raw.slice(separator + 4).replace(/\r\n/g, "");
-  return { raw: raw.slice(0, separator), body: Buffer.from(encodedBody, "base64").toString("utf8") };
+  const headers = raw.slice(0, separator);
+  const boundary = headers.match(/boundary="([^"]+)"/)?.[1];
+  assert.ok(boundary, "Expected a multipart email boundary.");
+  const parts = raw.slice(separator + 4).split(`--${boundary}`).slice(1, -1)
+    .map((part) => part.replace(/^\r\n/, ""));
+  const partBody = (part: string) => part.slice(part.indexOf("\r\n\r\n") + 4).replace(/\r\n/g, "");
+  const body = Buffer.from(partBody(parts[0]!), "base64").toString("utf8");
+  const pdf = Buffer.from(partBody(parts[1]!), "base64");
+  return { raw: headers, body, pdf, attachmentHeaders: parts[1]!.slice(0, parts[1]!.indexOf("\r\n\r\n")) };
 }
 
 test("builds a Gmail-ready customer quote with its saved recipient and full price details", () => {
-  const { raw, body } = decodeRaw(buildCustomerQuoteEmail(quote));
+  const { raw, body, pdf, attachmentHeaders } = decodeRaw(buildCustomerQuoteEmail(quote));
   assert.match(raw, /^To: customer@example\.test\r\n/);
   assert.match(raw, /Subject: Customer quote CQ-2026-ABC123/);
   assert.match(body, /Dear Customer,/);
@@ -42,6 +49,14 @@ test("builds a Gmail-ready customer quote with its saved recipient and full pric
   assert.match(body, /Valid until: 2026-12-31/);
   assert.match(body, /Delivery address: Lusaka/);
   assert.match(body, /Please call before delivery\./);
+  assert.match(raw, /Content-Type: multipart\/mixed/);
+  assert.match(attachmentHeaders, /Content-Type: application\/pdf; name="CQ-2026-ABC123\.pdf"/);
+  assert.match(attachmentHeaders, /Content-Disposition: attachment; filename="CQ-2026-ABC123\.pdf"/);
+  assert.deepEqual(pdf, buildCustomerQuotePdf(quote));
+  const printableText = pdf.toString("latin1");
+  for (const required of ["CQ-2026-ABC123", "Handmade bag", "BAG-1", "ZMW 1,250.50", "Valid until: 2026-12-31", "Delivery address: Lusaka"]) {
+    assert.ok(printableText.includes(required), `Printable PDF is missing ${required}.`);
+  }
 });
 
 test("sends the encoded message using Gmail and reports provider errors", async () => {
@@ -56,6 +71,9 @@ test("sends the encoded message using Gmail and reports provider errors", async 
   });
   assert.deepEqual(accepted, { ok: true, messageId: "gmail-message-1" });
   assert.equal(typeof requestBody === "object" && requestBody !== null && "raw" in requestBody, true);
+  const sentRaw = (requestBody as { raw: string }).raw;
+  const sent = decodeRaw(sentRaw);
+  assert.deepEqual(sent.pdf, buildCustomerQuotePdf(quote));
 
   const rejected = await sendCustomerQuoteEmail(quote, {
     async proxy() {
@@ -66,6 +84,23 @@ test("sends the encoded message using Gmail and reports provider errors", async 
     ok: false,
     error: "Gmail could not send the quote (HTTP 403): Insufficient Permission",
   });
+});
+
+test("does not contact Gmail when printable quote PDF generation fails", async () => {
+  let gmailCalled = false;
+  const result = await sendCustomerQuoteEmail(quote, {
+    async proxy() {
+      gmailCalled = true;
+      return new Response(JSON.stringify({ id: "should-not-send" }), { status: 200 });
+    },
+  }, () => {
+    throw new Error("PDF renderer failed");
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    error: "Could not prepare the printable quote PDF: PDF renderer failed",
+  });
+  assert.equal(gmailCalled, false);
 });
 
 test("customer quote sends prevent concurrent duplicates and require confirmation for stale attempts", {
