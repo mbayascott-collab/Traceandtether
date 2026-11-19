@@ -659,7 +659,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         .where(eq(inventoryMovements.sourceKey, sourceKey)).limit(1);
       if (existing) {
         const [existingJournal] = await tx.select({ entryDate: journalEntries.entryDate })
-          .from(journalEntries).where(eq(journalEntries.sourceKey, `${sourceKey}-revenue`)).limit(1);
+          .from(journalEntries).where(eq(journalEntries.sourceKey, `sales-return-${existing.id}-revenue`)).limit(1);
         const sameRequest = existing.salesDeliveryLineId === deliveryLine.id
           && existing.locationId === input.locationId
           && existing.quantityDelta === input.quantity

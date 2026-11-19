@@ -247,6 +247,70 @@ test("database flow adjusts late import costs across partial receipts and sales"
     ]);
     assert.equal(adjustmentEntry.sourceId, purchaseOrderId);
 
+    const { expense: subsequentExpense } = await request("/api/import-expenses", {
+      purchaseOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Later freight ${suffix}`,
+      amount: "25.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+
+    await patch(`/api/shipments/${shipmentId}/receive`, {
+      lines: [{ shipmentLineId, quantityReceived: 7 }],
+    }, 200);
+    await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId }, 201);
+    const [laterPartialReceipt] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-7`));
+    await db.update(inventoryMovements).set({ sourceKey: `receipt-key-reformatted-again-${suffix}` })
+      .where(eq(inventoryMovements.id, laterPartialReceipt.id));
+
+    const { orders: [afterLaterPartialReceipt] } = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    const incrementalPreview = afterLaterPartialReceipt.adjustmentPreview;
+    assert.equal(incrementalPreview.clearingBalanceZmw, "625.00");
+    assert.equal(incrementalPreview.adjustmentAvailableZmw, "100.00");
+    assert.equal(incrementalPreview.unpostedClearingZmw, "525.00");
+    assert.equal(incrementalPreview.canPost, true);
+    assert.deepEqual(incrementalPreview.lines.map((line: any) => [
+      line.stockedQuantity, line.onHand, line.adjustmentZmw, line.inventoryZmw, line.cogsZmw,
+    ]), [[7, 5, "100.00", "71.43", "28.57"]]);
+
+    const incrementalAdjustmentRequest = {
+      reviewedAmountZmw: incrementalPreview.adjustmentAvailableZmw,
+      reviewedLines: incrementalPreview.lines.map((line: any) => ({
+        lineId: line.lineId,
+        adjustmentZmw: line.adjustmentZmw,
+        inventoryZmw: line.inventoryZmw,
+        cogsZmw: line.cogsZmw,
+      })),
+      note: "Reviewed the additional freight bill",
+    };
+    const { journalEntry: incrementalAdjustment } = await request(
+      `/api/landed-costs/${purchaseOrderId}/adjust`, incrementalAdjustmentRequest, 201,
+    );
+    assert.equal(incrementalAdjustment.sourceId, purchaseOrderId);
+    const incrementalAdjustmentLines = await db.select({
+      systemKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, incrementalAdjustment.id));
+    assert.deepEqual(incrementalAdjustmentLines.map((line) => [
+      line.systemKey, line.debitZmw, line.creditZmw,
+    ]), [
+      ["inventory", "71.43", "0.00"],
+      ["cost_of_goods_sold", "28.57", "0.00"],
+      ["landed_cost_clearing", "0.00", "100.00"],
+    ]);
+
     await patch(`/api/shipments/${shipmentId}/receive`, {
       lines: [{ shipmentLineId, quantityReceived: 10 }],
     }, 200);
@@ -265,7 +329,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
     const [expenseEntries, receiptMovements, adjustmentEntries, deliveryEntries] = await Promise.all([
       db.select().from(journalEntries).where(and(
         eq(journalEntries.sourceType, "import_expense"),
-        inArray(journalEntries.sourceId, [earlyExpense.id, lateExpense.id]),
+      inArray(journalEntries.sourceId, [earlyExpense.id, lateExpense.id, subsequentExpense.id]),
       )),
       db.select().from(inventoryMovements).where(and(
         eq(inventoryMovements.productId, productId!),
@@ -280,9 +344,9 @@ test("database flow adjusts late import costs across partial receipts and sales"
         eq(journalEntries.sourceId, deliveryId!),
       )),
     ]);
-    assert.equal(expenseEntries.length, 2);
-    assert.equal(receiptMovements.length, 2);
-    assert.equal(adjustmentEntries.length, 1);
+    assert.equal(expenseEntries.length, 3);
+    assert.equal(receiptMovements.length, 3);
+    assert.equal(adjustmentEntries.length, 2);
     assert.equal(deliveryEntries.length, 2);
 
     const [salesCogsEntry] = deliveryEntries.filter((entry) => entry.sourceType === "sales_delivery_cogs");
@@ -306,7 +370,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
       inArray(journalEntries.sourceId, receiptMovements.map((movement) => movement.id)),
     ));
     const allTestEntries = [...expenseEntries, ...receiptEntries, ...adjustmentEntries, ...deliveryEntries];
-    assert.equal(receiptEntries.length, 2);
+    assert.equal(receiptEntries.length, 3);
     for (const entry of allTestEntries) {
       const lines = await db.select({
         accountKey: accountingAccounts.systemKey,
@@ -329,13 +393,17 @@ test("database flow adjusts late import costs across partial receipts and sales"
         .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
         .where(eq(shipmentLines.shipmentId, shipmentId!)),
     ]);
-    assert.equal(linkedExpenses.length, 2);
-    assert.deepEqual(linkedExpenses.map((expense) => expense.id).sort(), [earlyExpense.id, lateExpense.id].sort());
+    assert.equal(linkedExpenses.length, 3);
+    assert.deepEqual(linkedExpenses.map((expense) => expense.id).sort(), [
+      earlyExpense.id, lateExpense.id, subsequentExpense.id,
+    ].sort());
     assert.equal(linkedReceiptLines.length, 1);
-    assert.deepEqual(receiptMovements.map((movement) => movement.quantityDelta).sort(), [4, 6]);
+    assert.deepEqual(receiptMovements.map((movement) => movement.quantityDelta).sort(), [3, 3, 4]);
     assert.ok(linkedReceiptLines.every((line) => line.orderId === purchaseOrderId));
     assert.ok(receiptEntries.every((entry) => receiptMovements.some((movement) => movement.id === entry.sourceId)));
-    assert.deepEqual(receiptEntries.map((entry) => entry.shipmentLineId).sort(), [null, shipmentLineId].sort());
+    assert.deepEqual(receiptEntries.map((entry) => entry.shipmentLineId).sort(), [
+      null, shipmentLineId, shipmentLineId,
+    ].sort());
 
     const [deliveryLine] = await db.select().from(salesDeliveryLines)
       .where(eq(salesDeliveryLines.deliveryId, deliveryId!));
