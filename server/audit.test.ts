@@ -58,3 +58,29 @@ test("public shop audit records support an action without a signed-in account", 
   assert.equal(inserted?.actorEmail, "Public shop");
   assert.deepEqual(inserted?.changedFields, []);
 });
+
+test("approval audit records preserve the acting owner and approval details", async () => {
+  let inserted: Record<string, unknown> | undefined;
+  await recordBusinessAudit({
+    insert() {
+      return {
+        values(values: Record<string, unknown>) {
+          inserted = values;
+          return Promise.resolve();
+        },
+      };
+    },
+  }, {
+    entityType: "customer_quote",
+    entityId: 17,
+    recordLabel: "CQ-2026-017",
+    actor: { clerkUserId: "owner_123", email: "owner@example.com" },
+    action: "approved",
+    changedFields: ["Expired quote prices", "Quote expiry date: 2026-11-17"],
+  });
+
+  assert.equal(inserted?.action, "approved");
+  assert.equal(inserted?.actorClerkUserId, "owner_123");
+  assert.equal(inserted?.actorEmail, "owner@example.com");
+  assert.deepEqual(inserted?.changedFields, ["Expired quote prices", "Quote expiry date: 2026-11-17"]);
+});

@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   customerInputSchema, customerQuoteInputSchema, publicShopOrderInputSchema, salesDeliveryInputSchema, salesOrderConfirmationInputSchema, salesOrderInputSchema,
 } from "./product-validation";
-import { requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
+import { isCustomerQuoteExpired, requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
   accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, publicShopOrderAttemptDailyCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
@@ -936,7 +936,9 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!quote) return { error: "Customer quote not found.", status: 404 };
       if (quote.status !== "accepted" || quote.salesOrderId) return { error: "Mark this quote as accepted before converting it.", status: 409 };
-      if (requiresCustomerQuoteExpiryConfirmation(quote.validUntil, req.body?.confirmExpired)) {
+      const approvalTime = new Date();
+      const expired = isCustomerQuoteExpired(quote.validUntil, approvalTime);
+      if (requiresCustomerQuoteExpiryConfirmation(quote.validUntil, req.body?.confirmExpired, approvalTime)) {
         return { error: `This quote expired on ${quote.validUntil}. Review the expiry and confirm before converting it.`, status: 409 };
       }
       const quoteLines = await tx.select().from(customerQuoteLines).where(eq(customerQuoteLines.customerQuoteId, id)).orderBy(asc(customerQuoteLines.productId));
@@ -962,6 +964,13 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         entityType: "customer_quote", entityId: savedQuote.id, recordLabel: savedQuote.quoteNumber,
         actor: res.locals.actor, action: "updated", changedFields: ["status", "salesOrderId"],
       });
+      if (expired) {
+        await recordBusinessAudit(tx, {
+          entityType: "customer_quote", entityId: savedQuote.id, recordLabel: savedQuote.quoteNumber,
+          actor: res.locals.actor, action: "approved",
+          changedFields: ["Expired quote prices", `Quote expiry date: ${quote.validUntil}`],
+        });
+      }
       return { quote: savedQuote, order };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
