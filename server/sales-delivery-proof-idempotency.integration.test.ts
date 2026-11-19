@@ -5,11 +5,15 @@ import express, { type RequestHandler } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
+  salesDeliveryReceiptProofFileUrl,
+  salesDeliveryReceiptProofUrl,
+} from "../src/lib/api";
+import {
   businessAuditLogs, customers, products, salesDeliveries, salesDeliveryLines, salesDeliveryReceiptProofs,
   salesDeliveryReceipts, salesOrderLines, salesOrders,
 } from "../shared/schema";
 
-test("delivery proof uploads remain attached to their note without changing receipt details", {
+test("customer purchase history keeps delivery notes, receipt details, and protected proof links connected", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const [{ db }, { registerSalesRoutes }] = await Promise.all([
@@ -69,11 +73,11 @@ test("delivery proof uploads remain attached to their note without changing rece
     const [orderLine] = await db.insert(salesOrderLines).values({
       salesOrderId: order.id,
       productId: product.id,
-      quantity: 2,
+      quantity: 4,
       unitPriceZmw: "1.00",
     }).returning();
     orderLineId = orderLine.id;
-    const [delivery, otherDelivery] = await db.insert(salesDeliveries).values([
+    const [delivery, otherDelivery, legacyDelivery, noProofDelivery] = await db.insert(salesDeliveries).values([
       {
         deliveryNumber: `DN-PR-${suffix.slice(0, 20)}`,
         salesOrderId: order.id,
@@ -84,15 +88,30 @@ test("delivery proof uploads remain attached to their note without changing rece
         salesOrderId: order.id,
         deliveryDate: "2026-11-19",
       },
+      {
+        deliveryNumber: `DN-LEG-${suffix.slice(0, 18)}`,
+        salesOrderId: order.id,
+        deliveryDate: "2026-11-18",
+      },
+      {
+        deliveryNumber: `DN-NP-${suffix.slice(0, 20)}`,
+        salesOrderId: order.id,
+        deliveryDate: "2026-11-17",
+      },
     ]).returning();
-    deliveryIds.push(delivery.id, otherDelivery.id);
+    deliveryIds.push(delivery.id, otherDelivery.id, legacyDelivery.id, noProofDelivery.id);
     await db.insert(salesDeliveryLines).values([
       { deliveryId: delivery.id, salesOrderLineId: orderLine.id, quantity: 1 },
       { deliveryId: otherDelivery.id, salesOrderLineId: orderLine.id, quantity: 1 },
+      { deliveryId: legacyDelivery.id, salesOrderLineId: orderLine.id, quantity: 1 },
+      { deliveryId: noProofDelivery.id, salesOrderLineId: orderLine.id, quantity: 1 },
     ]);
     const expectedFirstReceivedAt = new Date("2026-11-19T10:00:00.000Z");
     const expectedOtherReceivedAt = new Date("2026-11-19T11:00:00.000Z");
-    const [receipt, otherReceipt] = await db.insert(salesDeliveryReceipts).values([
+    const expectedLegacyReceivedAt = new Date("2026-11-18T09:30:00.000Z");
+    const expectedNoProofReceivedAt = new Date("2026-11-17T09:00:00.000Z");
+    const legacyFile = Buffer.from("%PDF-1.7 legacy signed delivery note");
+    const [receipt, otherReceipt, legacyReceipt, noProofReceipt] = await db.insert(salesDeliveryReceipts).values([
       {
         deliveryId: delivery.id,
         receivedBy: "Test recipient",
@@ -103,8 +122,21 @@ test("delivery proof uploads remain attached to their note without changing rece
         receivedBy: "Other test recipient",
         receivedAt: expectedOtherReceivedAt,
       },
+      {
+        deliveryId: legacyDelivery.id,
+        receivedBy: "Legacy recipient",
+        receivedAt: expectedLegacyReceivedAt,
+        proofFileName: "legacy-signed-note.pdf",
+        proofMimeType: "application/pdf",
+        proofData: legacyFile,
+      },
+      {
+        deliveryId: noProofDelivery.id,
+        receivedBy: "Recipient without proof",
+        receivedAt: expectedNoProofReceivedAt,
+      },
     ]).returning();
-    receiptIds.push(receipt.id, otherReceipt.id);
+    receiptIds.push(receipt.id, otherReceipt.id, legacyReceipt.id, noProofReceipt.id);
 
     const firstKey = randomUUID();
     const firstFile = Buffer.from("%PDF-1.7 first signed receipt");
@@ -125,6 +157,29 @@ test("delivery proof uploads remain attached to their note without changing rece
     );
     assert.equal(separate.response.status, 201, JSON.stringify(separate.payload));
     assert.notEqual(separate.payload.proof.id, original.payload.proof.id);
+    const additionalFormats = [
+      {
+        fileName: "signed-receipt.jpg",
+        mimeType: "image/jpeg",
+        data: Buffer.from([0xff, 0xd8, 0xff, 0x01]),
+      },
+      {
+        fileName: "signed-receipt.png",
+        mimeType: "image/png",
+        data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]),
+      },
+      {
+        fileName: "signed-receipt.webp",
+        mimeType: "image/webp",
+        data: Buffer.from("RIFF\x04\x00\x00\x00WEBP"),
+      },
+    ];
+    const additionalUploads = [];
+    for (const proof of additionalFormats) {
+      const saved = await upload(delivery.id, proof.fileName, randomUUID(), proof.data);
+      assert.equal(saved.response.status, 201, JSON.stringify(saved.payload));
+      additionalUploads.push({ ...proof, proof: saved.payload.proof });
+    }
 
     const otherFile = Buffer.from("%PDF-1.7 proof for another delivery");
     const otherUploadResponse = await fetch(
@@ -143,20 +198,35 @@ test("delivery proof uploads remain attached to their note without changing rece
     const reloadPayload = await reloadResponse.json() as { orders: any[] };
     const reloadedOrder = reloadPayload.orders.find((item) => item.id === order.id);
     assert.ok(reloadedOrder, "the order should remain available after uploads");
+    assert.equal(reloadedOrder.customerId, customer.id, "purchase history should retain its owning customer");
+    assert.equal(reloadedOrder.customerName, customer.name);
     const reloadedDeliveries = new Map(reloadedOrder.deliveries.map((item: any) => [item.id, item]));
     const reloadedDelivery = reloadedDeliveries.get(delivery.id) as any;
     const reloadedOtherDelivery = reloadedDeliveries.get(otherDelivery.id) as any;
+    const reloadedLegacyDelivery = reloadedDeliveries.get(legacyDelivery.id) as any;
+    const reloadedNoProofDelivery = reloadedDeliveries.get(noProofDelivery.id) as any;
     assert.ok(reloadedDelivery, "the first delivery note should be returned after reload");
     assert.ok(reloadedOtherDelivery, "the other delivery note should be returned after reload");
+    assert.ok(reloadedLegacyDelivery, "the legacy-proof delivery note should appear in purchase history");
+    assert.ok(reloadedNoProofDelivery, "the delivery note without proof should appear in purchase history");
+    assert.equal(reloadedDelivery.deliveryNumber, delivery.deliveryNumber);
+    assert.equal(reloadedOtherDelivery.deliveryNumber, otherDelivery.deliveryNumber);
+    assert.equal(reloadedLegacyDelivery.deliveryNumber, legacyDelivery.deliveryNumber);
+    assert.equal(reloadedLegacyDelivery.deliveryDate, "2026-11-18");
     assert.deepEqual(
-      reloadedDelivery.receipt.proofs.map((proof: any) => ({ id: proof.id, fileName: proof.fileName })).sort(
+      reloadedDelivery.receipt.proofs.map((proof: any) => ({
+        id: proof.id, fileName: proof.fileName, mimeType: proof.mimeType,
+      })).sort(
         (left: any, right: any) => left.fileName.localeCompare(right.fileName),
       ),
       [
-        { id: original.payload.proof.id, fileName: "signed-receipt.pdf" },
-        { id: separate.payload.proof.id, fileName: "additional-receipt.pdf" },
+        { id: original.payload.proof.id, fileName: "signed-receipt.pdf", mimeType: "application/pdf" },
+        { id: separate.payload.proof.id, fileName: "additional-receipt.pdf", mimeType: "application/pdf" },
+        ...additionalUploads.map(({ proof }) => ({
+          id: proof.id, fileName: proof.fileName, mimeType: proof.mimeType,
+        })),
       ].sort((left, right) => left.fileName.localeCompare(right.fileName)),
-      "both files for the first note should remain listed after reload",
+      "all supported proof formats for the first note should remain listed after reload",
     );
     assert.deepEqual(
       reloadedOtherDelivery.receipt.proofs.map((proof: any) => ({ id: proof.id, fileName: proof.fileName })),
@@ -167,27 +237,64 @@ test("delivery proof uploads remain attached to their note without changing rece
     assert.equal(new Date(reloadedDelivery.receipt.receivedAt).toISOString(), expectedFirstReceivedAt.toISOString());
     assert.equal(reloadedOtherDelivery.receipt.receivedBy, "Other test recipient");
     assert.equal(new Date(reloadedOtherDelivery.receipt.receivedAt).toISOString(), expectedOtherReceivedAt.toISOString());
+    assert.equal(reloadedLegacyDelivery.receipt.receivedBy, "Legacy recipient");
+    assert.equal(new Date(reloadedLegacyDelivery.receipt.receivedAt).toISOString(), expectedLegacyReceivedAt.toISOString());
+    assert.equal(reloadedLegacyDelivery.receipt.proofFileName, "legacy-signed-note.pdf");
+    assert.equal(reloadedLegacyDelivery.receipt.proofMimeType, "application/pdf");
+    assert.deepEqual(reloadedLegacyDelivery.receipt.proofs, [
+      { id: null, fileName: "legacy-signed-note.pdf", mimeType: "application/pdf" },
+    ]);
+    assert.equal(reloadedNoProofDelivery.receipt.receivedBy, "Recipient without proof");
+    assert.equal(new Date(reloadedNoProofDelivery.receipt.receivedAt).toISOString(), expectedNoProofReceivedAt.toISOString());
 
-    const download = async (deliveryId: number, proofId: number) => fetch(
-      `${baseUrl}/api/sales-deliveries/${deliveryId}/receipt-proofs/${proofId}`,
-    );
+    const download = async (url: string) => fetch(new URL(url, baseUrl));
     for (const [ownDeliveryId, proof] of [
-      [delivery.id, { id: original.payload.proof.id, data: firstFile }],
-      [delivery.id, { id: separate.payload.proof.id, data: Buffer.from("%PDF-1.7 additional signed receipt") }],
-      [otherDelivery.id, { id: otherUpload.proof.id, data: otherFile }],
+      [delivery.id, { id: original.payload.proof.id, mimeType: "application/pdf", data: firstFile }],
+      [delivery.id, {
+        id: separate.payload.proof.id, mimeType: "application/pdf",
+        data: Buffer.from("%PDF-1.7 additional signed receipt"),
+      }],
+      ...additionalUploads.map(({ proof, data }) => [
+        delivery.id, { id: proof.id, mimeType: proof.mimeType, data },
+      ] as const),
+      [otherDelivery.id, { id: otherUpload.proof.id, mimeType: "application/pdf", data: otherFile }],
     ] as const) {
-      const response = await download(ownDeliveryId, proof.id);
+      const url = salesDeliveryReceiptProofFileUrl(ownDeliveryId, proof.id);
+      assert.equal(url, `/api/sales-deliveries/${ownDeliveryId}/receipt-proofs/${proof.id}`);
+      const response = await download(url);
       assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), proof.mimeType);
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), proof.data);
     }
+    const legacyUrl = salesDeliveryReceiptProofUrl(legacyDelivery.id);
+    assert.equal(legacyUrl, `/api/sales-deliveries/${legacyDelivery.id}/receipt-proof`);
+    const legacyDownload = await download(legacyUrl);
+    assert.equal(legacyDownload.status, 200);
+    assert.equal(legacyDownload.headers.get("content-type"), "application/pdf");
+    assert.match(legacyDownload.headers.get("content-disposition") ?? "", /legacy-signed-note\.pdf/);
+    assert.deepEqual(Buffer.from(await legacyDownload.arrayBuffer()), legacyFile);
+
     for (const proofId of [original.payload.proof.id, separate.payload.proof.id]) {
-      assert.equal((await download(otherDelivery.id, proofId)).status, 404);
+      const mismatched = await download(salesDeliveryReceiptProofFileUrl(otherDelivery.id, proofId));
+      assert.equal(mismatched.status, 404);
+      assert.match((await mismatched.json() as any).error, /not found for this delivery note/i);
     }
-    assert.equal((await download(delivery.id, otherUpload.proof.id)).status, 404);
+    const reverseMismatch = await download(salesDeliveryReceiptProofFileUrl(delivery.id, otherUpload.proof.id));
+    assert.equal(reverseMismatch.status, 404);
+    assert.match((await reverseMismatch.json() as any).error, /not found for this delivery note/i);
+    const missingProof = await download(salesDeliveryReceiptProofFileUrl(delivery.id, original.payload.proof.id + 100000000));
+    assert.equal(missingProof.status, 404);
+    assert.match((await missingProof.json() as any).error, /not found for this delivery note/i);
+    const absentLegacyProof = await download(salesDeliveryReceiptProofUrl(noProofDelivery.id));
+    assert.equal(absentLegacyProof.status, 404);
+    assert.match((await absentLegacyProof.json() as any).error, /no signed proof is saved/i);
+    const legacyProofOnWrongDelivery = await download(salesDeliveryReceiptProofUrl(otherDelivery.id));
+    assert.equal(legacyProofOnWrongDelivery.status, 404);
+    assert.match((await legacyProofOnWrongDelivery.json() as any).error, /no signed proof is saved/i);
 
     const savedProofs = await db.select().from(salesDeliveryReceiptProofs)
       .where(eq(salesDeliveryReceiptProofs.deliveryId, delivery.id));
-    assert.equal(savedProofs.length, 2);
+    assert.equal(savedProofs.length, 5);
     const otherSavedProofs = await db.select().from(salesDeliveryReceiptProofs)
       .where(eq(salesDeliveryReceiptProofs.deliveryId, otherDelivery.id));
     assert.equal(otherSavedProofs.length, 1);
@@ -196,7 +303,7 @@ test("delivery proof uploads remain attached to their note without changing rece
         eq(businessAuditLogs.entityType, "sales_delivery_receipt"),
         eq(businessAuditLogs.entityId, receiptId),
       ));
-      assert.equal(auditEntries.length, receiptId === receipt.id ? 2 : 1);
+      assert.equal(auditEntries.length, receiptId === receipt.id ? 5 : receiptId === otherReceipt.id ? 1 : 0);
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
