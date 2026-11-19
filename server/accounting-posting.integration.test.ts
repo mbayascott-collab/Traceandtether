@@ -10,7 +10,7 @@ import {
   journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, salesOrders, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
-import { journalLinesAreBalanced } from "./accounting-posting";
+import { cents, journalLinesAreBalanced } from "./accounting-posting";
 
 let closeIntegrationPool: (() => Promise<void>) | undefined;
 after(async () => closeIntegrationPool?.());
@@ -714,6 +714,207 @@ test("database flow adjusts late import costs across partial receipts and sales"
       throw error;
     } finally {
       client.release();
+    }
+  }
+});
+
+test("repeated opening-stock corrections stay linked to the latest count", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db, pool }, { registerInventoryRoutes }] = await Promise.all([
+    import("./db"),
+    import("./inventory-routes"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const suffix = randomUUID();
+  const actorEmail = `opening-stock-corrections-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerInventoryRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let productId: number | undefined;
+  let locationId: number | undefined;
+  try {
+    const [product] = await db.insert(products).values({
+      sku: `OPENING-CHAIN-${suffix}`,
+      name: `Repeated opening count ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const [location] = await db.insert(inventoryLocations).values({
+      name: `Opening correction location ${suffix}`,
+    }).returning();
+    locationId = location.id;
+
+    const openingResponse = await fetch(`${baseUrl}/api/inventory/opening-stock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        productId, locationId, quantity: 10, unitCostZmw: "25.00",
+        effectiveAt: "2026-11-19", memo: "Initial physical count", reference: null,
+      }),
+    });
+    const openingPayload = await openingResponse.json() as any;
+    assert.equal(openingResponse.status, 201, JSON.stringify(openingPayload));
+    const original = openingPayload.movement;
+
+    const firstResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${original.id}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quantity: 8, unitCostZmw: "30.00", effectiveAt: "2026-11-19",
+        reason: "First recount", reference: "COUNT-2",
+      }),
+    });
+    const firstPayload = await firstResponse.json() as any;
+    assert.equal(firstResponse.status, 201, JSON.stringify(firstPayload));
+    const firstReversal = firstPayload.reversal;
+    const firstReplacement = firstPayload.movement;
+
+    const staleTargetResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${original.id}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quantity: 6, unitCostZmw: "35.00", effectiveAt: "2026-11-19",
+        reason: "Second recount", reference: "COUNT-3",
+      }),
+    });
+    const staleTargetPayload = await staleTargetResponse.json() as any;
+    assert.equal(staleTargetResponse.status, 409, JSON.stringify(staleTargetPayload));
+    assert.match(staleTargetPayload.error, /latest replacement/i);
+
+    const secondResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${firstReplacement.id}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quantity: 6, unitCostZmw: "35.00", effectiveAt: "2026-11-19",
+        reason: "Second recount", reference: "COUNT-3",
+      }),
+    });
+    const secondPayload = await secondResponse.json() as any;
+    assert.equal(secondResponse.status, 201, JSON.stringify(secondPayload));
+    const secondReversal = secondPayload.reversal;
+    const finalReplacement = secondPayload.movement;
+
+    const expectedMovements = [
+      { id: original.id, kind: "opening_stock", quantityDelta: 10, correctionOfMovementId: null },
+      { id: firstReversal.id, kind: "opening_stock_reversal", quantityDelta: -10, correctionOfMovementId: original.id },
+      { id: firstReplacement.id, kind: "opening_stock", quantityDelta: 8, correctionOfMovementId: firstReversal.id },
+      { id: secondReversal.id, kind: "opening_stock_reversal", quantityDelta: -8, correctionOfMovementId: firstReplacement.id },
+      { id: finalReplacement.id, kind: "opening_stock", quantityDelta: 6, correctionOfMovementId: secondReversal.id },
+    ];
+    const movementRows = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.productId, productId));
+    assert.deepEqual(
+      movementRows.map(({ id, kind, quantityDelta, correctionOfMovementId }) => ({
+        id, kind, quantityDelta, correctionOfMovementId,
+      })).sort((a, b) => a.id - b.id),
+      expectedMovements.sort((a, b) => a.id - b.id),
+    );
+    assert.equal(movementRows.reduce((total, movement) => total + movement.quantityDelta, 0), 6);
+
+    const historyResponse = await fetch(`${baseUrl}/api/inventory/movements`);
+    const historyPayload = await historyResponse.json() as { movements: any[] };
+    assert.equal(historyResponse.status, 200, JSON.stringify(historyPayload));
+    const visibleChain = historyPayload.movements.filter((movement) => expectedMovements
+      .some((expected) => expected.id === movement.id));
+    assert.equal(visibleChain.length, 5);
+    assert.ok(expectedMovements.every((expected) => visibleChain.some((movement) =>
+      movement.id === expected.id && movement.correctionOfMovementId === expected.correctionOfMovementId)));
+
+    const movementIds = expectedMovements.map((movement) => movement.id);
+    const entries = await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["opening_stock", "opening_stock_reversal"]),
+      inArray(journalEntries.sourceId, movementIds),
+    ));
+    assert.equal(entries.length, 5);
+    assert.deepEqual(
+      entries.map((entry) => [entry.sourceType, entry.sourceId]).sort((a, b) => Number(a[1]) - Number(b[1])),
+      expectedMovements.map((movement) => [
+        movement.kind === "opening_stock_reversal" ? "opening_stock_reversal" : "opening_stock",
+        movement.id,
+      ]).sort((a, b) => Number(a[1]) - Number(b[1])),
+    );
+
+    const journalRows = await db.select({
+      journalEntryId: journalLines.journalEntryId,
+      accountKey: accountingAccounts.systemKey,
+      productId: journalLines.productId,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(inArray(journalLines.journalEntryId, entries.map((entry) => entry.id)));
+    for (const entry of entries) {
+      const lines = journalRows.filter((line) => line.journalEntryId === entry.id);
+      assert.equal(journalLinesAreBalanced(lines.map((line) => ({
+        accountKey: line.accountKey ?? "",
+        debitZmw: line.debitZmw,
+        creditZmw: line.creditZmw,
+      }))), true, `Journal ${entry.id} is unbalanced`);
+    }
+    const inventoryValueCents = journalRows
+      .filter((line) => line.accountKey === "inventory" && line.productId === productId)
+      .reduce((total, line) => total + cents(line.debitZmw) - cents(line.creditZmw), 0n);
+    assert.equal(inventoryValueCents, 21000n);
+
+    const inventoryResponse = await fetch(`${baseUrl}/api/inventory`);
+    const inventoryPayload = await inventoryResponse.json() as { inventory: any[] };
+    assert.equal(inventoryResponse.status, 200, JSON.stringify(inventoryPayload));
+    const finalInventory = inventoryPayload.inventory.find((item) => item.id === productId);
+    assert.ok(finalInventory);
+    assert.equal(finalInventory.onHand, 6);
+    assert.equal(finalInventory.stockValueZmw, "210.00");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (productId) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_id IN (
+              SELECT id FROM inventory_movements WHERE product_id = $1
+            )
+              AND source_type IN ('opening_stock', 'opening_stock_reversal')
+          )
+        `, [productId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_id IN (
+            SELECT id FROM inventory_movements WHERE product_id = $1
+          )
+            AND source_type IN ('opening_stock', 'opening_stock_reversal')
+        `, [productId]);
+        await client.query(
+          "UPDATE inventory_movements SET correction_of_movement_id = NULL WHERE product_id = $1",
+          [productId],
+        );
+        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        await client.query("DELETE FROM products WHERE id = $1", [productId]);
+        if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     }
   }
 });
