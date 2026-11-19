@@ -19,6 +19,7 @@ const campaignEmpty = { name: "", objective: "", channel: "", status: "draft", s
 const contentEmpty = { campaignId: "", title: "", platform: "", contentType: "Post", status: "planned", scheduledAt: "", caption: "", publishedUrl: "", notes: "" };
 const expenseEmpty = { campaignId: "", category: "Advertising", description: "", amount: "", currency: "ZMW", exchangeRateToZmw: "1", expenseDate: new Date().toISOString().slice(0, 10), paid: false, reference: "", notes: "" };
 const customerGroupEmpty = { name: "", minimumFulfilledOrders: "", maximumFulfilledOrders: "", noOrderInLastDays: "", minimumLifetimeSalesZmw: "" };
+type CustomerGroupForm = typeof customerGroupEmpty;
 
 async function request(path: string, method = "GET", body?: unknown) {
   const response = await fetch(path, {
@@ -50,6 +51,62 @@ function campaignSpendZmw(campaignId: number, rows: Expense[]) {
 }
 function displayError(reason: unknown) {
   return reason instanceof Error ? reason.message : "The request could not be completed.";
+}
+
+type CustomerGroupsPanelProps = {
+  canManage: boolean;
+  canViewMembers: boolean;
+  groups: CustomerGroup[];
+  form: CustomerGroupForm;
+  editingGroupId: number | null;
+  selectedGroupId: number | null;
+  members: CustomerGroupMember[];
+  membersLoading: boolean;
+  onFormChange: (field: keyof CustomerGroupForm, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancelEdit: () => void;
+  onShowMembers: (groupId: number) => void;
+  onEditGroup: (group: CustomerGroup) => void;
+  onDeleteGroup: (group: CustomerGroup) => void;
+};
+
+export function CustomerGroupsPanel({
+  canManage, canViewMembers, groups, form, editingGroupId, selectedGroupId, members, membersLoading,
+  onFormChange, onSubmit, onCancelEdit, onShowMembers, onEditGroup, onDeleteGroup,
+}: CustomerGroupsPanelProps) {
+  return (
+    <section className="panel marketing-section">
+      <div className="panel-heading"><div><h2>Customer groups</h2><span>Save owner-only groups using fulfilled orders, sales, and order recency.</span></div></div>
+      {canManage && <form className="marketing-form" onSubmit={onSubmit}>
+        <label>Group name<input required maxLength={120} value={form.name} onChange={(event) => onFormChange("name", event.target.value)} /></label>
+        <label>Minimum fulfilled orders<input type="number" min="1" step="1" value={form.minimumFulfilledOrders} onChange={(event) => onFormChange("minimumFulfilledOrders", event.target.value)} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+        <label>Maximum fulfilled orders<input type="number" min="0" step="1" value={form.maximumFulfilledOrders} onChange={(event) => onFormChange("maximumFulfilledOrders", event.target.value)} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+        <label>No order in the last (days)<input type="number" min="1" max="3650" step="1" value={form.noOrderInLastDays} onChange={(event) => onFormChange("noOrderInLastDays", event.target.value)} /><span className="field-hint">Includes customers who have never had a fulfilled order.</span></label>
+        <label>Minimum lifetime sales (ZMW)<input type="number" min="0" step="0.01" value={form.minimumLifetimeSalesZmw} onChange={(event) => onFormChange("minimumLifetimeSalesZmw", event.target.value)} /><span className="field-hint">Leave empty to skip this rule.</span></label>
+        <button className="button button-primary button-small"><Plus /> {editingGroupId ? "Save customer group" : "Add customer group"}</button>
+        {editingGroupId && <button type="button" className="button button-quiet button-small" onClick={onCancelEdit}><X /> Cancel edit</button>}
+      </form>}
+      <div className="marketing-list">
+        {groups.map((group) => <article className="marketing-row" key={group.id}>
+          <div><strong>{group.name}</strong><span>{group.memberCount} customer{group.memberCount === 1 ? "" : "s"} match the saved rules</span></div>
+          {canViewMembers && <button className="button button-secondary button-small" onClick={() => onShowMembers(group.id)}>View members</button>}
+          {canManage && <a className="button button-secondary button-small" href={`/api/marketing/customer-groups/${group.id}/export.csv`}><Download /> Download CSV</a>}
+          {canManage && <button className="icon-button" aria-label={`Edit ${group.name}`} onClick={() => onEditGroup(group)}><Pencil /></button>}
+          {canManage && <button className="icon-button" aria-label={`Remove ${group.name}`} onClick={() => onDeleteGroup(group)}><X /></button>}
+        </article>)}
+        {groups.length === 0 && <p className="muted-empty">No saved customer groups yet.</p>}
+      </div>
+      {canViewMembers && selectedGroupId !== null && <div className="marketing-segment-list">
+        <h3>{groups.find((group) => group.id === selectedGroupId)?.name ?? "Customer group"} members</h3>
+        {membersLoading ? <p>Loading customer group members…</p> : (
+          <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th><th>Last order</th></tr></thead><tbody>
+            {members.map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.lifetimeSalesZmw)}</td><td>{customer.lastOrderDate ?? "Never"}</td></tr>)}
+            {!membersLoading && members.length === 0 && <tr><td colSpan={5}>No customers match these rules.</td></tr>}
+          </tbody></table></div>
+        )}
+      </div>}
+    </section>
+  );
 }
 
 export default function MarketingWorkspace() {
@@ -303,37 +360,22 @@ export default function MarketingWorkspace() {
           </section>
         </div>
       )}
-      <section className="panel marketing-section">
-        <div className="panel-heading"><div><h2>Customer groups</h2><span>Save owner-only groups using fulfilled orders, sales, and order recency.</span></div></div>
-        {canManageCustomerGroups && <form className="marketing-form" onSubmit={submitCustomerGroup}>
-          <label>Group name<input required maxLength={120} value={customerGroupForm.name} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, name: e.target.value })} /></label>
-          <label>Minimum fulfilled orders<input type="number" min="1" step="1" value={customerGroupForm.minimumFulfilledOrders} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, minimumFulfilledOrders: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
-          <label>Maximum fulfilled orders<input type="number" min="0" step="1" value={customerGroupForm.maximumFulfilledOrders} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, maximumFulfilledOrders: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
-          <label>No order in the last (days)<input type="number" min="1" max="3650" step="1" value={customerGroupForm.noOrderInLastDays} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, noOrderInLastDays: e.target.value })} /><span className="field-hint">Includes customers who have never had a fulfilled order.</span></label>
-          <label>Minimum lifetime sales (ZMW)<input type="number" min="0" step="0.01" value={customerGroupForm.minimumLifetimeSalesZmw} onChange={(e) => setCustomerGroupForm({ ...customerGroupForm, minimumLifetimeSalesZmw: e.target.value })} /><span className="field-hint">Leave empty to skip this rule.</span></label>
-          <button className="button button-primary button-small"><Plus /> {editingCustomerGroup ? "Save customer group" : "Add customer group"}</button>
-          {editingCustomerGroup && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCustomerGroup(null); setCustomerGroupForm(customerGroupEmpty); }}><X /> Cancel edit</button>}
-        </form>}
-        <div className="marketing-list">
-          {customerGroups.map((group) => <article className="marketing-row" key={group.id}>
-            <div><strong>{group.name}</strong><span>{group.memberCount} customer{group.memberCount === 1 ? "" : "s"} match the saved rules</span></div>
-            {canViewCustomerGroupMembers && <button className="button button-secondary button-small" onClick={() => void showCustomerGroupMembers(group.id)}>View members</button>}
-            {canManageCustomerGroups && <a className="button button-secondary button-small" href={`/api/marketing/customer-groups/${group.id}/export.csv`}><Download /> Download CSV</a>}
-            {canManageCustomerGroups && <button className="icon-button" aria-label={`Edit ${group.name}`} onClick={() => editCustomerGroup(group)}><Pencil /></button>}
-            {canManageCustomerGroups && <button className="icon-button" aria-label={`Remove ${group.name}`} onClick={() => void deleteCustomerGroup(group)}><X /></button>}
-          </article>)}
-          {customerGroups.length === 0 && <p className="muted-empty">No saved customer groups yet.</p>}
-        </div>
-        {selectedCustomerGroup !== null && <div className="marketing-segment-list">
-          <h3>{customerGroups.find((group) => group.id === selectedCustomerGroup)?.name ?? "Customer group"} members</h3>
-          {membersLoading ? <p>Loading customer group members…</p> : (
-            <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Contact</th><th>Fulfilled orders</th><th>Lifetime sales</th><th>Last order</th></tr></thead><tbody>
-              {customerGroupMembers.map((customer) => <tr key={customer.id}><td>{customer.name}</td><td>{customer.email || customer.phone || "—"}</td><td>{customer.fulfilledOrders}</td><td>{money(customer.lifetimeSalesZmw)}</td><td>{customer.lastOrderDate ?? "Never"}</td></tr>)}
-              {!membersLoading && customerGroupMembers.length === 0 && <tr><td colSpan={5}>No customers match these rules.</td></tr>}
-            </tbody></table></div>
-          )}
-        </div>}
-      </section>
+      <CustomerGroupsPanel
+        canManage={canManageCustomerGroups}
+        canViewMembers={canViewCustomerGroupMembers}
+        groups={customerGroups}
+        form={customerGroupForm}
+        editingGroupId={editingCustomerGroup}
+        selectedGroupId={selectedCustomerGroup}
+        members={customerGroupMembers}
+        membersLoading={membersLoading}
+        onFormChange={(field, value) => setCustomerGroupForm((current) => ({ ...current, [field]: value }))}
+        onSubmit={submitCustomerGroup}
+        onCancelEdit={() => { setEditingCustomerGroup(null); setCustomerGroupForm(customerGroupEmpty); }}
+        onShowMembers={(groupId) => void showCustomerGroupMembers(groupId)}
+        onEditGroup={editCustomerGroup}
+        onDeleteGroup={(group) => void deleteCustomerGroup(group)}
+      />
       <section className="panel marketing-report">
         <div className="panel-heading"><div><h2>Marketing reports</h2><span>Campaign sales include fulfilled orders linked to a campaign. Built-in customer segments use lifetime fulfilled orders; saved groups can also use sales and recency.</span></div></div>
         <div className="marketing-report-controls">
