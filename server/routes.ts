@@ -3,6 +3,7 @@ import type { RequestHandler } from "express";
 import { and, asc, count, desc, eq, gte, ilike, lt, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
+import { auditLogCsv } from "../shared/audit-csv";
 import {
   appUserAccess, appUsers, auditLogQuerySchema, businessAuditLogs, productCategories, products, supplierQuotes, suppliers,
 } from "../shared/schema";
@@ -90,6 +91,24 @@ function validationMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Check the submitted values and try again.";
 }
 
+type AuditLogFilters = Pick<z.infer<typeof auditLogQuerySchema>, "entityType" | "actor" | "from" | "to">;
+
+function auditLogWhere({ entityType, actor, from, to }: AuditLogFilters): SQL | undefined {
+  const conditions: SQL[] = [];
+  if (entityType) conditions.push(eq(businessAuditLogs.entityType, entityType));
+  if (actor) {
+    const escapedActor = actor.replace(/[\\%_]/g, "\\$&");
+    conditions.push(ilike(businessAuditLogs.actorEmail, escapedActor));
+  }
+  if (from) conditions.push(gte(businessAuditLogs.createdAt, new Date(`${from}T00:00:00.000Z`)));
+  if (to) {
+    const through = new Date(`${to}T00:00:00.000Z`);
+    through.setUTCDate(through.getUTCDate() + 1);
+    conditions.push(lt(businessAuditLogs.createdAt, through));
+  }
+  return conditions.length ? and(...conditions) : undefined;
+}
+
 export function registerApiRoutes(
   app: import("express").Express,
   businessAccess: RequestHandler = requireBusinessAccess,
@@ -137,20 +156,8 @@ export function registerApiRoutes(
       res.status(400).json({ error: validationMessage(parsed.error) });
       return;
     }
-    const { entityType, actor, from, to, page, pageSize } = parsed.data;
-    const conditions: SQL[] = [];
-    if (entityType) conditions.push(eq(businessAuditLogs.entityType, entityType));
-    if (actor) {
-      const escapedActor = actor.replace(/[\\%_]/g, "\\$&");
-      conditions.push(ilike(businessAuditLogs.actorEmail, escapedActor));
-    }
-    if (from) conditions.push(gte(businessAuditLogs.createdAt, new Date(`${from}T00:00:00.000Z`)));
-    if (to) {
-      const through = new Date(`${to}T00:00:00.000Z`);
-      through.setUTCDate(through.getUTCDate() + 1);
-      conditions.push(lt(businessAuditLogs.createdAt, through));
-    }
-    const where = conditions.length ? and(...conditions) : undefined;
+    const { page, pageSize } = parsed.data;
+    const where = auditLogWhere(parsed.data);
     const offset = (page - 1) * pageSize;
     const [entries, [{ total }]] = await Promise.all([
       db.select().from(businessAuditLogs)
@@ -169,6 +176,26 @@ export function registerApiRoutes(
         totalPages: Math.max(1, Math.ceil(total / pageSize)),
       },
     });
+  });
+
+  app.get("/api/audit-logs/export.csv", businessAccess, async (req, res) => {
+    const parsed = auditLogQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: validationMessage(parsed.error) });
+      return;
+    }
+
+    const entries = await db.select().from(businessAuditLogs)
+      .where(auditLogWhere(parsed.data))
+      .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id));
+
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="change-history.csv"',
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.send(auditLogCsv(entries));
   });
 
   app.post("/api/user-access", businessAccess, requireAccessManager(), async (req, res) => {

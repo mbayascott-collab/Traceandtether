@@ -181,10 +181,13 @@ test("route mutations across business areas keep their audit history and actor",
     const seededAuditRows = await db.insert(businessAuditLogs).values(auditRows.map((row, index) => ({
       entityType: row.entityType,
       entityId: index + 1,
-      recordLabel: `Audit history filter ${suffix} ${index}`,
+      recordLabel: index === 2
+        ? `=HYPERLINK("https://example.invalid","Audit ${suffix}")`
+        : `Audit history filter ${suffix} ${index}`,
       actorClerkUserId: row.actorEmail === actorEmail ? actorId : null,
       actorEmail: row.actorEmail,
       action: "updated",
+      changedFields: index === 2 ? ["=SUM(A1:A2)"] : [],
       createdAt: row.createdAt,
     }))).returning({ id: businessAuditLogs.id });
     const [startBoundary, ...insideRows] = seededAuditRows;
@@ -240,6 +243,26 @@ test("route mutations across business areas keep their audit history and actor",
     }
     assert.deepEqual(expectedPageIds, orderedMatchingRows.map((row) => row.id));
     assert.equal(new Set(expectedPageIds).size, 5, "each matching row must appear on one page");
+
+    const exportQuery = new URLSearchParams({
+      actor: actorEmail,
+      entityType: "customer",
+      from: "2026-11-01",
+      to: "2026-11-03",
+      page: "2",
+      pageSize: "2",
+    });
+    const exported = await request(`/api/audit-logs/export.csv?${exportQuery}`);
+    assert.equal(exported.response.status, 200);
+    assert.match(exported.response.headers.get("content-type") ?? "", /text\/csv/i);
+    assert.match(exported.response.headers.get("content-disposition") ?? "", /attachment/);
+    assert.equal(exported.payload.raw.split("\r\n").length, 6, "export includes every matching row, not one page");
+    for (const entityId of [1, 2, 3, 4, 5]) {
+      assert.match(exported.payload.raw, new RegExp(`,"${entityId}","updated",`));
+    }
+    assert.match(exported.payload.raw, /"'\=HYPERLINK\(""https:\/\/example\.invalid"",""Audit [^"]+""\)"/);
+    assert.match(exported.payload.raw, /"'\=SUM\(A1:A2\)"/);
+    assert.doesNotMatch(exported.payload.raw, /sales order|other-[^,\r\n]+@example\.test/);
 
     const invalidFilters: Record<string, string>[] = [
       { entityType: "not-a-record" },

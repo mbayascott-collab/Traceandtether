@@ -43,6 +43,15 @@ function humanize(value: string) {
   return value.replaceAll("_", " ");
 }
 
+function auditExportUrl(filters: { entityType: string; actor: string; from: string; to: string }) {
+  const query = new URLSearchParams();
+  if (filters.entityType) query.set("entityType", filters.entityType);
+  if (filters.actor) query.set("actor", filters.actor);
+  if (filters.from) query.set("from", filters.from);
+  if (filters.to) query.set("to", filters.to);
+  return `/api/audit-logs/export.csv?${query.toString()}`;
+}
+
 export default function AuditWorkspace() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [filters, setFilters] = useState({ entityType: "", actor: "", from: "", to: "" });
@@ -145,6 +154,9 @@ export default function AuditWorkspace() {
         <div className="pagination">
           <span>{pagination.total ? `Showing ${firstEntry}–${lastEntry} of ${pagination.total} changes` : "No changes match these filters."}</span>
           <div className="pagination-actions">
+            <a className="button button-secondary button-small" href={auditExportUrl(filters)} download="change-history.csv">
+              Export CSV
+            </a>
             <button
               className="button button-secondary button-small"
               type="button"
