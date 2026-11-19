@@ -6,6 +6,7 @@ import test, { after } from "node:test";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   accountingAccounts, businessAuditLogs, businessPayments, customers, importExpenses, inventoryLocations, inventoryMovements,
+  inventoryReservations,
   journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, salesOrders, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
@@ -713,6 +714,155 @@ test("database flow adjusts late import costs across partial receipts and sales"
       throw error;
     } finally {
       client.release();
+    }
+  }
+});
+
+test("opening-stock corrections cannot reduce stock below active reservations", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db, pool }, { registerInventoryRoutes }] = await Promise.all([
+    import("./db"),
+    import("./inventory-routes"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const suffix = randomUUID();
+  const actorEmail = `opening-stock-reservation-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerInventoryRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let productId: number | undefined;
+  let locationId: number | undefined;
+  try {
+    const [product] = await db.insert(products).values({
+      sku: `OPENING-RESERVATION-${suffix}`,
+      name: `Reserved opening stock ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const [location] = await db.insert(inventoryLocations).values({
+      name: `Opening reservation location ${suffix}`,
+    }).returning();
+    locationId = location.id;
+
+    const openingResponse = await fetch(`${baseUrl}/api/inventory/opening-stock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        productId, locationId, quantity: 10, unitCostZmw: "25.00",
+        effectiveAt: "2026-11-19", memo: "Initial physical count", reference: null,
+      }),
+    });
+    const openingPayload = await openingResponse.json() as any;
+    assert.equal(openingResponse.status, 201, JSON.stringify(openingPayload));
+    const openingMovementId = openingPayload.movement.id as number;
+
+    await db.insert(inventoryReservations).values({
+      productId, locationId, quantity: 4, reason: "Reserved for a customer",
+    });
+
+    const correctionBody = {
+      quantity: 3, unitCostZmw: "25.00", effectiveAt: "2026-11-19",
+      reason: "Corrected physical count", reference: null,
+    };
+    const rejectedResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${openingMovementId}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(correctionBody),
+    });
+    const rejectedPayload = await rejectedResponse.json() as any;
+    assert.equal(rejectedResponse.status, 409, JSON.stringify(rejectedPayload));
+    assert.match(rejectedPayload.error, /below quantities already reserved/i);
+
+    const movementsAfterRejection = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.productId, productId));
+    assert.deepEqual(movementsAfterRejection.map((movement) => [
+      movement.id, movement.kind, movement.quantityDelta,
+    ]), [[openingMovementId, "opening_stock", 10]]);
+    const journalsAfterRejection = await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["opening_stock", "opening_stock_reversal"]),
+      inArray(journalEntries.sourceId, movementsAfterRejection.map((movement) => movement.id)),
+    ));
+    assert.equal(journalsAfterRejection.length, 1);
+    assert.equal(journalsAfterRejection[0]!.sourceId, openingMovementId);
+
+    const acceptedResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${openingMovementId}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...correctionBody, quantity: 5 }),
+    });
+    const acceptedPayload = await acceptedResponse.json() as any;
+    assert.equal(acceptedResponse.status, 201, JSON.stringify(acceptedPayload));
+    const finalMovements = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.productId, productId));
+    assert.equal(finalMovements.length, 3);
+    assert.ok(finalMovements.some((movement) =>
+      movement.id === acceptedPayload.reversal.id
+        && movement.kind === "opening_stock_reversal"
+        && movement.quantityDelta === -10,
+    ));
+    assert.ok(finalMovements.some((movement) =>
+      movement.id === acceptedPayload.movement.id
+        && movement.kind === "opening_stock"
+        && movement.quantityDelta === 5,
+    ));
+    const finalJournals = await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["opening_stock", "opening_stock_reversal"]),
+      inArray(journalEntries.sourceId, finalMovements.map((movement) => movement.id)),
+    ));
+    assert.equal(finalJournals.length, 3);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (productId) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_id IN (
+              SELECT id FROM inventory_movements WHERE product_id = $1
+            )
+              AND source_type IN ('opening_stock', 'opening_stock_reversal')
+          )
+        `, [productId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_id IN (
+            SELECT id FROM inventory_movements WHERE product_id = $1
+          )
+            AND source_type IN ('opening_stock', 'opening_stock_reversal')
+        `, [productId]);
+        await client.query("DELETE FROM inventory_reservations WHERE product_id = $1", [productId]);
+        await client.query(
+          "UPDATE inventory_movements SET correction_of_movement_id = NULL WHERE product_id = $1",
+          [productId],
+        );
+        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        await client.query("DELETE FROM products WHERE id = $1", [productId]);
+        if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     }
   }
 });
