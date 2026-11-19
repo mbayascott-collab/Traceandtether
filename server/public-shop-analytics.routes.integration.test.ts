@@ -75,6 +75,25 @@ test("public shop analytics returns aggregate reason counts only to the owner", 
         ]);
       }
     }
+
+    const exportPath = "/api/shop/order-attempt-export?from=2026-11-18&to=2026-11-18";
+    const deniedExport = await fetch(`${baseUrl}${exportPath}`, { headers: { "x-test-role": "manager" } });
+    assert.equal(deniedExport.status, 403);
+    assert.deepEqual(await deniedExport.json(), {
+      error: "Only the business owner can view public shop request activity.",
+    });
+
+    const allowedExport = await fetch(`${baseUrl}${exportPath}`, { headers: { "x-test-role": "owner" } });
+    assert.equal(allowedExport.status, 200);
+    assert.match(allowedExport.headers.get("content-type") ?? "", /text\/csv/);
+    assert.match(allowedExport.headers.get("content-disposition") ?? "", /attachment; filename="?public-shop-daily-totals-2026-11-18-to-2026-11-18\.csv"?/);
+    const csv = await allowedExport.text();
+    assert.equal(
+      csv.split("\r\n", 1)[0],
+      '"Date (UTC)","Accepted","Blocked","Rate-limited","Challenge or honeypot failed"',
+    );
+    assert.doesNotMatch(csv, /visitor|email|phone|address|ip address/i);
+    assert.ok(csv.split("\r\n").every((line) => line.split(",").length === 5));
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await pool.end();

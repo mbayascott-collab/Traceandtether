@@ -531,10 +531,19 @@ export async function fetchPublicShopOrderAttemptDays(from: string, to: string):
   const params = new URLSearchParams({ from, to });
   return request<{ days: PublicShopAttemptDay[]; blockedSpikes: PublicShopBlockedSpike[] }>(`/api/shop/order-attempt-days?${params}`);
 }
+export async function fetchPublicShopOrderAttemptCsv(from: string, to: string): Promise<string> {
+  const params = new URLSearchParams({ from, to });
+  const response = await fetch(`/api/shop/order-attempt-export?${params}`, { credentials: "same-origin" });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new ApiError(body.error ?? "The request could not be completed.", response.status);
+  }
+  return response.text();
+}
 export function publicShopAttemptDaysCsv(days: PublicShopAttemptDay[]): string {
   const rows: unknown[][] = [
-    ["Date (UTC)", "Accepted", "Blocked"],
-    ...days.map(({ day, accepted, blocked }) => [day, accepted, blocked]),
+    ["Date (UTC)", "Accepted", "Blocked", "Rate-limited", "Challenge or honeypot failed"],
+    ...days.map(({ day, accepted, blocked, rateLimited, botCheck }) => [day, accepted, blocked, rateLimited, botCheck]),
   ];
   return rows.map((row) => row.map((value) => `"${String(value ?? "").replaceAll('"', '""')}"`).join(",")).join("\r\n");
 }

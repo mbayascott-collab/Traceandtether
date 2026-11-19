@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, publicShopAttemptDaysCsv, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopBlockedSpike, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 import { matchesCustomerPurchaseHistory } from "../lib/customer-purchase-history";
@@ -95,14 +95,20 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load public shop request activity."); });
     return () => { alive = false; };
   }, [mode, shopAttemptFrom, shopAttemptTo, reload]);
-  function downloadShopAttemptDaysCsv() {
+  async function downloadShopAttemptDaysCsv() {
     if (!shopAttemptDaysForCurrentRange || !shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo) return;
-    const url = URL.createObjectURL(new Blob([publicShopAttemptDaysCsv(shopAttemptDaysForCurrentRange)], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `public-shop-daily-totals-${shopAttemptFrom}-to-${shopAttemptTo}.csv`;
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    try {
+      setError("");
+      const csv = await fetchPublicShopOrderAttemptCsv(shopAttemptFrom, shopAttemptTo);
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `public-shop-daily-totals-${shopAttemptFrom}-to-${shopAttemptTo}.csv`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not export public shop request activity.");
+    }
   }
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); const form = event.currentTarget; setError(""); setNotice("");

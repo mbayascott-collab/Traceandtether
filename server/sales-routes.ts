@@ -427,6 +427,31 @@ export function registerSalesRoutes(
     res.json({ days, blockedSpikes: findPublicShopBlockedSpikes(days) });
   });
 
+  app.get("/api/shop/order-attempt-export", owner, publicShopAnalyticsOwner, async (req, res) => {
+    const { from, to } = req.query;
+    if (typeof from !== "string" || typeof to !== "string" || !isPublicShopAttemptDateRange(from, to)) {
+      return res.status(400).json({ error: "Choose a valid date range with the start date on or before the end date." });
+    }
+    const rows = await db.select({
+      day: publicShopOrderAttemptDailyCounts.day,
+      accepted: publicShopOrderAttemptDailyCounts.acceptedCount,
+      blocked: publicShopOrderAttemptDailyCounts.blockedCount,
+      rateLimited: publicShopOrderAttemptDailyCounts.rateLimitedCount,
+      botCheck: publicShopOrderAttemptDailyCounts.botCheckCount,
+    }).from(publicShopOrderAttemptDailyCounts)
+      .where(and(gte(publicShopOrderAttemptDailyCounts.day, from), lte(publicShopOrderAttemptDailyCounts.day, to)))
+      .orderBy(asc(publicShopOrderAttemptDailyCounts.day));
+    const days = completePublicShopAttemptDays(from, to, rows);
+    const csvRows = [
+      ["Date (UTC)", "Accepted", "Blocked", "Rate-limited", "Challenge or honeypot failed"],
+      ...days.map(({ day, accepted, blocked, rateLimited, botCheck }) => [day, accepted, blocked, rateLimited, botCheck]),
+    ];
+    const csv = csvRows
+      .map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))
+      .join("\r\n");
+    res.type("text/csv").attachment(`public-shop-daily-totals-${from}-to-${to}.csv`).send(csv);
+  });
+
   app.get("/api/customers", owner, async (_req, res) => {
     res.json({ customers: await db.select().from(customers).orderBy(asc(customers.name)) });
   });

@@ -10,7 +10,7 @@ test("public shop daily CSV includes zero-activity dates and only aggregate colu
 
   assert.equal(
     publicShopAttemptDaysCsv(days),
-    '"Date (UTC)","Accepted","Blocked"\r\n"2026-11-17","2","1"\r\n"2026-11-18","0","0"',
+    '"Date (UTC)","Accepted","Blocked","Rate-limited","Challenge or honeypot failed"\r\n"2026-11-17","2","1","1","0"\r\n"2026-11-18","0","0","0","0"',
   );
   assert.doesNotMatch(publicShopAttemptDaysCsv(days), /visitor|email|ip address/i);
 });
