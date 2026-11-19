@@ -212,7 +212,12 @@ async function recordDelivery(tx: any, orderId: number,
   return { delivery, order: saved };
 }
 
-export function registerSalesRoutes(app: Express, owner: RequestHandler) {
+export function registerSalesRoutes(
+  app: Express,
+  owner: RequestHandler,
+  dependencies: { sendCustomerQuoteEmail?: typeof sendCustomerQuoteEmail } = {},
+) {
+  const sendQuoteEmail = dependencies.sendCustomerQuoteEmail ?? sendCustomerQuoteEmail;
   const publicShopAnalyticsOwner = requireBusinessOwner(
     "Only the business owner can view public shop request activity.",
   );
@@ -837,16 +842,10 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         const attemptedAt = quote.emailAttemptedAt?.getTime() ?? 0;
         const stale = !attemptedAt || Date.now() - attemptedAt > 5 * 60 * 1000;
         if (stale && req.body?.confirmAmbiguousRetry !== true) {
-          const error = "The previous send did not finish. Check Gmail Sent before retrying.";
-          const [failed] = await tx.update(customerQuotes).set({
-            emailSendStatus: "failed", emailSentAt: null, emailSendError: error, updatedAt: new Date(),
-          }).where(eq(customerQuotes.id, id)).returning();
-          await recordBusinessAudit(tx, {
-            entityType: "customer_quote", entityId: failed.id, recordLabel: failed.quoteNumber,
-            actor: res.locals.actor, action: "updated",
-            changedFields: ["emailSendStatus", "emailAttemptedAt", "emailSentAt", "emailSendError"],
-          });
-          return { error: `${error} If the email is not there, try sending it again.`, status: 409 };
+          return {
+            error: "The previous send did not finish. Check Gmail Sent, then confirm before retrying.",
+            status: 409,
+          };
         }
         if (!stale) return { error: "This quote email is already being sent. Wait for it to finish before trying again.", status: 409 };
       }
@@ -887,7 +886,7 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
     });
     if ("error" in claim) return res.status(claim.status ?? 400).json({ error: claim.error });
 
-    const outcome = await sendCustomerQuoteEmail(claim.content);
+    const outcome = await sendQuoteEmail(claim.content);
     const sentAt = outcome.ok ? new Date() : null;
     const saved = await db.transaction(async (tx) => {
       const [updated] = await tx.update(customerQuotes).set({
@@ -896,8 +895,12 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
         emailSendError: outcome.ok ? null : outcome.error,
         emailProviderMessageId: outcome.ok ? outcome.messageId : null,
         updatedAt: new Date(),
-      }).where(and(eq(customerQuotes.id, id), eq(customerQuotes.emailSendStatus, "sending"))).returning();
-      if (!updated) throw new Error("The quote email result could not be saved.");
+      }).where(and(
+        eq(customerQuotes.id, id),
+        eq(customerQuotes.emailSendStatus, "sending"),
+        eq(customerQuotes.emailAttemptedAt, claim.quote.emailAttemptedAt!),
+      )).returning();
+      if (!updated) return null;
       await recordBusinessAudit(tx, {
         entityType: "customer_quote", entityId: updated.id, recordLabel: updated.quoteNumber,
         actor: res.locals.actor, action: "updated",
@@ -905,6 +908,9 @@ export function registerSalesRoutes(app: Express, owner: RequestHandler) {
       });
       return updated;
     });
+    if (!saved) {
+      return res.status(409).json({ error: "A newer quote email attempt replaced this result." });
+    }
     if (!outcome.ok) return res.status(502).json({ error: outcome.error, quote: saved });
     res.json({ quote: saved });
   });
