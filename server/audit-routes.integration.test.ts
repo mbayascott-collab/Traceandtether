@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, like } from "drizzle-orm";
 import test from "node:test";
 import {
-  businessAuditLogs, businessExpenses, customers, inventoryLocations, inventoryMovements,
-  marketingCampaigns, marketingCustomerGroups, paymentStatementLines, purchaseOrders, salesOrders,
+  businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
+  journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
+  purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders,
 } from "../shared/schema";
 
 test("route mutations across business areas keep their audit history and actor", {
@@ -15,9 +16,11 @@ test("route mutations across business areas keep their audit history and actor",
   const [
     { db, pool },
     { registerApiRoutes },
+    { postJournal },
   ] = await Promise.all([
     import("./db"),
     import("./routes"),
+    import("./accounting-posting"),
   ]);
 
   const auditTable = await pool.query(
@@ -148,6 +151,9 @@ test("route mutations across business areas keep their audit history and actor",
   let customerGroupId: number | undefined;
   let marketingCampaignId: number | undefined;
   let statementLineId: number | undefined;
+  let paymentTestSalesOrderId: number | undefined;
+  let paymentTestPurchaseOrderId: number | undefined;
+  let paymentTestPayableJournalKey: string | undefined;
   let publicOrderNumber: string | undefined;
   let publicCustomerId: number | undefined;
   let publicOrderAccepted = false;
@@ -388,12 +394,71 @@ test("route mutations across business areas keep their audit history and actor",
       await expectAudit("sales_order", publicSalesOrder.id, "created", null, "Public shop");
     }
 
+    // Seed valid customer and supplier balances before installing the failing
+    // journal trigger used to verify payment transaction rollback.
+    const paymentSalesOrderNumber = `AUD-PAY-C-${safeSuffix.slice(0, 12)}`;
+    const [paymentSalesOrder] = await db.insert(salesOrders).values({
+      orderNumber: paymentSalesOrderNumber,
+      customerId: customerId!,
+      status: "fulfilled",
+      orderDate: "2026-11-18",
+    }).returning();
+    paymentTestSalesOrderId = paymentSalesOrder.id;
+    await db.insert(salesOrderLines).values({
+      salesOrderId: paymentSalesOrder.id,
+      productId: productId!,
+      quantity: 1,
+      unitPriceZmw: "50.00",
+    });
+
+    const paymentPurchaseOrderNumber = `AUD-PAY-S-${safeSuffix.slice(0, 12)}`;
+    const [paymentPurchaseOrder] = await db.insert(purchaseOrders).values({
+      orderNumber: paymentPurchaseOrderNumber,
+      supplierId: supplierId!,
+      currency: "ZMW",
+      exchangeRateToZmw: "1",
+      orderedAt: "2026-11-18",
+    }).returning();
+    paymentTestPurchaseOrderId = paymentPurchaseOrder.id;
+    await db.insert(purchaseOrderLines).values({
+      purchaseOrderId: paymentPurchaseOrder.id,
+      productId: productId!,
+      quantityOrdered: 1,
+      unitPrice: "50.00",
+    });
+    paymentTestPayableJournalKey = `audit-route-payable-${suffix}`;
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: paymentTestPayableJournalKey!,
+      sourceType: "stock_receipt",
+      sourceId: paymentPurchaseOrder.id,
+      memo: `Stock receipt for ${paymentPurchaseOrderNumber}`,
+      entryDate: "2026-11-18",
+      lines: [
+        { accountKey: "inventory", productId: productId!, debitZmw: "50.00" },
+        { accountKey: "accounts_payable", creditZmw: "50.00" },
+      ],
+    }));
+
     // Fail after the accounting route writes its audit row. The transaction must roll both back.
     await pool.query(`
       CREATE FUNCTION public.${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+      DECLARE
+        entry_source_type text;
+        entry_source_id integer;
       BEGIN
         IF NEW.description = '${rollbackNote}' THEN
           RAISE EXCEPTION 'forced audit route rollback';
+        END IF;
+        SELECT source_type, source_id INTO entry_source_type, entry_source_id
+        FROM journal_entries WHERE id = NEW.journal_entry_id;
+        IF entry_source_type = 'payment' AND EXISTS (
+          SELECT 1 FROM business_audit_logs
+          WHERE entity_type = 'payment'
+            AND entity_id = entry_source_id
+            AND actor_clerk_user_id = '${actorId}'
+        ) THEN
+          RAISE EXCEPTION 'forced payment posting rollback: journal %, payment %',
+            NEW.journal_entry_id, entry_source_id;
         END IF;
         RETURN NEW;
       END;
@@ -424,6 +489,64 @@ test("route mutations across business areas keep their audit history and actor",
       eq(businessAuditLogs.recordLabel, `other: ${rollbackDescription}`),
     ));
     assert.equal(failedAudit.length, 0, "failed accounting transaction leaves no audit entry");
+
+    // Both payment directions must roll back the inserted payment and its
+    // audit entry when journal posting fails after the audit row is present.
+    for (const paymentCase of [
+      {
+        direction: "customer_receipt",
+        orderId: paymentTestSalesOrderId,
+        orderNumber: paymentSalesOrderNumber,
+        reference: `Audit route failed customer receipt ${suffix}`,
+      },
+      {
+        direction: "supplier_payment",
+        orderId: paymentTestPurchaseOrderId,
+        orderNumber: paymentPurchaseOrderNumber,
+        reference: `Audit route failed supplier payment ${suffix}`,
+      },
+    ]) {
+      const idempotencyKey = randomUUID();
+      const failedPayment = await request("/api/payments", {
+        direction: paymentCase.direction,
+        idempotencyKey,
+        orderId: paymentCase.orderId,
+        amountZmw: "1.00",
+        paymentDate: "2026-11-18",
+        method: "cash",
+        reference: paymentCase.reference,
+        notes: null,
+      });
+      assert.equal(failedPayment.response.status, 500, JSON.stringify(failedPayment.payload));
+      assert.match(
+        String(failedPayment.payload.error ?? ""),
+        /insert into "journal_lines"/,
+        "payment reached journal posting after its audit row was inserted",
+      );
+
+      const savedPayment = await db.select().from(businessPayments)
+        .where(eq(businessPayments.idempotencyKey, idempotencyKey));
+      assert.equal(savedPayment.length, 0, `${paymentCase.direction} must roll back`);
+      const savedJournal = await db.select().from(journalEntries)
+        .where(and(
+          eq(journalEntries.sourceType, "payment"),
+          like(journalEntries.memo, `%for ${paymentCase.orderNumber}`),
+        ));
+      assert.equal(savedJournal.length, 0, `${paymentCase.direction} journal entry must roll back`);
+      const savedJournalLines = await db.select({ id: journalLines.id })
+        .from(journalLines)
+        .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+        .where(and(
+          eq(journalEntries.sourceType, "payment"),
+          like(journalEntries.memo, `%for ${paymentCase.orderNumber}`),
+        ));
+      assert.equal(savedJournalLines.length, 0, `${paymentCase.direction} journal lines must roll back`);
+      const savedAudit = await db.select().from(businessAuditLogs).where(and(
+        eq(businessAuditLogs.entityType, "payment"),
+        eq(businessAuditLogs.actorClerkUserId, actorId),
+      ));
+      assert.equal(savedAudit.length, 0, `${paymentCase.direction} audit entry must roll back`);
+    }
   } finally {
     if (triggerCreated) await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON journal_lines`);
     if (functionCreated) await pool.query(`DROP FUNCTION IF EXISTS public.${functionName}()`);
@@ -463,6 +586,21 @@ test("route mutations across business areas keep their audit history and actor",
       if (statementLineId) await client.query(
         "DELETE FROM payment_statement_lines WHERE id = $1", [statementLineId],
       );
+      if (paymentTestSalesOrderId) {
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [paymentTestSalesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [paymentTestSalesOrderId]);
+      }
+      if (paymentTestPurchaseOrderId) {
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [paymentTestPurchaseOrderId]);
+        if (paymentTestPayableJournalKey) {
+          await client.query(`
+            DELETE FROM journal_lines
+            WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE source_key = $1)
+          `, [paymentTestPayableJournalKey]);
+          await client.query("DELETE FROM journal_entries WHERE source_key = $1", [paymentTestPayableJournalKey]);
+        }
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [paymentTestPurchaseOrderId]);
+      }
       if (customerGroupId) await client.query(
         "DELETE FROM marketing_customer_groups WHERE id = $1", [customerGroupId],
       );
