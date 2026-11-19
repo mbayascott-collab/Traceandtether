@@ -3,14 +3,14 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
   accountingAccounts, inventoryLocations, inventoryMovements, journalEntries, journalLines,
   products, purchaseOrderLines, shipments, shipmentLines, suppliers,
 } from "../shared/schema";
-import { journalLinesAreBalanced } from "./accounting-posting";
+import { cents, formatCents, journalLinesAreBalanced } from "./accounting-posting";
 
-test("posts each line of a consolidated shipment once with balanced journals", {
+test("posts staged consolidated shipment receipts by increment with balanced journals", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
   const [{ db, pool }, { registerProcurementRoutes }, { registerInventoryRoutes }] = await Promise.all([
@@ -48,11 +48,16 @@ test("posts each line of a consolidated shipment once with balanced journals", {
   const purchaseOrderIds: number[] = [];
   let locationId: number | undefined;
   let shipmentId: number | undefined;
-  const request = async (method: "POST" | "PATCH", path: string, body: unknown, expectedStatus: number) => {
+  const request = async (
+    method: "GET" | "POST" | "PATCH",
+    path: string,
+    body: unknown,
+    expectedStatus: number,
+  ) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
     const payload = await response.json() as any;
     assert.equal(response.status, expectedStatus, JSON.stringify(payload));
@@ -120,19 +125,31 @@ test("posts each line of a consolidated shipment once with balanced journals", {
     }, 201);
     shipmentId = shipment.id;
     const receivedLines = await db.select().from(shipmentLines)
-      .where(eq(shipmentLines.shipmentId, shipment.id));
+      .where(eq(shipmentLines.shipmentId, shipment.id))
+      .orderBy(asc(shipmentLines.id));
+    const receiptQueue = async () => {
+      const { receipts } = await request("GET", "/api/inventory/receipts", undefined, 200);
+      return receipts.filter((line: any) => receivedLines.some((receiptLine) => receiptLine.id === line.id));
+    };
     assert.equal(receivedLines.length, 2);
     assert.deepEqual(
       receivedLines.map((line) => line.purchaseOrderLineId).sort(),
       createdOrderLines.map((line) => line.id).sort(),
     );
 
-    await request("PATCH", `/api/shipments/${shipmentId}/receive`, {
-      lines: receivedLines.map((line) => ({
+    const partialQuantities = [2, 1];
+    const { shipment: partialShipment } = await request("PATCH", `/api/shipments/${shipmentId}/receive`, {
+      lines: receivedLines.map((line, index) => ({
         shipmentLineId: line.id,
-        quantityReceived: line.quantityShipped,
+        quantityReceived: partialQuantities[index],
       })),
     }, 200);
+    assert.equal(partialShipment.status, "partially_received");
+    const partialQueue = await receiptQueue();
+    assert.deepEqual(
+      partialQueue.map((line: any) => [line.id, line.quantityToPost]).sort((a: number[], b: number[]) => a[0]! - b[0]!),
+      receivedLines.map((line, index) => [line.id, partialQuantities[index]]).sort((a, b) => a[0]! - b[0]!),
+    );
 
     const posted = [];
     for (const line of receivedLines) {
@@ -144,14 +161,8 @@ test("posts each line of a consolidated shipment once with balanced journals", {
       );
       posted.push(movement);
     }
-    assert.deepEqual(
-      posted.map((movement) => [movement.productId, movement.quantityDelta, movement.locationId]).sort(),
-      productIds.map((productId, index) => [
-        productId,
-        orderSpecifications[index]!.quantity,
-        locationId,
-      ]).sort(),
-    );
+    assert.deepEqual(posted.map((movement) => movement.quantityDelta).sort((a, b) => a - b), [1, 2]);
+    assert.deepEqual(await receiptQueue(), []);
 
     for (const line of receivedLines) {
       await request(
@@ -162,22 +173,71 @@ test("posts each line of a consolidated shipment once with balanced journals", {
       );
     }
 
+    const { shipment: completedShipment } = await request("PATCH", `/api/shipments/${shipmentId}/receive`, {
+      lines: receivedLines.map((line) => ({
+        shipmentLineId: line.id,
+        quantityReceived: line.quantityShipped,
+      })),
+    }, 200);
+    assert.equal(completedShipment.status, "received");
+    assert.deepEqual(
+      (await receiptQueue()).map((line: any) => [line.id, line.quantityToPost]).sort((a: number[], b: number[]) => a[0]! - b[0]!),
+      receivedLines.map((line, index) => [line.id, orderSpecifications[index]!.quantity - partialQuantities[index]])
+        .sort((a, b) => a[0]! - b[0]!),
+    );
+    const remainingMovements = [];
+    for (const line of receivedLines) {
+      const { movement } = await request(
+        "POST",
+        `/api/inventory/receipts/${line.id}/post`,
+        { locationId },
+        201,
+      );
+      remainingMovements.push(movement);
+    }
+    assert.deepEqual(remainingMovements.map((movement) => movement.quantityDelta).sort((a, b) => a - b), [1, 2]);
+    assert.deepEqual(await receiptQueue(), []);
+
+    for (const line of receivedLines) {
+      await request(
+        "POST",
+        `/api/inventory/receipts/${line.id}/post`,
+        { locationId },
+        409,
+      );
+    }
+
+    const allPosted = [...posted, ...remainingMovements];
+    assert.deepEqual(
+      allPosted.map((movement) => [movement.productId, movement.quantityDelta, movement.locationId]).sort(),
+      productIds.flatMap((productId, index) => [
+        [productId, partialQuantities[index], locationId],
+        [productId, orderSpecifications[index]!.quantity - partialQuantities[index]!, locationId],
+      ]).sort(),
+    );
+
     const testMovements = await db.select().from(inventoryMovements)
       .where(and(
         inArray(inventoryMovements.productId, productIds),
         eq(inventoryMovements.kind, "stock_receipt"),
       ));
-    assert.equal(testMovements.length, 2, "each received purchase-order line should create one stock movement");
+    assert.equal(testMovements.length, 4, "each receipt increment should create one stock movement");
     assert.deepEqual(
       testMovements.map((movement) => movement.quantityDelta).sort((a, b) => a - b),
-      [2, 4],
+      [1, 1, 2, 2],
+    );
+    const stockedLines = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, shipment.id));
+    assert.deepEqual(
+      stockedLines.map((line) => [line.quantityReceived, line.quantityStocked]).sort((a, b) => a[0]! - b[0]!),
+      [[2, 2], [4, 4]],
     );
 
     const receiptEntries = await db.select().from(journalEntries).where(and(
       eq(journalEntries.sourceType, "stock_receipt"),
       inArray(journalEntries.sourceId, testMovements.map((movement) => movement.id)),
     ));
-    assert.equal(receiptEntries.length, 2, "each stock movement should have exactly one journal entry");
+    assert.equal(receiptEntries.length, 4, "each stock movement should have exactly one journal entry");
 
     for (const movement of testMovements) {
       const entry = receiptEntries.find((row) => row.sourceId === movement.id);
@@ -197,11 +257,15 @@ test("posts each line of a consolidated shipment once with balanced journals", {
       const orderLine = createdOrderLines.find((row) => row.id ===
         receivedLines.find((shipmentLine) => shipmentLine.id === entry.shipmentLineId)?.purchaseOrderLineId);
       assert.ok(orderLine, `journal ${entry.id} should link to its purchase-order line`);
+      const specification = orderSpecifications[productIds.indexOf(movement.productId)]!;
+      const expectedIncrementCost = formatCents(
+        cents(specification.expectedCost) * BigInt(movement.quantityDelta) / BigInt(specification.quantity),
+      );
       assert.deepEqual(lines.map((line) => [
         line.accountKey, line.debitZmw, line.creditZmw,
       ]), [
-        ["inventory", orderLine.expectedCost, "0.00"],
-        ["accounts_payable", "0.00", orderLine.expectedCost],
+        ["inventory", expectedIncrementCost, "0.00"],
+        ["accounts_payable", "0.00", expectedIncrementCost],
       ]);
     }
   } finally {
