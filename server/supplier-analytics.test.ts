@@ -220,6 +220,39 @@ test("monthly supplier spend uses order, expense, and payment dates independentl
   ]);
 });
 
+test("monthly supplier spend includes both date boundaries and excludes adjacent dates", () => {
+  const monthly = supplierMonthlySpend({
+    fromDate: "2025-02-10",
+    toDate: "2025-02-20",
+    purchaseLines: [
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-02-09", status: "received", totalZmw: "10.00" },
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-02-10", status: "received", totalZmw: "20.00" },
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-02-20", status: "received", totalZmw: "30.00" },
+      { supplierId: 7, supplierName: "North", orderedAt: "2025-02-21", status: "received", totalZmw: "40.00" },
+    ],
+    expenses: [
+      { incurredAt: "2025-02-09", amountZmw: "1.00", allocations: [] },
+      { incurredAt: "2025-02-10", amountZmw: "2.00", allocations: [] },
+      { incurredAt: "2025-02-20", amountZmw: "3.00", allocations: [] },
+      { incurredAt: "2025-02-21", amountZmw: "4.00", allocations: [] },
+    ],
+    payments: [
+      { paymentDate: "2025-02-09", amountZmw: "1.00" },
+      { paymentDate: "2025-02-10", amountZmw: "2.00" },
+      { paymentDate: "2025-02-20", amountZmw: "3.00" },
+      { paymentDate: "2025-02-21", amountZmw: "4.00" },
+    ],
+  });
+
+  assert.deepEqual(monthly, [{
+    month: "2025-02",
+    orderedGoodsZmw: "50.00",
+    importCostsZmw: "5.00",
+    paymentsZmw: "5.00",
+    suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "50.00", importCostsZmw: "0.00" }],
+  }]);
+});
+
 test("monthly supplier spend counts shared shipment expenses once in the incurred month", () => {
   const monthly = supplierMonthlySpend({
     fromDate: "2025-02-01",
@@ -249,7 +282,7 @@ test("monthly supplier spend counts shared shipment expenses once in the incurre
   ]);
 });
 
-test("supplier analytics monthly totals reconcile with selected-period totals", {
+test("supplier analytics includes date boundaries, excludes adjacent dates, and reconciles totals", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const [{ db, pool }, { registerBusinessReportRoutes }] = await Promise.all([
@@ -293,21 +326,38 @@ test("supplier analytics monthly totals reconcile with selected-period totals", 
       {
         orderNumber: `MRE-N-${suffix.slice(0, 12)}`, supplierId: north.id,
         status: "received", currency: "USD", exchangeRateToZmw: "2",
-        orderedAt: "2097-01-15",
+        orderedAt: "2097-01-01",
       },
       {
         orderNumber: `MRE-E-${suffix.slice(0, 12)}`, supplierId: east.id,
         status: "received", currency: "GBP", exchangeRateToZmw: "4",
-        orderedAt: "2097-02-15",
+        orderedAt: "2097-03-31",
       },
     ]).returning();
     purchaseOrderIds = createdOrders.map(({ id }) => id);
     const [northOrder, eastOrder] = createdOrders;
     assert.ok(northOrder && eastOrder);
 
+    const outsideOrders = await db.insert(purchaseOrders).values([
+      {
+        orderNumber: `MRE-B-${suffix.slice(0, 12)}`, supplierId: north.id,
+        status: "received", currency: "USD", exchangeRateToZmw: "2",
+        orderedAt: "2096-12-31",
+      },
+      {
+        orderNumber: `MRE-A-${suffix.slice(0, 12)}`, supplierId: east.id,
+        status: "received", currency: "GBP", exchangeRateToZmw: "4",
+        orderedAt: "2097-04-01",
+      },
+    ]).returning();
+    purchaseOrderIds.push(...outsideOrders.map(({ id }) => id));
+
     const lines = await db.insert(purchaseOrderLines).values([
       { purchaseOrderId: northOrder.id, productId, quantityOrdered: 2, unitPrice: "100.00" },
       { purchaseOrderId: eastOrder.id, productId, quantityOrdered: 1, unitPrice: "50.00" },
+      ...outsideOrders.map((order) => ({
+        purchaseOrderId: order.id, productId: product.id, quantityOrdered: 1, unitPrice: "500.00",
+      })),
     ]).returning();
 
     const [shipment] = await db.insert(shipments).values({
@@ -326,12 +376,22 @@ test("supplier analytics monthly totals reconcile with selected-period totals", 
       {
         shipmentId, category: "freight", description: "Shared shipment cost",
         amount: "30.00", currency: "USD", exchangeRateToZmw: "2",
-        basis: "value", incurredAt: "2097-02-20",
+        basis: "value", incurredAt: "2097-01-01",
       },
       {
         purchaseOrderId: northOrder.id, category: "handling", description: "Order cost",
         amount: "10.00", currency: "USD", exchangeRateToZmw: "2",
-        basis: "value", incurredAt: "2097-03-10",
+        basis: "value", incurredAt: "2097-03-31",
+      },
+      {
+        purchaseOrderId: northOrder.id, category: "handling", description: "Before range cost",
+        amount: "100.00", currency: "USD", exchangeRateToZmw: "2",
+        basis: "value", incurredAt: "2096-12-31",
+      },
+      {
+        purchaseOrderId: northOrder.id, category: "handling", description: "After range cost",
+        amount: "200.00", currency: "USD", exchangeRateToZmw: "2",
+        basis: "value", incurredAt: "2097-04-01",
       },
     ]).returning();
     expenseIds = createdExpenses.map(({ id }) => id);
@@ -340,23 +400,33 @@ test("supplier analytics monthly totals reconcile with selected-period totals", 
       {
         paymentNumber: `MRE-P1-${suffix.slice(0, 10)}`,
         direction: "supplier_payment", purchaseOrderId: northOrder.id,
-        amountZmw: "35.00", paymentDate: "2097-01-20", method: "bank_transfer",
+        amountZmw: "35.00", paymentDate: "2097-01-01", method: "bank_transfer",
       },
       {
         paymentNumber: `MRE-P2-${suffix.slice(0, 10)}`,
         direction: "supplier_payment", purchaseOrderId: eastOrder.id,
-        amountZmw: "15.00", paymentDate: "2097-03-20", method: "bank_transfer",
+        amountZmw: "15.00", paymentDate: "2097-03-31", method: "bank_transfer",
+      },
+      {
+        paymentNumber: `MRE-P3-${suffix.slice(0, 10)}`,
+        direction: "supplier_payment", purchaseOrderId: northOrder.id,
+        amountZmw: "70.00", paymentDate: "2096-12-31", method: "bank_transfer",
+      },
+      {
+        paymentNumber: `MRE-P4-${suffix.slice(0, 10)}`,
+        direction: "supplier_payment", purchaseOrderId: eastOrder.id,
+        amountZmw: "80.00", paymentDate: "2097-04-01", method: "bank_transfer",
       },
     ]).returning();
     paymentIds = createdPayments.map(({ id }) => id);
-    assert.equal(lines.length, 2);
+    assert.equal(lines.length, 4);
 
     const response = await fetch(
       `${baseUrl}/api/supplier-analytics?from=2097-01-01&to=2097-03-31`,
     );
     const payload = await response.json() as {
       period: { from: string | null; to: string | null };
-      totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
+      totals: { orders: number; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
       monthlySpend: {
         month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
       }[];
@@ -373,16 +443,22 @@ test("supplier analytics monthly totals reconcile with selected-period totals", 
     assert.equal(payload.totals.orderedGoodsZmw, "600.00");
     assert.equal(payload.totals.importCostsZmw, "80.00");
     assert.equal(payload.totals.paymentsZmw, "50.00");
+    assert.equal(payload.totals.orders, 2);
     assert.equal(sumMonthly("orderedGoodsZmw"), cents(payload.totals.orderedGoodsZmw));
     assert.equal(sumMonthly("importCostsZmw"), cents(payload.totals.importCostsZmw));
     assert.equal(sumMonthly("paymentsZmw"), cents(payload.totals.paymentsZmw));
 
-    const february = payload.monthlySpend.find(({ month }) => month === "2097-02");
-    assert.ok(february);
-    assert.equal(february.orderedGoodsZmw, "200.00");
-    assert.equal(february.importCostsZmw, "60.00");
-    assert.equal(february.paymentsZmw, "0.00");
-    assert.equal(cents(february.importCostsZmw), 6_000n, "the shared shipment expense must be counted once");
+    const january = payload.monthlySpend.find(({ month }) => month === "2097-01");
+    assert.ok(january);
+    assert.equal(january.orderedGoodsZmw, "400.00");
+    assert.equal(january.importCostsZmw, "60.00");
+    assert.equal(january.paymentsZmw, "35.00");
+    assert.equal(cents(january.importCostsZmw), 6_000n, "the shared shipment expense must be counted once");
+    const march = payload.monthlySpend.find(({ month }) => month === "2097-03");
+    assert.ok(march);
+    assert.equal(march.orderedGoodsZmw, "200.00");
+    assert.equal(march.importCostsZmw, "20.00");
+    assert.equal(march.paymentsZmw, "15.00");
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
