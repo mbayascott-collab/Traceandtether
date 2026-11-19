@@ -53,6 +53,17 @@ export interface InventoryMovement { id: number; productId: number; productName:
 export interface InventoryLocation { id: number; name: string; active: boolean; }
 export interface InventoryReservation { id: number; productId: number; productName: string; sku: string; quantity: number; status: "active" | "released" | "fulfilled"; reference: string | null; reason: string; salesOrderId: number | null; locationName: string | null; createdAt: string; }
 export interface InventoryReceipt { id: number; quantityToPost: number; quantityReceived: number; quantityStocked: number; shipmentReference: string | null; orderNumber: string; supplierName: string; productName: string; sku: string; }
+export interface UnlinkedReceiptJournal {
+  id: number; entryNumber: string; entryDate: string; memo: string; sourceId: number | null;
+  movementId: number | null; movementSourceKey: string | null; movementProductId: number | null;
+  movementQuantity: number | null; movementReason: string | null; movementReference: string | null;
+  movementCreatedAt: string | null; productName: string | null; sku: string | null;
+  candidates: {
+    productId: number; shipmentLineId: number; shipmentId: number; shipmentReference: string | null;
+    shipmentStatus: string; receivedAt: string | null; orderNumber: string; supplierName: string;
+    productName: string; sku: string; quantityReceived: number; quantityStocked: number;
+  }[];
+}
 export interface Customer { id: number; name: string; contactPerson: string | null; contactPersonPhone: string | null; email: string | null; phone: string | null; address: string | null; paymentTermDays: number | null; notes: string | null; status: "active" | "inactive"; }
 export interface SalesOrderLine {
   id: number; productId: number; productName: string; sku: string; quantity: number; deliveredQuantity: number; remainingQuantity: number;
@@ -433,6 +444,14 @@ export async function fetchInventoryReceipts(): Promise<InventoryReceipt[]> {
 }
 export async function postInventoryReceipt(shipmentLineId: number, locationId: number): Promise<void> {
   await request(`/api/inventory/receipts/${shipmentLineId}/post`, { method: "POST", body: JSON.stringify({ locationId }) });
+}
+export async function fetchUnlinkedReceiptJournals(): Promise<UnlinkedReceiptJournal[]> {
+  return (await request<{ journals: UnlinkedReceiptJournal[] }>("/api/inventory/unlinked-receipt-journals")).journals;
+}
+export async function linkReceiptJournal(journalId: number, shipmentLineId: number): Promise<void> {
+  await request(`/api/inventory/receipt-journals/${journalId}/link`, {
+    method: "POST", body: JSON.stringify({ shipmentLineId }),
+  });
 }
 export async function fetchReservations(): Promise<InventoryReservation[]> {
   return (await request<{ reservations: InventoryReservation[] }>("/api/inventory/reservations")).reservations;

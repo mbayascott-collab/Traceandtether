@@ -322,10 +322,8 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
   const actualClearingByLine = new Map<number, bigint>();
   const actualReceiptClearing = await tx.select({
     shipmentLineId: journalEntries.shipmentLineId,
-    movementSourceKey: inventoryMovements.sourceKey,
     creditZmw: journalLines.creditZmw,
   }).from(journalEntries)
-    .leftJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
     .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
     .where(and(
       eq(journalEntries.sourceType, "stock_receipt"),
@@ -333,12 +331,8 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
       gt(journalLines.creditZmw, "0"),
     ));
   for (const row of actualReceiptClearing) {
-    const legacyShipmentLineId = Number(row.movementSourceKey?.match(/^shipment-line-(\d+)-to-\d+$/)?.[1]);
-    const shipmentLineId = row.shipmentLineId ?? (
-      Number.isSafeInteger(legacyShipmentLineId) ? legacyShipmentLineId : null
-    );
-    if (shipmentLineId === null) continue;
-    const orderLineId = shipmentLineToOrderLine.get(shipmentLineId);
+    if (row.shipmentLineId === null) continue;
+    const orderLineId = shipmentLineToOrderLine.get(row.shipmentLineId);
     if (orderLineId === undefined) continue;
     actualClearingByLine.set(orderLineId, (actualClearingByLine.get(orderLineId) ?? 0n) + cents(row.creditZmw));
   }

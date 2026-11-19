@@ -2,8 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Search } from "lucide-react";
 import {
   correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
-  fetchInventoryReceipts, fetchReservations, fulfillReservation, postInventoryReceipt,
-  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt,
+  fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
+  inventoryMovementEvidenceUrl, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 
@@ -21,6 +21,8 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [locationTotals, setLocationTotals] = useState<InventoryLocationTotal[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [receipts, setReceipts] = useState<InventoryReceipt[]>([]);
+  const [unlinkedReceiptJournals, setUnlinkedReceiptJournals] = useState<UnlinkedReceiptJournal[]>([]);
+  const [receiptJournalLinks, setReceiptJournalLinks] = useState<Record<number, number>>({});
   const [reservations, setReservations] = useState<InventoryReservation[]>([]);
   const [locations, setLocations] = useState<InventoryLocation[]>([]);
   const [receiptLocations, setReceiptLocations] = useState<Record<number, number>>({});
@@ -47,10 +49,12 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
 
   useEffect(() => {
     let alive = true;
-    Promise.all([fetchInventory(), fetchInventoryMovements(), fetchInventoryReceipts(), fetchReservations(), fetchInventoryLocations()])
-      .then(([overview, m, r, v, l]) => { if (alive) {
+    Promise.all([fetchInventory(), fetchInventoryMovements(), fetchInventoryReceipts(), fetchReservations(), fetchInventoryLocations(), fetchUnlinkedReceiptJournals()])
+      .then(([overview, m, r, v, l, unlinked]) => { if (alive) {
         setInventory(overview.inventory); setLocationTotals(overview.locationTotals);
         setMovements(m); setReceipts(r); setReservations(v); setLocations(l);
+        setUnlinkedReceiptJournals(unlinked);
+        setReceiptJournalLinks((old) => Object.fromEntries(unlinked.map((row) => [row.id, old[row.id] ?? 0])));
         setReceiptLocations((old) => Object.fromEntries(r.map((row) => [row.id, old[row.id] ?? l[0]?.id ?? 0])));
       } })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load inventory."); });
@@ -93,7 +97,36 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       </div>
       <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>By location · on hand / available / value</th><th>Average cost</th><th>Stock value</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.locations.map((l) => `${l.name}: ${l.onHand} / ${l.available} / ${money(l.stockValueZmw)}`).join(" · ") || "Main: 0"}</td><td>{money(p.averageUnitCostZmw)}</td><td>{money(p.stockValueZmw)}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={9}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
     </>}
-    {mode === "receipts" && <div className="panel data-table-wrap"><p>Post received shipment quantities into stock. Posting is incremental and cannot be duplicated.</p><table><thead><tr><th>Order / shipment</th><th>Supplier</th><th>Product</th><th>Received</th><th>Already in stock</th><th>To post</th><th>Location</th><th /></tr></thead><tbody>{receipts.map((r) => <tr key={r.id}><td>{r.orderNumber} · {r.shipmentReference || "shipment"}</td><td>{r.supplierName}</td><td>{r.productName} · {r.sku}</td><td>{r.quantityReceived}</td><td>{r.quantityStocked}</td><td>{r.quantityToPost}</td><td><select aria-label={`Receiving location for ${r.productName}`} value={receiptLocations[r.id] ?? ""} onChange={(e) => setReceiptLocations((old) => ({ ...old, [r.id]: Number(e.target.value) }))}><option value="">Choose location</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></td><td><button className="button button-primary" disabled={!receiptLocations[r.id]} onClick={() => run(() => postInventoryReceipt(r.id, receiptLocations[r.id]))}>Post receipt</button></td></tr>)}{!receipts.length && <tr><td colSpan={8}>No received shipment quantities are waiting to be posted.</td></tr>}</tbody></table></div>}
+    {mode === "receipts" && <>
+      <div className="panel data-table-wrap">
+        <h2>Historical receipt journals needing a shipment link</h2>
+        <p>These older stock receipts could not be matched automatically. Review the movement and choose the exact shipment line; no purchase order is inferred.</p>
+        <table><thead><tr><th>Journal</th><th>Stock movement</th><th>Matching shipment line</th><th /></tr></thead><tbody>
+          {unlinkedReceiptJournals.map((journal) => <tr key={journal.id}>
+            <td>{journal.entryNumber} · {journal.entryDate}<br />{journal.memo}</td>
+            <td>{journal.movementId === null
+              ? "No verifiable stock movement"
+              : <>{journal.productName || `Product #${journal.movementProductId}`} · {journal.sku || "SKU unavailable"}<br />
+                {journal.movementQuantity} units · {journal.movementReason}<br />
+                {journal.movementReference || journal.movementSourceKey || `Movement #${journal.movementId}`}</>}</td>
+            <td>{journal.candidates.length
+              ? <select aria-label={`Shipment line for receipt journal ${journal.entryNumber}`}
+                  value={receiptJournalLinks[journal.id] ?? ""}
+                  onChange={(event) => setReceiptJournalLinks((old) => ({ ...old, [journal.id]: Number(event.target.value) }))}>
+                  <option value="">Choose the matching receipt</option>
+                  {journal.candidates.map((candidate) => <option key={candidate.shipmentLineId} value={candidate.shipmentLineId}>
+                    {candidate.orderNumber} · {candidate.shipmentReference || `shipment #${candidate.shipmentId}`} · {candidate.supplierName} · {candidate.productName} · stocked {candidate.quantityStocked}
+                  </option>)}
+                </select>
+              : <span>No stocked shipment line is available for this movement.</span>}</td>
+            <td><button className="button button-primary" disabled={!journal.candidates.length || !receiptJournalLinks[journal.id]}
+              onClick={() => run(() => linkReceiptJournal(journal.id, receiptJournalLinks[journal.id]))}>Link receipt</button></td>
+          </tr>)}
+          {!unlinkedReceiptJournals.length && <tr><td colSpan={4}>No unlinked historical receipt journals need review.</td></tr>}
+        </tbody></table>
+      </div>
+      <div className="panel data-table-wrap"><p>Post received shipment quantities into stock. Posting is incremental and cannot be duplicated.</p><table><thead><tr><th>Order / shipment</th><th>Supplier</th><th>Product</th><th>Received</th><th>Already in stock</th><th>To post</th><th>Location</th><th /></tr></thead><tbody>{receipts.map((r) => <tr key={r.id}><td>{r.orderNumber} · {r.shipmentReference || "shipment"}</td><td>{r.supplierName}</td><td>{r.productName} · {r.sku}</td><td>{r.quantityReceived}</td><td>{r.quantityStocked}</td><td>{r.quantityToPost}</td><td><select aria-label={`Receiving location for ${r.productName}`} value={receiptLocations[r.id] ?? ""} onChange={(e) => setReceiptLocations((old) => ({ ...old, [r.id]: Number(e.target.value) }))}><option value="">Choose location</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></td><td><button className="button button-primary" disabled={!receiptLocations[r.id]} onClick={() => run(() => postInventoryReceipt(r.id, receiptLocations[r.id]))}>Post receipt</button></td></tr>)}{!receipts.length && <tr><td colSpan={8}>No received shipment quantities are waiting to be posted.</td></tr>}</tbody></table></div>
+    </>}
     {mode === "reservations" && <>
       <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => createReservation({
         productId: Number(d.get("productId")), locationId: Number(d.get("locationId")), quantity: Number(d.get("quantity")),

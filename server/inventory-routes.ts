@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, sum } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sum } from "drizzle-orm";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
@@ -8,8 +8,8 @@ import {
   inventoryAdjustmentInputSchema, inventoryReservationInputSchema, openingStockCorrectionInputSchema, openingStockInputSchema,
 } from "./product-validation";
 import {
-  inventoryLocations, inventoryMovementEvidence, inventoryMovements, inventoryReservations, journalLines, products, purchaseOrderLines, purchaseOrders,
-  shipmentLines, shipments, suppliers,
+  inventoryLocations, inventoryMovementEvidence, inventoryMovements, inventoryReservations, journalEntries, journalLines,
+  products, purchaseOrderLines, purchaseOrders, shipmentLines, shipments, suppliers,
 } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
@@ -264,6 +264,121 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       ...shipmentLine, shipmentReference: shipment.shipmentReference, orderNumber: order.orderNumber,
       supplierName, productName, sku, quantityToPost: shipmentLine.quantityReceived - shipmentLine.quantityStocked,
     })) });
+  });
+
+  app.get("/api/inventory/unlinked-receipt-journals", owner, async (_req, res) => {
+    const unresolved = await db.select({
+      id: journalEntries.id,
+      entryNumber: journalEntries.entryNumber,
+      entryDate: journalEntries.entryDate,
+      memo: journalEntries.memo,
+      sourceId: journalEntries.sourceId,
+      movementId: inventoryMovements.id,
+      movementSourceKey: inventoryMovements.sourceKey,
+      movementProductId: inventoryMovements.productId,
+      movementQuantity: inventoryMovements.quantityDelta,
+      movementReason: inventoryMovements.reason,
+      movementReference: inventoryMovements.reference,
+      movementCreatedAt: inventoryMovements.createdAt,
+      productName: products.name,
+      sku: products.sku,
+    }).from(journalEntries)
+      .leftJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+      .leftJoin(products, eq(inventoryMovements.productId, products.id))
+      .where(and(eq(journalEntries.sourceType, "stock_receipt"), isNull(journalEntries.shipmentLineId)))
+      .orderBy(asc(journalEntries.entryDate), asc(journalEntries.id));
+    const productIds = [...new Set(unresolved.flatMap((row) =>
+      row.movementProductId === null ? [] : [row.movementProductId],
+    ))];
+    const candidateRows = productIds.length
+      ? await db.select({
+        productId: purchaseOrderLines.productId,
+        shipmentLineId: shipmentLines.id,
+        shipmentId: shipments.id,
+        shipmentReference: shipments.shipmentReference,
+        shipmentStatus: shipments.status,
+        receivedAt: shipments.receivedAt,
+        orderNumber: purchaseOrders.orderNumber,
+        supplierName: suppliers.name,
+        productName: products.name,
+        sku: products.sku,
+        quantityReceived: shipmentLines.quantityReceived,
+        quantityStocked: shipmentLines.quantityStocked,
+      }).from(shipmentLines)
+        .innerJoin(shipments, eq(shipmentLines.shipmentId, shipments.id))
+        .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
+        .innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+        .where(and(inArray(purchaseOrderLines.productId, productIds), gt(shipmentLines.quantityStocked, 0)))
+        .orderBy(desc(shipments.receivedAt), desc(shipmentLines.id))
+      : [];
+    const candidatesByProduct = new Map<number, typeof candidateRows>();
+    candidateRows.forEach((candidate) => {
+      candidatesByProduct.set(candidate.productId, [
+        ...(candidatesByProduct.get(candidate.productId) ?? []),
+        candidate,
+      ]);
+    });
+    res.json({
+      journals: unresolved.map((journal) => ({
+        ...journal,
+        candidates: journal.movementProductId === null
+          ? []
+          : candidatesByProduct.get(journal.movementProductId) ?? [],
+      })),
+    });
+  });
+
+  app.post("/api/inventory/receipt-journals/:id/link", owner, async (req, res) => {
+    const journalId = getId(req.params.id);
+    if (!journalId) return bad(res, "Invalid receipt journal.");
+    const body = z.object({ shipmentLineId: z.number().int().positive() }).strict().safeParse(req.body);
+    if (!body.success) return bad(res, "Choose a valid shipment receipt line.");
+    const result = await db.transaction(async (tx) => {
+      const [entry] = await tx.select().from(journalEntries)
+        .where(and(eq(journalEntries.id, journalId), eq(journalEntries.sourceType, "stock_receipt")))
+        .for("update").limit(1);
+      if (!entry) return { error: "Receipt journal not found.", status: 404 };
+      if (entry.shipmentLineId !== null) return { error: "This receipt journal is already linked.", status: 409 };
+      if (entry.sourceId === null) return { error: "This receipt journal has no stock movement to verify.", status: 409 };
+
+      const [movement] = await tx.select().from(inventoryMovements)
+        .where(eq(inventoryMovements.id, entry.sourceId)).for("update").limit(1);
+      if (!movement || movement.kind !== "stock_receipt" || movement.quantityDelta <= 0) {
+        return { error: "The receipt journal's stock movement cannot be verified.", status: 409 };
+      }
+      const [line] = await tx.select().from(shipmentLines)
+        .where(eq(shipmentLines.id, body.data.shipmentLineId)).for("update").limit(1);
+      if (!line || line.quantityStocked <= 0) return { error: "Choose a shipment line with stock already received.", status: 400 };
+      const [orderLine] = await tx.select({ productId: purchaseOrderLines.productId })
+        .from(purchaseOrderLines).where(eq(purchaseOrderLines.id, line.purchaseOrderLineId)).limit(1);
+      if (!orderLine || orderLine.productId !== movement.productId) {
+        return { error: "The shipment line product does not match this stock movement.", status: 400 };
+      }
+      const [previouslyLinked] = await tx.select({ quantity: sum(inventoryMovements.quantityDelta) })
+        .from(journalEntries)
+        .innerJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+        .where(and(
+          eq(journalEntries.sourceType, "stock_receipt"),
+          eq(journalEntries.shipmentLineId, line.id),
+        ));
+      const totalLinkedQuantity = Number(previouslyLinked?.quantity ?? 0) + movement.quantityDelta;
+      if (totalLinkedQuantity > line.quantityStocked) {
+        return { error: "The linked receipt quantities would exceed the shipment line's stocked quantity.", status: 409 };
+      }
+
+      await tx.update(journalEntries).set({ shipmentLineId: line.id })
+        .where(eq(journalEntries.id, entry.id));
+      await recordBusinessAudit(tx, {
+        entityType: "journal_entry", entityId: entry.id,
+        recordLabel: `Receipt journal ${entry.entryNumber}`,
+        actor: res.locals.actor, action: "updated", changedFields: ["shipmentLineId"],
+      });
+      return { journalEntryId: entry.id, shipmentLineId: line.id };
+    });
+    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
+    res.json({ journalEntry: result });
   });
 
   app.post("/api/inventory/receipts/:shipmentLineId/post", owner, async (req, res) => {

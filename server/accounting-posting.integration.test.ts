@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { and, eq, inArray } from "drizzle-orm";
 import {
-  accountingAccounts, customers, importExpenses, inventoryLocations, inventoryMovements,
+  accountingAccounts, businessAuditLogs, customers, importExpenses, inventoryLocations, inventoryMovements,
   journalEntries, journalLines, products, purchaseOrderLines, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
@@ -149,15 +149,43 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(journalEntries.sourceId, earlyReceiptMovement.id),
     ));
     assert.equal(earlyReceiptEntry.shipmentLineId, shipmentLineId);
-    // Simulate a pre-migration journal that relies on its old movement key.
+    // Simulate a historical receipt whose movement key cannot be backfilled.
+    await db.update(inventoryMovements).set({ sourceKey: `legacy-receipt-${suffix}` })
+      .where(eq(inventoryMovements.id, earlyReceiptMovement.id));
     await db.update(journalEntries).set({ shipmentLineId: null })
       .where(eq(journalEntries.id, earlyReceiptEntry.id));
+    const { journals: unresolvedReceipts } = await request(
+      "/api/inventory/unlinked-receipt-journals", undefined, 200,
+    );
+    const unresolvedReceipt = unresolvedReceipts.find((row: any) => row.id === earlyReceiptEntry.id);
+    assert.ok(unresolvedReceipt);
+    assert.equal(unresolvedReceipt.movementId, earlyReceiptMovement.id);
+    assert.ok(unresolvedReceipt.candidates.some((candidate: any) => candidate.shipmentLineId === shipmentLineId));
     const { orders: [afterEarlyExpense] } = await request(
       `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
     );
-    assert.equal(afterEarlyExpense.adjustmentPreview.adjustmentAvailableZmw, "0.00");
-    assert.equal(afterEarlyExpense.adjustmentPreview.canPost, false);
+    assert.equal(afterEarlyExpense.adjustmentPreview.adjustmentAvailableZmw, "400.00");
+    assert.equal(afterEarlyExpense.adjustmentPreview.canPost, true);
     assert.equal(afterEarlyExpense.adjustmentPreview.unpostedClearingZmw, "600.00");
+    await request(`/api/inventory/receipt-journals/${earlyReceiptEntry.id}/link`, {
+      shipmentLineId,
+    }, 200);
+    const [relinkedReceiptEntry] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.id, earlyReceiptEntry.id));
+    assert.equal(relinkedReceiptEntry.shipmentLineId, shipmentLineId);
+    const receiptLinkAudits = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "journal_entry"),
+      eq(businessAuditLogs.entityId, earlyReceiptEntry.id),
+      eq(businessAuditLogs.actorEmail, testEmail),
+      eq(businessAuditLogs.action, "updated"),
+    ));
+    assert.ok(receiptLinkAudits.some((audit) => audit.changedFields.includes("shipmentLineId")));
+    const { orders: [afterReceiptLink] } = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    assert.equal(afterReceiptLink.adjustmentPreview.adjustmentAvailableZmw, "0.00");
+    assert.equal(afterReceiptLink.adjustmentPreview.canPost, false);
+    assert.equal(afterReceiptLink.adjustmentPreview.unpostedClearingZmw, "600.00");
 
     const { order: salesOrder } = await request("/api/sales-orders", {
       customerId,
@@ -405,7 +433,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.ok(linkedReceiptLines.every((line) => line.orderId === purchaseOrderId));
     assert.ok(receiptEntries.every((entry) => receiptMovements.some((movement) => movement.id === entry.sourceId)));
     assert.deepEqual(receiptEntries.map((entry) => entry.shipmentLineId).sort(), [
-      null, shipmentLineId, shipmentLineId,
+      shipmentLineId, shipmentLineId, shipmentLineId,
     ].sort());
 
     const [deliveryLine] = await db.select().from(salesDeliveryLines)
@@ -496,6 +524,17 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(journalEntries.sourceType, "stock_receipt"),
       eq(journalEntries.sourceId, mismatchMovement.id),
     ));
+    await db.update(journalEntries).set({ shipmentLineId: null })
+      .where(eq(journalEntries.id, mismatchReceiptEntry.id));
+    const overCapacityLink = await fetch(`${baseUrl}/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ shipmentLineId }),
+    });
+    assert.equal(overCapacityLink.status, 409);
+    await request(`/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
+      shipmentLineId: mismatchShipmentLineId,
+    }, 200);
     const [clearingAccount] = await db.select().from(accountingAccounts)
       .where(eq(accountingAccounts.systemKey, "landed_cost_clearing"));
     const [receiptClearingLine] = await db.select().from(journalLines).where(and(
