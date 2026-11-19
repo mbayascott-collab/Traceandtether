@@ -70,6 +70,117 @@ test("rejects quantities beyond shipped or ordered amounts and protects cancelle
   );
 });
 
+test("rejects reducing a receipt below the quantity already posted to stock", () => {
+  const error = validateShipmentReceipt({
+    shipmentLines: [{ ...shipmentLines[0]!, quantityStocked: 2 }],
+    requestedQuantities: new Map([[11, 1]]),
+    purchaseOrderLines: [orderLines[0]!],
+    otherReceivedByLine: new Map(),
+    purchaseOrderStatuses: new Map([[1, "ordered"]]),
+  });
+
+  assert.match(error ?? "", /cannot be reduced below the quantity already posted to stock/i);
+});
+
+test("keeps the saved receipt quantity when a correction would remove stocked units", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerProcurementRoutes }] = await Promise.all([
+    import("./db"),
+    import("./procurement-routes"),
+  ]);
+  const auditTable = await pool.query<{ exists: boolean }>(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    t.skip("requires the business audit migration used by the receiving route");
+    return;
+  }
+  const suffix = randomUUID();
+  const actorEmail = `shipment-receipt-correction-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerProcurementRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let supplierId: number | undefined;
+  let productId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  try {
+    const [supplier] = await db.insert(suppliers).values({ name: `Receipt correction supplier ${suffix}` }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `RCC-${suffix}`, name: `Receipt correction product ${suffix}`, status: "active", purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+
+    const orderResponse = await fetch(`${baseUrl}/api/purchase-orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        supplierId, currency: "CNY", exchangeRateToZmw: "2", expectedAt: null, notes: null,
+        lines: [{ productId, quantityOrdered: 5, unitPrice: "10.00" }],
+      }),
+    });
+    assert.equal(orderResponse.status, 201);
+    const { order } = await orderResponse.json() as { order: { id: number } };
+    purchaseOrderId = order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+
+    const [shipment] = await db.insert(shipmentHeaders).values({
+      purchaseOrderId, shipmentReference: `RCC-${suffix}`,
+    }).returning();
+    await db.insert(shipmentPurchaseOrders).values({ shipmentId: shipment.id, purchaseOrderId });
+    const [shipmentLine] = await db.insert(shipmentLineRows).values({
+      shipmentId: shipment.id, purchaseOrderLineId: orderLine.id,
+      quantityShipped: 4, quantityReceived: 3, quantityStocked: 2,
+    }).returning();
+
+    const response = await fetch(`${baseUrl}/api/shipments/${shipment.id}/receive`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lines: [{ shipmentLineId: shipmentLine.id, quantityReceived: 1 }] }),
+    });
+    const payload = await response.json() as { error?: string };
+    assert.equal(response.status, 400);
+    assert.match(payload.error ?? "", /cannot be reduced below the quantity already posted to stock/i);
+
+    const [savedLine] = await db.select({ quantityReceived: shipmentLineRows.quantityReceived })
+      .from(shipmentLineRows).where(eq(shipmentLineRows.id, shipmentLine.id));
+    assert.equal(savedLine.quantityReceived, 3);
+  } finally {
+    try {
+      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (purchaseOrderId) {
+        await pool.query(
+          "DELETE FROM shipment_lines WHERE shipment_id IN (SELECT id FROM shipments WHERE purchase_order_id = $1)",
+          [purchaseOrderId],
+        );
+        await pool.query(
+          "DELETE FROM shipment_purchase_orders WHERE purchase_order_id = $1",
+          [purchaseOrderId],
+        );
+        await pool.query("DELETE FROM shipments WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await pool.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await pool.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await pool.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }
+});
+
 test("rejects one of two concurrent receipts that exceed the purchase order quantity", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
