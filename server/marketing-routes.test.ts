@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
-  accountingAccounts, customers, journalEntries, journalLines, marketingAttributions,
+  accountingAccounts, businessAuditLogs, customers, journalEntries, journalLines, marketingAttributions,
   marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
@@ -86,6 +86,137 @@ test("customer-group CSV downloads are limited to owners", {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
     if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
+  }
+});
+
+test("customer-group CSV exports reflect updated rules and customer order history", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const suffix = randomUUID();
+  const prefix = `group-freshness-${suffix}`;
+  const actorEmail = `${prefix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerMarketingRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const [firstName, firstEmail, firstPhone, secondName, secondEmail, secondPhone] = [
+    `${prefix} first`, `${prefix}-first@example.test`, `+260-${suffix.slice(0, 8)}`,
+    `${prefix} second`, `${prefix}-second@example.test`, `+260-${suffix.slice(8, 16)}`,
+  ];
+  let firstCustomerId: number | undefined;
+  let secondCustomerId: number | undefined;
+  let productId: number | undefined;
+  let groupId: number | undefined;
+  const orderIds: number[] = [];
+  const orderLineIds: number[] = [];
+
+  const download = async () => {
+    const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${groupId}/export.csv`);
+    return { response, body: await response.text() };
+  };
+  const patchGroup = async (rules: Record<string, number | string>) => {
+    const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${groupId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `${prefix} group`, rules }),
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+  };
+  const assertColumns = (body: string) => {
+    assert.equal(body.split("\r\n", 1)[0], '"Name","Email","Phone"');
+  };
+
+  try {
+    const [firstCustomer] = await db.insert(customers).values({
+      name: firstName, email: firstEmail, phone: firstPhone,
+    }).returning();
+    firstCustomerId = firstCustomer.id;
+    const [secondCustomer] = await db.insert(customers).values({
+      name: secondName, email: secondEmail, phone: secondPhone,
+    }).returning();
+    secondCustomerId = secondCustomer.id;
+    const [product] = await db.insert(products).values({
+      sku: `GF-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: `${prefix} group`,
+      rules: { minimumFulfilledOrders: 2 },
+    }).returning();
+    groupId = group.id;
+
+    const [firstOrder] = await db.insert(salesOrders).values({
+      orderNumber: `GF-${suffix.slice(0, 20)}-1`,
+      customerId: firstCustomer.id,
+      status: "fulfilled",
+      orderDate: "2026-11-01",
+    }).returning();
+    orderIds.push(firstOrder.id);
+    const [secondOrder] = await db.insert(salesOrders).values({
+      orderNumber: `GF-${suffix.slice(0, 20)}-2`,
+      customerId: secondCustomer.id,
+      status: "confirmed",
+      orderDate: "2026-11-02",
+    }).returning();
+    orderIds.push(secondOrder.id);
+    const orderLines = await db.insert(salesOrderLines).values([
+      { salesOrderId: firstOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
+      { salesOrderId: secondOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
+    ]).returning();
+    orderLineIds.push(...orderLines.map((line) => line.id));
+
+    const beforeRuleChange = await download();
+    assert.equal(beforeRuleChange.response.status, 200, beforeRuleChange.body);
+    assertColumns(beforeRuleChange.body);
+    assert.ok(!beforeRuleChange.body.includes(firstEmail));
+    assert.ok(!beforeRuleChange.body.includes(secondEmail));
+
+    await patchGroup({ minimumFulfilledOrders: 1 });
+    const afterRuleChange = await download();
+    assert.equal(afterRuleChange.response.status, 200, afterRuleChange.body);
+    assertColumns(afterRuleChange.body);
+    assert.ok(afterRuleChange.body.includes(firstEmail));
+    assert.ok(afterRuleChange.body.includes(firstName));
+    assert.ok(afterRuleChange.body.includes(firstPhone));
+    assert.ok(!afterRuleChange.body.includes(secondEmail));
+
+    await Promise.all([
+      db.update(salesOrders).set({ status: "confirmed" }).where(eq(salesOrders.id, firstOrder.id)),
+      db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, secondOrder.id)),
+    ]);
+    const afterHistoryChange = await download();
+    assert.equal(afterHistoryChange.response.status, 200, afterHistoryChange.body);
+    assertColumns(afterHistoryChange.body);
+    assert.ok(!afterHistoryChange.body.includes(firstEmail));
+    assert.ok(afterHistoryChange.body.includes(secondEmail));
+    assert.ok(afterHistoryChange.body.includes(secondName));
+    assert.ok(afterHistoryChange.body.includes(secondPhone));
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (orderLineIds.length) await db.delete(salesOrderLines).where(inArray(salesOrderLines.id, orderLineIds));
+    if (orderIds.length) await db.delete(salesOrders).where(inArray(salesOrders.id, orderIds));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    await db.delete(businessAuditLogs).where(eq(businessAuditLogs.actorEmail, actorEmail));
+    if (productId) await db.delete(products).where(eq(products.id, productId));
+    if (firstCustomerId) await db.delete(customers).where(eq(customers.id, firstCustomerId));
+    if (secondCustomerId) await db.delete(customers).where(eq(customers.id, secondCustomerId));
   }
 });
 
