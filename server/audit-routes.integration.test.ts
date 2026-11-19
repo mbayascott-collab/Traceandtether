@@ -161,6 +161,96 @@ test("route mutations across business areas keep their audit history and actor",
   let triggerCreated = false;
 
   try {
+    const auditRows = [
+      { entityType: "customer", createdAt: new Date("2026-11-01T00:00:00.000Z"), actorEmail },
+      ...Array.from({ length: 3 }, () => ({
+        entityType: "customer",
+        createdAt: new Date("2026-11-02T12:00:00.000Z"),
+        actorEmail,
+      })),
+      { entityType: "customer", createdAt: new Date("2026-11-03T23:59:59.999Z"), actorEmail },
+      { entityType: "sales_order", createdAt: new Date("2026-11-02T12:00:00.000Z"), actorEmail },
+      {
+        entityType: "customer",
+        createdAt: new Date("2026-11-02T12:00:00.000Z"),
+        actorEmail: `other-${suffix}@example.test`,
+      },
+      { entityType: "customer", createdAt: new Date("2026-10-31T23:59:59.999Z"), actorEmail },
+      { entityType: "customer", createdAt: new Date("2026-11-04T00:00:00.000Z"), actorEmail },
+    ];
+    const seededAuditRows = await db.insert(businessAuditLogs).values(auditRows.map((row, index) => ({
+      entityType: row.entityType,
+      entityId: index + 1,
+      recordLabel: `Audit history filter ${suffix} ${index}`,
+      actorClerkUserId: row.actorEmail === actorEmail ? actorId : null,
+      actorEmail: row.actorEmail,
+      action: "updated",
+      createdAt: row.createdAt,
+    }))).returning({ id: businessAuditLogs.id });
+    const [startBoundary, ...insideRows] = seededAuditRows;
+    const matchingRows = [
+      startBoundary,
+      ...insideRows.slice(0, 3),
+      insideRows[3],
+    ];
+    const orderedMatchingRows = matchingRows
+      .map((row, index) => ({ ...row, createdAt: auditRows[index].createdAt }))
+      .sort((left, right) =>
+        right.createdAt.getTime() - left.createdAt.getTime() || right.id - left.id
+      );
+    const filteredHistory = async (filters: Record<string, string>) => {
+      const query = new URLSearchParams(filters);
+      return request(`/api/audit-logs?${query}`);
+    };
+    const actorFiltered = await filteredHistory({
+      actor: actorEmail,
+      from: "2026-11-01",
+      to: "2026-11-03",
+    });
+    assert.equal(actorFiltered.response.status, 200, JSON.stringify(actorFiltered.payload));
+    assert.equal(actorFiltered.payload.pagination.total, 6);
+
+    const recordFiltered = await filteredHistory({
+      actor: actorEmail,
+      entityType: "customer",
+      from: "2026-11-01",
+      to: "2026-11-03",
+    });
+    assert.equal(recordFiltered.response.status, 200, JSON.stringify(recordFiltered.payload));
+    assert.equal(recordFiltered.payload.pagination.total, 5);
+
+    const expectedPageIds: number[] = [];
+    for (let page = 1; page <= 3; page += 1) {
+      const result = await filteredHistory({
+        actor: actorEmail,
+        entityType: "customer",
+        from: "2026-11-01",
+        to: "2026-11-03",
+        page: String(page),
+        pageSize: "2",
+      });
+      assert.equal(result.response.status, 200, JSON.stringify(result.payload));
+      assert.deepEqual(result.payload.pagination, {
+        page,
+        pageSize: 2,
+        total: 5,
+        totalPages: 3,
+      });
+      expectedPageIds.push(...result.payload.entries.map((entry: { id: number }) => entry.id));
+    }
+    assert.deepEqual(expectedPageIds, orderedMatchingRows.map((row) => row.id));
+    assert.equal(new Set(expectedPageIds).size, 5, "each matching row must appear on one page");
+
+    const invalidFilters: Record<string, string>[] = [
+      { entityType: "not-a-record" },
+      { actor: "not-an-email" },
+      { from: "2026-11-04", to: "2026-11-03" },
+    ];
+    for (const invalidFilter of invalidFilters) {
+      const result = await filteredHistory(invalidFilter);
+      assert.equal(result.response.status, 400, JSON.stringify(result.payload));
+    }
+
     const productBody = {
       sku: `AUD-${safeSuffix}`,
       name: `Audit route product ${suffix}`,
@@ -556,6 +646,10 @@ test("route mutations across business areas keep their audit history and actor",
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_clerk_user_id = $1", [actorId]);
+      await client.query(
+        "DELETE FROM business_audit_logs WHERE record_label LIKE $1",
+        [`Audit history filter ${suffix} %`],
+      );
       if (publicCustomerId) {
         await client.query(
           "DELETE FROM business_audit_logs WHERE entity_type = 'customer' AND entity_id = $1",
