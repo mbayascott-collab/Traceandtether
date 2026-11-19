@@ -28,10 +28,18 @@ export type TrialBalanceRow = Omit<AccountingReportRow, "amountZmw"> & {
   balanceZmw: string;
 };
 
+export type BalanceSheetReconciliation = {
+  assetsZmw: string;
+  liabilitiesAndEquityZmw: string;
+  differenceZmw: string;
+  isBalanced: boolean;
+};
+
 export type AccountingReports = {
   trialBalance: TrialBalanceRow[];
   incomeStatement: AccountingReportRow[];
   balanceSheet: AccountingReportRow[];
+  balanceSheetReconciliation: BalanceSheetReconciliation;
   totals: {
     trialDebitsZmw: string;
     trialCreditsZmw: string;
@@ -135,10 +143,24 @@ export function calculateAccountingReports(
     amountZmw: money(lifetimeProfit),
   });
 
+  const assetsCents = balanceSheet
+    .filter((row) => row.type === "asset")
+    .reduce((sum, row) => sum + cents(row.amountZmw), 0n);
+  const liabilitiesAndEquityCents = balanceSheet
+    .filter((row) => row.type === "liability" || row.type === "equity")
+    .reduce((sum, row) => sum + cents(row.amountZmw), 0n);
+  const balanceSheetDifference = assetsCents - liabilitiesAndEquityCents;
+
   return {
     trialBalance,
     incomeStatement,
     balanceSheet,
+    balanceSheetReconciliation: {
+      assetsZmw: money(assetsCents),
+      liabilitiesAndEquityZmw: money(liabilitiesAndEquityCents),
+      differenceZmw: money(balanceSheetDifference),
+      isBalanced: balanceSheetDifference === 0n,
+    },
     totals: {
       trialDebitsZmw: money(trialBalance.reduce((sum, row) => sum + cents(row.debitZmw), 0n)),
       trialCreditsZmw: money(trialBalance.reduce((sum, row) => sum + cents(row.creditZmw), 0n)),
@@ -152,7 +174,28 @@ export function calculateAccountingReports(
 export function accountingReportExportRows<
   TTrial extends { code: string; name: string; type: string; debitZmw: string; creditZmw: string; balanceZmw: string },
   TReport extends { code: string; name: string; type: string; amountZmw: string },
->(reports: { trialBalance: TTrial[]; incomeStatement: TReport[]; balanceSheet: TReport[] }) {
+>(
+  reports: {
+    trialBalance: TTrial[];
+    incomeStatement: TReport[];
+    balanceSheet: TReport[];
+    balanceSheetReconciliation?: BalanceSheetReconciliation;
+  },
+) {
+  const balanceSheetRows = [
+    ["Code", "Account", "Type", "Amount ZMW"],
+    ...reports.balanceSheet.map((row) => [row.code, row.name, row.type, row.amountZmw]),
+  ];
+  const reconciliation = reports.balanceSheetReconciliation;
+  if (reconciliation && !reconciliation.isBalanced) {
+    const differenceCents = cents(reconciliation.differenceZmw);
+    balanceSheetRows.push(
+      ["", "Total assets", "Reconciliation", reconciliation.assetsZmw],
+      ["", "Liabilities and equity", "Reconciliation", reconciliation.liabilitiesAndEquityZmw],
+      ["", "WARNING: Balance sheet does not balance", "Difference ZMW", money(differenceCents < 0n ? -differenceCents : differenceCents)],
+    );
+  }
+
   return {
     trialBalance: [
       ["Code", "Account", "Type", "Debit ZMW", "Credit ZMW", "Balance ZMW"],
@@ -164,9 +207,6 @@ export function accountingReportExportRows<
       ["Code", "Account", "Type", "Amount ZMW"],
       ...reports.incomeStatement.map((row) => [row.code, row.name, row.type, row.amountZmw]),
     ],
-    balanceSheet: [
-      ["Code", "Account", "Type", "Amount ZMW"],
-      ...reports.balanceSheet.map((row) => [row.code, row.name, row.type, row.amountZmw]),
-    ],
+    balanceSheet: balanceSheetRows,
   };
 }

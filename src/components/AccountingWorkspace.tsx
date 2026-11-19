@@ -3,6 +3,12 @@ import { accountingReportExportRows } from "../../shared/accounting-reports";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
 type TrialRow = ReportRow & { accountId: number; debitZmw: string; creditZmw: string; balanceZmw: string };
+type BalanceSheetReconciliation = {
+  assetsZmw: string;
+  liabilitiesAndEquityZmw: string;
+  differenceZmw: string;
+  isBalanced: boolean;
+};
 type JournalEntry = {
   id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string;
   lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
@@ -50,6 +56,7 @@ type ReportData = {
   trialBalance: TrialRow[];
   incomeStatement: ReportRow[];
   balanceSheet: ReportRow[];
+  balanceSheetReconciliation: BalanceSheetReconciliation;
   totals: { trialDebitsZmw: string; trialCreditsZmw: string; incomeZmw: string; expensesZmw: string; netIncomeZmw: string };
 };
 
@@ -479,7 +486,13 @@ export default function AccountingWorkspace() {
       </section>
       <section className="dashboard-lower" style={{ marginBottom: 16 }}>
         <div className="panel"><div className="panel-heading"><h2>Income statement</h2></div><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Amount</th></tr></thead><tbody>{data.incomeStatement.map((row) => <tr key={row.code}><td>{row.code} · {row.name}</td><td>{row.type}</td><td>{money(row.amountZmw)}</td></tr>)}</tbody></table></div></div>
-        <div className="panel"><div className="panel-heading"><h2>Balance sheet</h2></div><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Amount</th></tr></thead><tbody>{data.balanceSheet.map((row, index) => <tr key={`${row.code}-${index}`}><td>{row.code} {row.name}</td><td>{row.type}</td><td>{money(row.amountZmw)}</td></tr>)}</tbody></table></div></div>
+        <div className="panel">
+          <div className="panel-heading"><h2>Balance sheet</h2></div>
+          {!data.balanceSheetReconciliation.isBalanced && <div className="alert alert-error" role="alert">
+            Balance sheet does not balance. Total assets are {money(data.balanceSheetReconciliation.assetsZmw)}, while liabilities and equity total {money(data.balanceSheetReconciliation.liabilitiesAndEquityZmw)}. Difference: {money(data.balanceSheetReconciliation.differenceZmw)}.
+          </div>}
+          <div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Amount</th></tr></thead><tbody>{data.balanceSheet.map((row, index) => <tr key={`${row.code}-${index}`}><td>{row.code} {row.name}</td><td>{row.type}</td><td>{money(row.amountZmw)}</td></tr>)}</tbody></table></div>
+        </div>
       </section>
       <section className="panel">
         <div className="panel-heading"><h2>Journal entries in period</h2><span>{data.entries.length} entries</span></div>

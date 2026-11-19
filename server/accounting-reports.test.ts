@@ -91,6 +91,12 @@ test("year-end reports use the requested period and balance through its end date
   assert.equal(reports.balanceSheet.at(-1)?.amountZmw, "270.00");
   assert.equal(assets, 1770);
   assert.equal(liabilitiesAndEquity, 1770);
+  assert.deepEqual(reports.balanceSheetReconciliation, {
+    assetsZmw: "1770.00",
+    liabilitiesAndEquityZmw: "1770.00",
+    differenceZmw: "0.00",
+    isBalanced: true,
+  });
 });
 
 test("income and expenses include both report boundary dates but exclude adjacent dates", () => {
@@ -156,6 +162,7 @@ test("year-end reports keep accumulated losses negative while the balance sheet 
     .reduce((sum, row) => sum + Number(row.amountZmw), 0);
   assert.equal(assets, 950);
   assert.equal(liabilitiesAndEquity, 950);
+  assert.equal(reports.balanceSheetReconciliation.isBalanced, true);
 });
 
 test("year-end reports keep earlier gains in accumulated earnings after a current-year loss", () => {
@@ -233,6 +240,36 @@ test("report export rows exactly reflect the displayed report rows", () => {
   assert.deepEqual(exports.balanceSheet.slice(1), reports.balanceSheet.map((row) => [
     row.code, row.name, row.type, row.amountZmw,
   ]));
+});
+
+test("unbalanced balance sheets report and export the difference without changing journal lines", () => {
+  const originalLines: AccountingReportLine[] = [
+    { accountId: 1, entryDate: "2026-01-01", debitZmw: "100.00", creditZmw: "0.00" },
+    // The balanced journal's other account is missing from the report's account list.
+    { accountId: 999, entryDate: "2026-01-01", debitZmw: "0.00", creditZmw: "100.00" },
+  ];
+  const linesBeforeReport = structuredClone(originalLines);
+  assert.equal(
+    originalLines.reduce((sum, line) => sum + Number(line.debitZmw), 0),
+    originalLines.reduce((sum, line) => sum + Number(line.creditZmw), 0),
+    "source journal lines remain balanced",
+  );
+
+  const reports = calculateAccountingReports(accounts, originalLines, "2026-01-01", "2026-12-31");
+
+  assert.deepEqual(reports.balanceSheetReconciliation, {
+    assetsZmw: "100.00",
+    liabilitiesAndEquityZmw: "0.00",
+    differenceZmw: "100.00",
+    isBalanced: false,
+  });
+  assert.deepEqual(originalLines, linesBeforeReport, "reporting must not modify journal lines");
+  const exportRows = accountingReportExportRows(reports).balanceSheet;
+  assert.deepEqual(exportRows.slice(-3), [
+    ["", "Total assets", "Reconciliation", "100.00"],
+    ["", "Liabilities and equity", "Reconciliation", "0.00"],
+    ["", "WARNING: Balance sheet does not balance", "Difference ZMW", "100.00"],
+  ]);
 });
 
 test("cash, bank, and mobile-money balances remain separate in reports and exports", () => {
