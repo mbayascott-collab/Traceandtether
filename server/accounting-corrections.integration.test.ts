@@ -5,9 +5,10 @@ import express, { type RequestHandler } from "express";
 import { and, eq, inArray, like, or } from "drizzle-orm";
 import test from "node:test";
 import {
-  accountingCorrections, businessAuditLogs, businessExpenses, journalEntries, journalLines, ownerFundTransactions,
+  accountingAccounts, accountingCorrections, businessAuditLogs, businessExpenses, journalEntries, journalLines,
+  ownerFundTransactions,
 } from "../shared/schema";
-import { operatingExpenseAccountKey } from "./accounting-posting";
+import { cashAccountKeyForMethod, operatingExpenseAccountKey } from "./accounting-posting";
 
 test("managers are forbidden from both accounting correction endpoints", {
   skip: !process.env.DATABASE_URL,
@@ -115,6 +116,15 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(expenseResult.response.status, 201, JSON.stringify(expenseResult.payload));
     const createdExpenseId = Number(expenseResult.payload.expense.id);
     expenseId = createdExpenseId;
+    const [originalExpenseRecord] = await db.select().from(businessExpenses)
+      .where(eq(businessExpenses.id, createdExpenseId));
+    const [originalExpenseJournal] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.sourceKey, `business-expense-${createdExpenseId}`));
+    assert.ok(originalExpenseRecord);
+    assert.ok(originalExpenseJournal);
+    const originalExpenseJournalLines = await db.select().from(journalLines)
+      .where(eq(journalLines.journalEntryId, originalExpenseJournal.id))
+      .orderBy(journalLines.id);
 
     const fundResult = await request("/api/accounting/funds", {
       idempotencyKey: randomUUID(),
@@ -221,9 +231,22 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     }
 
     const [originalExpense] = await db.select().from(businessExpenses).where(eq(businessExpenses.id, createdExpenseId));
-    assert.equal(originalExpense.amountZmw, "10.00");
-    assert.equal(originalExpense.category, "other");
-    assert.equal(originalExpense.expenseDate, "2002-01-10");
+    assert.deepEqual(
+      originalExpense,
+      originalExpenseRecord,
+      "correcting an expense must leave its original record unchanged",
+    );
+    const [preservedOriginalExpenseJournal] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.id, originalExpenseJournal.id));
+    assert.deepEqual(preservedOriginalExpenseJournal, originalExpenseJournal);
+    const preservedOriginalExpenseJournalLines = await db.select().from(journalLines)
+      .where(eq(journalLines.journalEntryId, originalExpenseJournal.id))
+      .orderBy(journalLines.id);
+    assert.deepEqual(
+      preservedOriginalExpenseJournalLines,
+      originalExpenseJournalLines,
+      "correcting an expense must leave its original journal lines unchanged",
+    );
     const [originalFund] = await db.select().from(ownerFundTransactions).where(eq(ownerFundTransactions.id, createdFundId));
     assert.equal(originalFund.amountZmw, "25.00");
     assert.equal(originalFund.kind, "owner_contribution");
@@ -355,6 +378,22 @@ test("expense and owner-fund corrections preserve originals and post linked bala
           previousLines.map((line) => lineKey(line, true)).sort(),
           `${reversal.entryNumber} must reverse the immediately prior journal`,
         );
+        if (correction.recordType === "business_expense") {
+          const [selectedCashAccount] = await db.select().from(accountingAccounts)
+            .where(eq(
+              accountingAccounts.systemKey,
+              cashAccountKeyForMethod(correction.method as "cash" | "bank_transfer" | "mobile_money" | "other"),
+            ));
+          assert.ok(selectedCashAccount, `the ${correction.method} account must exist`);
+          const replacementLines = await db.select().from(journalLines)
+            .where(eq(journalLines.journalEntryId, replacement.id));
+          assert.ok(
+            replacementLines.some((line) =>
+              line.accountId === selectedCashAccount.id &&
+              line.creditZmw === correction.amountZmw),
+            `${replacement.entryNumber} must credit the selected ${correction.method} account`,
+          );
+        }
         previousEntry = replacement;
       }
     }
