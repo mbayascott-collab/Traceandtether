@@ -209,6 +209,69 @@ test("inventory endpoint reconciles location values and quantities with ledger b
         );
       }
     }
+
+    const eventRequests = await Promise.all(["stock_return", "stock_damage"].map((kind) => fetch(`${baseUrl}/api/inventory/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind, productId: firstProduct.id, locationId: inactiveLocation.id,
+        quantity: 1, reason: "Inactive location route regression", reference: null,
+      }),
+    })));
+    for (const response of eventRequests) {
+      const payload = await response.json() as { error?: string };
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.match(payload.error ?? "", /active stock location/i);
+    }
+
+    const transferRequests = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/transfers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: firstProduct.id, fromLocationId: inactiveLocation.id, toLocationId: locationA.id,
+          quantity: 1, reason: "Inactive source route regression", reference: null,
+        }),
+      }),
+      fetch(`${baseUrl}/api/inventory/transfers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: firstProduct.id, fromLocationId: locationA.id, toLocationId: inactiveLocation.id,
+          quantity: 1, reason: "Inactive destination route regression", reference: null,
+        }),
+      }),
+    ]);
+    for (const response of transferRequests) {
+      const payload = await response.json() as { error?: string };
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.match(payload.error ?? "", /active stock locations/i);
+    }
+
+    const [historyResponse, inventoryAfterRejectedWrites] = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/movements`),
+      fetch(`${baseUrl}/api/inventory`),
+    ]);
+    const historyPayload = await historyResponse.json() as { movements: any[] };
+    const inventoryAfterPayload = await inventoryAfterRejectedWrites.json() as { inventory: any[] };
+    assert.equal(historyResponse.status, 200);
+    assert.equal(inventoryAfterRejectedWrites.status, 200);
+    assert.ok(historyPayload.movements.some((movement) =>
+      movement.productId === firstProduct.id
+      && movement.locationId === inactiveLocation.id
+      && movement.kind === "opening_stock"
+      && movement.quantityDelta === 1,
+    ), "historical movement at an inactive location remains readable");
+    const productAfterRejectedWrites = inventoryAfterPayload.inventory.find((item) => item.id === firstProduct.id);
+    assert.ok(productAfterRejectedWrites);
+    const inactiveBalanceAfterRejectedWrites = productAfterRejectedWrites.locations.find(
+      (location: { id: number | null }) => location.id === inactiveLocation.id,
+    );
+    assert.deepEqual(
+      [inactiveBalanceAfterRejectedWrites?.onHand, inactiveBalanceAfterRejectedWrites?.reserved],
+      [1, 0],
+      "historical balance at an inactive location remains readable and unchanged",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

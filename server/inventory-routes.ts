@@ -653,9 +653,12 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [product] = await tx.select({ id: products.id }).from(products).where(eq(products.id, parsed.data.productId)).for("update").limit(1);
       if (!product) return { error: "Product not found.", status: 404 };
-      const locations = await tx.select({ id: inventoryLocations.id }).from(inventoryLocations)
-        .where(inArray(inventoryLocations.id, [parsed.data.fromLocationId, parsed.data.toLocationId]));
-      if (locations.length !== 2) return { error: "Choose two active stock locations.", status: 400 };
+      const locations = await tx.select({ id: inventoryLocations.id, active: inventoryLocations.active }).from(inventoryLocations)
+        .where(inArray(inventoryLocations.id, [parsed.data.fromLocationId, parsed.data.toLocationId]))
+        .orderBy(asc(inventoryLocations.id)).for("update");
+      if (locations.length !== 2 || locations.some((location) => !location.active)) {
+        return { error: "Choose two active stock locations.", status: 400 };
+      }
       const source = await balance(tx, product.id, parsed.data.fromLocationId);
       if (source.onHand - source.reserved < parsed.data.quantity) return { error: "That location does not have enough unreserved stock to transfer.", status: 409 };
       const transferKey = `transfer-${randomUUID()}`;
@@ -684,9 +687,10 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       const [product] = await tx.select({ id: products.id }).from(products).where(eq(products.id, parsed.data.productId)).for("update").limit(1);
       if (!product) return { error: "Product not found.", status: 404 };
-      const [location] = await tx.select({ id: inventoryLocations.id }).from(inventoryLocations)
-        .where(eq(inventoryLocations.id, parsed.data.locationId)).limit(1);
+      const [location] = await tx.select({ id: inventoryLocations.id, active: inventoryLocations.active }).from(inventoryLocations)
+        .where(eq(inventoryLocations.id, parsed.data.locationId)).for("update").limit(1);
       if (!location) return { error: "Stock location not found.", status: 404 };
+      if (!location.active) return { error: "Choose an active stock location.", status: 400 };
       const [locBalance] = await tx.select({ quantity: sum(inventoryMovements.quantityDelta) }).from(inventoryMovements)
         .where(and(eq(inventoryMovements.productId, product.id), eq(inventoryMovements.locationId, location.id)));
       const locOnHand = Number(locBalance?.quantity ?? 0);
