@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { formatSupplierDeliveryVariance, supplierReportCsv } from "../../shared/supplier-report-csv";
+import SupplierSpendPrintDocument from "./SupplierSpendPrintDocument";
 
 type ProductMetric = {
   productId: number; name: string; sku: string; unit: string; unitsSold: number;
@@ -173,11 +174,18 @@ export default function BusinessAnalyticsWorkspace() {
       <section className="panel analytics-panel analytics-supplier-panel">
         <div className="panel-heading">
           <div><h2>Supplier spend and delivery</h2><span>Orders by order date; costs and payments by their recorded dates</span></div>
-          <button className="button button-secondary button-small" type="button" disabled={loading || !supplierReportMatchesRange}
-            title={supplierReportMatchesRange ? "Download the supplier report as CSV" : "Update analytics to load this date range"}
-            onClick={() => downloadSupplierReport(supplierReport)}>
-            {supplierReportMatchesRange ? "Download CSV" : "Update analytics to download"}
-          </button>
+          <div className="analytics-supplier-actions">
+            <button className="button button-secondary button-small" type="button" disabled={loading || !supplierReportMatchesRange}
+              title={supplierReportMatchesRange ? "Download the supplier report as CSV" : "Update analytics to load this date range"}
+              onClick={() => downloadSupplierReport(supplierReport)}>
+              {supplierReportMatchesRange ? "Download CSV" : "Update analytics to download"}
+            </button>
+            <button className="button button-secondary button-small" type="button" disabled={loading || !supplierReportMatchesRange}
+              title={supplierReportMatchesRange ? "Print or save the supplier report as PDF" : "Update analytics to load this date range"}
+              onClick={() => window.print()}>
+              Print / Save PDF
+            </button>
+          </div>
         </div>
         <div className="analytics-supplier-totals">
           <div><span>Goods ordered</span><strong>{money(supplierReport.totals.orderedGoodsZmw)}</strong></div>
@@ -283,6 +291,7 @@ export default function BusinessAnalyticsWorkspace() {
         <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis and counted once in the month of the recorded expense date. Supplier payments are reported separately and are not costs. Delivery summaries use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. The shipment detail and export show only dates recorded directly on each shipment. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
       </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
+      <SupplierSpendPrintDocument report={supplierReport} />
     </>}
   </>;
 }
