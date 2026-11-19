@@ -573,6 +573,10 @@ export async function updateSalesOrderStatus(
 export async function createSalesDelivery(id: number, input: { idempotencyKey: string; deliveryDate: string; lines: { salesOrderLineId: number; quantity: number }[] }): Promise<void> {
   await request(`/api/sales-orders/${id}/deliveries`, { method: "POST", body: JSON.stringify(input) });
 }
+export async function sendSalesDeliveryInvoice(deliveryId: number): Promise<string> {
+  const result = await request<{ message: string }>(`/api/sales-deliveries/${deliveryId}/send-invoice`, { method: "POST" });
+  return result.message;
+}
 export async function recordSalesReturn(
   deliveryLineId: number,
   input: { idempotencyKey: string; locationId: number; quantity: number; returnDate: string; reason: string },

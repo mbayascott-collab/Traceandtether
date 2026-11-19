@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, setSalesOrderAttribution, updateSalesOrderStatus,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
@@ -46,6 +46,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
   const [stockLocationChoices, setStockLocationChoices] = useState<Record<string, number | "auto">>({});
   const [invoicePrint, setInvoicePrint] = useState<{ order: SalesOrder; delivery: SalesDelivery | null } | null>(null);
+  const [deliveryInvoiceSendingId, setDeliveryInvoiceSendingId] = useState<number | null>(null);
+  const [deliveryInvoiceFeedback, setDeliveryInvoiceFeedback] = useState<Record<number, { kind: "success" | "error"; message: string }>>({});
   const [deliveryFormOrder, setDeliveryFormOrder] = useState<SalesOrder | null>(null);
   const [deliveryRequestKey, setDeliveryRequestKey] = useState("");
   const [deliverySubmitting, setDeliverySubmitting] = useState(false);
@@ -124,6 +126,20 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       setError(cause instanceof Error ? cause.message : "Could not record this delivery.");
     } finally {
       setDeliverySubmitting(false);
+    }
+  }
+  async function emailDeliveryInvoice(delivery: SalesDelivery) {
+    if (deliveryInvoiceSendingId !== null) return;
+    setDeliveryInvoiceSendingId(delivery.id);
+    setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "success", message: "Sending invoice…" } }));
+    try {
+      const message = await sendSalesDeliveryInvoice(delivery.id);
+      setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "success", message } }));
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Could not send the delivery invoice.";
+      setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "error", message } }));
+    } finally {
+      setDeliveryInvoiceSendingId((current) => current === delivery.id ? null : current);
     }
   }
   async function submitReceipt(event: FormEvent<HTMLFormElement>, delivery: SalesDelivery) {
@@ -427,9 +443,23 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                 </small>)}
               </div>
             </span>)}
-            {o.deliveries.map((delivery) => <button key={`invoice-${delivery.id}`} className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
-              Invoice {delivery.deliveryNumber} / PDF
-            </button>)}
+            {o.deliveries.map((delivery) => <div key={`invoice-${delivery.id}`} className="delivery-actions">
+              <button className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
+                Invoice {delivery.deliveryNumber} / PDF
+              </button>
+              <button
+                className="button button-secondary button-small"
+                disabled={deliveryInvoiceSendingId !== null}
+                onClick={() => emailDeliveryInvoice(delivery)}
+                aria-label={`Email invoice for ${delivery.deliveryNumber} to ${customers.find((customer) => customer.id === o.customerId)?.email || "the customer's saved email address"}`}
+              >
+                {deliveryInvoiceSendingId === delivery.id ? "Sending invoice…" : "Email invoice"}
+              </button>
+              {deliveryInvoiceFeedback[delivery.id] && <small
+                className={deliveryInvoiceFeedback[delivery.id]!.kind === "error" ? "order-action-error" : ""}
+                role={deliveryInvoiceFeedback[delivery.id]!.kind === "error" ? "alert" : "status"}
+              >{deliveryInvoiceFeedback[delivery.id]!.message}</small>}
+            </div>)}
             {o.deliveries.map((delivery) => <div key={`returns-${delivery.id}`} className="delivery-return-list">
               <strong>Returns · {delivery.deliveryNumber}</strong>
               {delivery.lines.map((line) => <div key={line.salesDeliveryLineId}>

@@ -21,6 +21,7 @@ import { inspectDeliveryProof } from "./delivery-proof";
 import { allocateReservationConsumption, chooseSalesStockAllocations } from "./sales-stock-allocation";
 import { requireBusinessOwner } from "./access-control";
 import { sendCustomerQuoteEmail } from "./customer-quote-email";
+import { sendSalesDeliveryInvoiceEmail } from "./sales-delivery-invoice-email";
 import {
   customerQuoteDeliveryEventSchema, hasValidDeliveryWebhookToken,
   isValidCustomerQuoteDeliveryEventTime, shouldApplyCustomerQuoteDeliveryEvent,
@@ -215,9 +216,13 @@ async function recordDelivery(tx: any, orderId: number,
 export function registerSalesRoutes(
   app: Express,
   owner: RequestHandler,
-  dependencies: { sendCustomerQuoteEmail?: typeof sendCustomerQuoteEmail } = {},
+  dependencies: {
+    sendCustomerQuoteEmail?: typeof sendCustomerQuoteEmail;
+    sendSalesDeliveryInvoiceEmail?: typeof sendSalesDeliveryInvoiceEmail;
+  } = {},
 ) {
   const sendQuoteEmail = dependencies.sendCustomerQuoteEmail ?? sendCustomerQuoteEmail;
+  const sendDeliveryInvoiceEmail = dependencies.sendSalesDeliveryInvoiceEmail ?? sendSalesDeliveryInvoiceEmail;
   const publicShopAnalyticsOwner = requireBusinessOwner(
     "Only the business owner can view public shop request activity.",
   );
@@ -634,6 +639,59 @@ export function registerSalesRoutes(
         totalZmw: money(items.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)),
       };
     }) });
+  });
+  app.post("/api/sales-deliveries/:id/send-invoice", owner, async (req, res) => {
+    const deliveryId = idOf(req.params.id);
+    if (!deliveryId) return bad(res, "Invalid delivery invoice.");
+    const [delivery] = await db.select({
+      id: salesDeliveries.id,
+      deliveryNumber: salesDeliveries.deliveryNumber,
+      deliveryDate: salesDeliveries.deliveryDate,
+      orderNumber: salesOrders.orderNumber,
+      customerName: customers.name,
+      customerEmail: customers.email,
+    }).from(salesDeliveries)
+      .innerJoin(salesOrders, eq(salesOrders.id, salesDeliveries.salesOrderId))
+      .innerJoin(customers, eq(customers.id, salesOrders.customerId))
+      .where(eq(salesDeliveries.id, deliveryId)).limit(1);
+    if (!delivery) return res.status(404).json({ error: "Delivery note not found." });
+    if (!delivery.customerEmail) {
+      return bad(res, "Add a saved email address to this customer before sending the invoice.");
+    }
+    if (!z.string().email().safeParse(delivery.customerEmail).success) {
+      return bad(res, "The customer's saved email address is invalid. Update it before sending the invoice.");
+    }
+    const lines = await db.select({
+      productName: products.name,
+      sku: products.sku,
+      quantity: salesDeliveryLines.quantity,
+      unitPriceZmw: salesOrderLines.unitPriceZmw,
+    }).from(salesDeliveryLines)
+      .innerJoin(salesOrderLines, eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId))
+      .innerJoin(products, eq(products.id, salesOrderLines.productId))
+      .where(eq(salesDeliveryLines.deliveryId, delivery.id))
+      .orderBy(asc(products.name), asc(salesDeliveryLines.id));
+    if (!lines.length) return res.status(409).json({ error: "This delivery has no items to invoice." });
+    const invoiceNumber = `INV-${delivery.deliveryNumber.replace(/^DN-/, "")}`;
+    const invoiceLines = lines.map((line) => ({
+      ...line,
+      lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+    }));
+    const totalZmw = money(invoiceLines.reduce(
+      (total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n,
+    ));
+    const outcome = await sendDeliveryInvoiceEmail({
+      invoiceNumber,
+      deliveryNumber: delivery.deliveryNumber,
+      deliveryDate: delivery.deliveryDate,
+      orderNumber: delivery.orderNumber,
+      customerName: delivery.customerName,
+      customerEmail: delivery.customerEmail,
+      totalZmw,
+      lines: invoiceLines,
+    });
+    if (!outcome.ok) return res.status(502).json({ error: outcome.error });
+    res.json({ message: `Invoice sent to ${delivery.customerEmail}.` });
   });
   app.post("/api/sales-delivery-lines/:id/returns", owner, async (req, res) => {
     const deliveryLineId = idOf(req.params.id);

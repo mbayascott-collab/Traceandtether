@@ -4,6 +4,7 @@ import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { customers, products, salesDeliveries, salesDeliveryLines, salesOrderLines, salesOrders } from "../shared/schema";
+import type { SalesDeliveryInvoiceEmailContent } from "./sales-delivery-invoice-email";
 
 function toCents(amount: string): bigint {
   const [whole, fraction = ""] = amount.split(".");
@@ -20,11 +21,18 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
 
   const suffix = randomUUID();
   const app = express();
+  const emailedInvoices: SalesDeliveryInvoiceEmailContent[] = [];
+  let failEmail = false;
   const owner: RequestHandler = (_req, res, next) => {
     res.locals.actor = { clerkUserId: `sales-invoice-${suffix}`, email: `sales-invoice-${suffix}@example.test`, role: "owner" };
     next();
   };
-  registerSalesRoutes(app, owner);
+  registerSalesRoutes(app, owner, {
+    sendSalesDeliveryInvoiceEmail: async (content) => {
+      emailedInvoices.push(content);
+      return failEmail ? { ok: false, error: "Gmail test failure." } : { ok: true };
+    },
+  });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
@@ -39,6 +47,7 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
   try {
     const [customer] = await db.insert(customers).values({
       name: `Sales invoice customer ${suffix}`,
+      email: `sales-invoice-${suffix}@example.test`,
       status: "active",
     }).returning();
     customerId = customer.id;
@@ -124,6 +133,45 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
       toCents(savedOrder.totalZmw),
       "delivery-specific totals should reconcile to the full order total",
     );
+
+    const sendResponse = await fetch(`${baseUrl}/api/sales-deliveries/${second.id}/send-invoice`, { method: "POST" });
+    assert.equal(sendResponse.status, 200);
+    assert.deepEqual(emailedInvoices[0], {
+      invoiceNumber: `INV-${second.deliveryNumber.replace(/^DN-/, "")}`,
+      deliveryNumber: second.deliveryNumber,
+      deliveryDate: "2026-11-12",
+      orderNumber: order.orderNumber,
+      customerName: `Sales invoice customer ${suffix}`,
+      customerEmail: `sales-invoice-${suffix}@example.test`,
+      totalZmw: "37.39",
+      lines: [
+        {
+          productName: `Invoice item A ${suffix}`, sku: `SINV-A-${suffix}`, quantity: 3,
+          unitPriceZmw: "12.34", lineTotalZmw: "37.02",
+        },
+        {
+          productName: `Invoice item B ${suffix}`, sku: `SINV-B-${suffix}`, quantity: 2,
+          unitPriceZmw: "0.17", lineTotalZmw: "0.34",
+        },
+        {
+          productName: `Invoice item C ${suffix}`, sku: `SINV-C-${suffix}`, quantity: 1,
+          unitPriceZmw: "0.03", lineTotalZmw: "0.03",
+        },
+      ],
+    });
+
+    failEmail = true;
+    const failureResponse = await fetch(`${baseUrl}/api/sales-deliveries/${first.id}/send-invoice`, { method: "POST" });
+    assert.equal(failureResponse.status, 502);
+    assert.deepEqual(await failureResponse.json(), { error: "Gmail test failure." });
+    const afterSend = await fetch(`${baseUrl}/api/sales-orders`);
+    assert.equal(afterSend.status, 200);
+    const afterSendPayload = await afterSend.json() as { orders: any[] };
+    const afterSendOrder = afterSendPayload.orders.find((item) => item.id === order.id);
+    assert.deepEqual(afterSendOrder.deliveries, savedOrder.deliveries, "sending an invoice must not alter delivery records");
+    assert.equal(afterSendOrder.status, savedOrder.status, "sending an invoice must not alter the order");
+    assert.equal(afterSendOrder.totalZmw, savedOrder.totalZmw);
+    assert.equal(afterSendOrder.deliveredZmw, savedOrder.deliveredZmw);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
