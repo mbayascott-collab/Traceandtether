@@ -29,6 +29,46 @@ const expenseEmpty = { campaignId: "", category: "Advertising", description: "",
 const customerGroupEmpty = { name: "", minimumFulfilledOrders: "", maximumFulfilledOrders: "", noOrderInLastDays: "", minimumLifetimeSalesZmw: "" };
 type CustomerGroupForm = typeof customerGroupEmpty;
 
+export function CampaignCustomerGroupSelector({
+  canManage,
+  groups,
+  value,
+  onChange,
+}: {
+  canManage: boolean;
+  groups: CustomerGroup[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  if (!canManage) return null;
+  return (
+    <label>Saved customer group
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">No saved group</option>
+        {groups.map((group) => (
+          <option key={group.id} value={group.id}>
+            {group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}
+          </option>
+        ))}
+      </select>
+      <span className="field-hint">Membership stays linked to the group’s current saved rules.</span>
+    </label>
+  );
+}
+
+export function CampaignCustomerGroupSummary({
+  canManage,
+  group,
+  audienceStatus,
+}: {
+  canManage: boolean;
+  group: CustomerGroup | undefined;
+  audienceStatus: string;
+}) {
+  if (!canManage || !group) return null;
+  return <> · {group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}{audienceStatus}</>;
+}
+
 async function request(path: string, method = "GET", body?: unknown) {
   const response = await fetch(path, {
     method, headers: body ? { "Content-Type": "application/json" } : undefined,
@@ -385,7 +425,12 @@ export default function MarketingWorkspace() {
               <div className="form-grid"><label>Channel<input placeholder="Social, retail, email…" value={campaignForm.channel} onChange={(e) => setCampaignForm({ ...campaignForm, channel: e.target.value })} /></label><label>Status<select value={campaignForm.status} onChange={(e) => setCampaignForm({ ...campaignForm, status: e.target.value })}>{["draft","active","paused","completed","cancelled"].map((x) => <option key={x}>{x}</option>)}</select></label></div>
               <label>Objective<textarea rows={2} value={campaignForm.objective} onChange={(e) => setCampaignForm({ ...campaignForm, objective: e.target.value })} /></label>
               <div className="form-grid"><label>Launch date<input type="date" value={campaignForm.startsOn} onChange={(e) => setCampaignForm({ ...campaignForm, startsOn: e.target.value })} /><span className="field-hint">Set the status to active and choose a future date to schedule link attribution.</span></label><label>Ends<input type="date" value={campaignForm.endsOn} onChange={(e) => setCampaignForm({ ...campaignForm, endsOn: e.target.value })} /></label></div>
-               {canManageCustomerGroups && <label>Saved customer group<select value={campaignForm.customerGroupId} onChange={(e) => setCampaignForm({ ...campaignForm, customerGroupId: e.target.value })}><option value="">No saved group</option>{customerGroups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}</option>)}</select><span className="field-hint">Membership stays linked to the group’s current saved rules.</span></label>}
+                <CampaignCustomerGroupSelector
+                  canManage={canManageCustomerGroups}
+                  groups={customerGroups}
+                  value={campaignForm.customerGroupId}
+                  onChange={(value) => setCampaignForm({ ...campaignForm, customerGroupId: value })}
+                />
               <label>Budget (ZMW, optional)<input type="number" min="0" step="0.01" value={campaignForm.budgetZmw} onChange={(e) => setCampaignForm({ ...campaignForm, budgetZmw: e.target.value })} /></label>
               <button className="button button-primary button-small"><Plus /> {editingCampaign ? "Save campaign" : "Add campaign"}</button>
               {editingCampaign && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCampaign(null); setCampaignForm(campaignEmpty); }}><X /> Cancel edit</button>}
@@ -402,7 +447,7 @@ export default function MarketingWorkspace() {
                  return <article className="marketing-row" key={item.id}>
                    <div>
                      <strong>{item.name}</strong>
-                     <span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}{canManageCustomerGroups && group ? ` · ${group.name} · ${group.memberCount} customer${group.memberCount === 1 ? "" : "s"}` : ""}{canManageCustomerGroups && group ? audienceStatus : ""}
+                      <span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}<CampaignCustomerGroupSummary canManage={canManageCustomerGroups} group={group} audienceStatus={audienceStatus} />
                      </span>
                      <input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} />
                    </div>

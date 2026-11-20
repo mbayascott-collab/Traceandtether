@@ -151,10 +151,13 @@ test("managers cannot read or change saved campaign audience assignments", {
       rules: { minimumFulfilledOrders: 2 },
     }).returning();
     groupId = group.id;
+    const audienceEnabledAt = new Date("2026-11-01T00:00:00.000Z");
     const [campaign] = await db.insert(marketingCampaigns).values({
       name: `Audience campaign ${suffix}`,
       status: "active",
       customerGroupId: group.id,
+      startsOn: "2099-01-01",
+      audienceSnapshotEnabledAt: audienceEnabledAt,
     }).returning();
     campaignId = campaign.id;
 
@@ -166,6 +169,8 @@ test("managers cannot read or change saved campaign audience assignments", {
     assert.equal(managerCampaigns.response.status, 200);
     const managerCampaign = managerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id);
     assert.equal(managerCampaign.customerGroupId, null);
+    assert.equal(managerCampaign.audienceSnapshotCapturedAt, null);
+    assert.equal(managerCampaign.audienceSnapshotEnabledAt, null);
     assert.equal(JSON.stringify(managerCampaigns.payload).includes(group.name), false);
 
     const deniedCreate = await request("manager", "/api/marketing/campaigns", "POST", {
@@ -188,6 +193,8 @@ test("managers cannot read or change saved campaign audience assignments", {
     });
     assert.equal(managerEdit.response.status, 200, JSON.stringify(managerEdit.payload));
     assert.equal(managerEdit.payload.campaign.customerGroupId, null);
+    assert.equal(managerEdit.payload.campaign.audienceSnapshotCapturedAt, null);
+    assert.equal(managerEdit.payload.campaign.audienceSnapshotEnabledAt, null);
     const [unchangedAssignment] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
     assert.equal(unchangedAssignment.customerGroupId, group.id);
 
@@ -196,7 +203,9 @@ test("managers cannot read or change saved campaign audience assignments", {
     assert.ok(ownerGroups.payload.groups.some((item: any) => item.id === group.id && item.name === group.name));
     const ownerCampaigns = await request("owner", "/api/marketing/campaigns");
     assert.equal(ownerCampaigns.response.status, 200);
-    assert.equal(ownerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id).customerGroupId, group.id);
+    const ownerCampaign = ownerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id);
+    assert.equal(ownerCampaign.customerGroupId, group.id);
+    assert.equal(new Date(ownerCampaign.audienceSnapshotEnabledAt).toISOString(), audienceEnabledAt.toISOString());
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));

@@ -171,6 +171,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
           ...campaign,
           customerGroupId: null,
           audienceSnapshotCapturedAt: null,
+          audienceSnapshotEnabledAt: null,
         })),
     });
   });
@@ -207,7 +208,12 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return [created];
     });
     res.status(201).json({
-      campaign: canManageAudiences ? campaign : { ...campaign, customerGroupId: null },
+      campaign: canManageAudiences ? campaign : {
+        ...campaign,
+        customerGroupId: null,
+        audienceSnapshotCapturedAt: null,
+        audienceSnapshotEnabledAt: null,
+      },
     });
   });
   app.patch("/api/marketing/campaigns/:id", owner, async (req, res) => {
@@ -242,7 +248,12 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     });
     if (!campaign) return res.status(404).json({ error: "Campaign not found." });
     res.json({
-      campaign: canManageAudiences ? campaign : { ...campaign, customerGroupId: null },
+      campaign: canManageAudiences ? campaign : {
+        ...campaign,
+        customerGroupId: null,
+        audienceSnapshotCapturedAt: null,
+        audienceSnapshotEnabledAt: null,
+      },
     });
   });
   app.post("/api/marketing/campaigns/:id/replace-link", owner, campaignLinkOwnerOnly, async (req, res) => {

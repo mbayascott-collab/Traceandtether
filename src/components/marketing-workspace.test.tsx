@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CustomerGroupsPanel } from "./MarketingWorkspace";
+import {
+  CampaignCustomerGroupSelector, CampaignCustomerGroupSummary, CustomerGroupsPanel,
+} from "./MarketingWorkspace";
 
 const group = {
   id: 7,
@@ -67,4 +69,35 @@ test("owners retain customer-group management, export, and member details", () =
   assert.match(markup, /Repeat customers members/);
   assert.match(markup, /Private customer/);
   assert.match(markup, /private@example\.test/);
+});
+
+function renderCampaignAudience(canManage: boolean) {
+  return renderToStaticMarkup(createElement("div", null,
+    createElement(CampaignCustomerGroupSelector, {
+      canManage,
+      groups: [group],
+      value: "7",
+      onChange: () => {},
+    }),
+    createElement("span", null, createElement(CampaignCustomerGroupSummary, {
+      canManage,
+      group,
+      audienceStatus: " · Audience saved today",
+    })),
+  ));
+}
+
+test("managers cannot see saved groups in campaign controls or rows", () => {
+  const markup = renderCampaignAudience(false);
+
+  assert.doesNotMatch(markup, /Saved customer group|Repeat customers|1 customer|Audience saved/);
+});
+
+test("owners retain saved-group selection and campaign row details", () => {
+  const markup = renderCampaignAudience(true);
+
+  assert.match(markup, /Saved customer group/);
+  assert.match(markup, /Repeat customers/);
+  assert.match(markup, /1 customer/);
+  assert.match(markup, /Audience saved today/);
 });
