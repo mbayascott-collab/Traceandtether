@@ -88,7 +88,9 @@ test("campaign link replacement is owner-only while managers retain ordinary cam
     const [unchangedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
     assert.equal(unchangedCampaign.trackingCode, suffix);
 
-    const ownerReplace = await request("test-owner", `/api/marketing/campaigns/${campaign.id}/replace-link`, "POST");
+    const ownerReplace = await request("test-owner", `/api/marketing/campaigns/${campaign.id}/replace-link`, "POST", {
+      trackingCode: suffix,
+    });
     assert.equal(ownerReplace.response.status, 200, JSON.stringify(ownerReplace.payload));
     assert.notEqual(ownerReplace.payload.campaign.trackingCode, suffix);
 

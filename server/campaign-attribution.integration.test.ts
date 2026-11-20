@@ -58,10 +58,14 @@ test("only owners can replace campaign links", {
       name: campaignName, trackingCode, status: "active",
     }).returning();
     campaignId = campaign.id;
-    const replaceLink = async (role: "manager" | "owner") => {
+    const replaceLink = async (role: "manager" | "owner", currentTrackingCode?: string) => {
       const response = await fetch(`${baseUrl}/api/marketing/campaigns/${campaign.id}/replace-link`, {
         method: "POST",
-        headers: { "x-test-role": role },
+        headers: {
+          "x-test-role": role,
+          ...(currentTrackingCode === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: currentTrackingCode === undefined ? undefined : JSON.stringify({ trackingCode: currentTrackingCode }),
       });
       return { response, payload: await response.json() as any };
     };
@@ -72,10 +76,27 @@ test("only owners can replace campaign links", {
       .from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
     assert.equal(unchangedCampaign?.trackingCode, trackingCode);
 
-    const allowed = await replaceLink("owner");
+    const allowed = await replaceLink("owner", trackingCode);
     assert.equal(allowed.response.status, 200, JSON.stringify(allowed.payload));
     assert.ok(allowed.payload.campaign.trackingCode);
     assert.notEqual(allowed.payload.campaign.trackingCode, trackingCode);
+
+    const concurrentResults = await Promise.all([
+      replaceLink("owner", allowed.payload.campaign.trackingCode),
+      replaceLink("owner", allowed.payload.campaign.trackingCode),
+    ]);
+    assert.deepEqual(concurrentResults.map(({ response }) => response.status).sort(), [200, 409]);
+    const staleResult = concurrentResults.find(({ response }) => response.status === 409)!;
+    assert.match(staleResult.payload.error, /already replaced.*refresh/i);
+    const successfulResult = concurrentResults.find(({ response }) => response.status === 200)!;
+    const [currentCampaign] = await db.select({ trackingCode: marketingCampaigns.trackingCode })
+      .from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(successfulResult.payload.campaign.trackingCode, currentCampaign?.trackingCode);
+    assert.equal(
+      concurrentResults.filter(({ payload }) => payload.campaign?.trackingCode === currentCampaign?.trackingCode).length,
+      1,
+      "only the request that left its returned code active should succeed",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (campaignId) {
@@ -213,7 +234,11 @@ test("public shop campaign links attribute orders and reports count them without
     };
     await submitOrder(0, trackingCode, challenges[0]);
 
-    const replaced = await request(`/api/marketing/campaigns/${campaignId}/replace-link`, undefined, "POST");
+    const replaced = await request(
+      `/api/marketing/campaigns/${campaignId}/replace-link`,
+      { trackingCode },
+      "POST",
+    );
     assert.equal(replaced.response.status, 200, JSON.stringify(replaced.payload));
     const replacementCode = replaced.payload.campaign.trackingCode as string;
     assert.ok(replacementCode);

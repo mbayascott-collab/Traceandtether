@@ -283,7 +283,9 @@ export default function MarketingWorkspace() {
     if (!confirmed) return;
     setError(""); setMessage("");
     try {
-      await request(`/api/marketing/campaigns/${campaign.id}/replace-link`, "POST");
+      await request(`/api/marketing/campaigns/${campaign.id}/replace-link`, "POST", {
+        trackingCode: campaign.trackingCode,
+      });
       setMessage(`A new shop link is ready for ${campaign.name}. The previous link no longer attributes new requests.`);
       await load();
     } catch (reason) { setError(displayError(reason)); }

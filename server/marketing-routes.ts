@@ -81,7 +81,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const parsed = campaignSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
     if (!await hasCustomerGroup(parsed.data.customerGroupId)) return res.status(400).json({ error: "Choose an existing customer group." });
-    const [campaign] = await db.transaction(async (tx) => {
+    const campaign = await db.transaction(async (tx) => {
       const [created] = await tx.insert(marketingCampaigns).values({
         ...parsed.data, trackingCode: randomUUID(),
       }).returning();
@@ -112,18 +112,33 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   app.post("/api/marketing/campaigns/:id/replace-link", owner, campaignLinkOwnerOnly, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
-    const [campaign] = await db.transaction(async (tx) => {
+    const expectedTrackingCode = req.body?.trackingCode;
+    if (typeof expectedTrackingCode !== "string" || expectedTrackingCode.length === 0) {
+      return res.status(400).json({ error: "Refresh the campaign list before replacing its shop link." });
+    }
+    const campaign = await db.transaction(async (tx) => {
       const [updated] = await tx.update(marketingCampaigns)
         .set({ trackingCode: randomUUID(), updatedAt: new Date() })
-        .where(eq(marketingCampaigns.id, id)).returning();
+        .where(and(
+          eq(marketingCampaigns.id, id),
+          eq(marketingCampaigns.trackingCode, expectedTrackingCode),
+        )).returning();
       if (updated) await recordBusinessAudit(tx, {
         entityType: "marketing_campaign", entityId: updated.id, recordLabel: updated.name,
         actor: res.locals.actor, action: "updated", changedFields: ["trackingCode"],
       });
-      return [updated];
+      if (updated) return { campaign: updated, conflict: false };
+      const [existing] = await tx.select({ id: marketingCampaigns.id })
+        .from(marketingCampaigns).where(eq(marketingCampaigns.id, id)).limit(1);
+      return { campaign: undefined, conflict: Boolean(existing) };
     });
-    if (!campaign) return res.status(404).json({ error: "Campaign not found." });
-    res.json({ campaign });
+    if (campaign.conflict) {
+      return res.status(409).json({
+        error: "This campaign link was already replaced. Refresh the campaign list before trying again.",
+      });
+    }
+    if (!campaign.campaign) return res.status(404).json({ error: "Campaign not found." });
+    res.json({ campaign: campaign.campaign });
   });
 
   app.get("/api/marketing/content", owner, async (_req, res) => {
