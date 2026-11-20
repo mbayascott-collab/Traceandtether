@@ -6,6 +6,7 @@ import {
   inventoryLocationValuesCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
+import { filterInventoryMovements } from "../lib/inventory-movement-filter";
 
 type Mode = "overview" | "receipts" | "reservations" | "adjustments";
 const money = (value: string) => {
@@ -272,9 +273,28 @@ function MovementTable({
   onCorrect: (movement: InventoryMovement) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) => Promise<void>;
 }) {
+  const [productFilter, setProductFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const correctionLinks = inventoryMovementCorrectionLinks(movements);
+  const productOptions = [...new Map(movements.map((movement) => [
+    movement.productId,
+    { id: movement.productId, name: movement.productName, sku: movement.sku },
+  ])).values()].sort((left, right) => left.name.localeCompare(right.name));
+  const invalidDateRange = Boolean(fromDate && toDate && fromDate > toDate);
+  const filteredMovements = invalidDateRange ? [] : filterInventoryMovements(movements, {
+    productId: productFilter ? Number(productFilter) : undefined,
+    fromDate: fromDate || undefined,
+    toDate: toDate || undefined,
+  });
+  const filtersActive = Boolean(productFilter || fromDate || toDate);
+  const clearFilters = () => {
+    setProductFilter("");
+    setFromDate("");
+    setToDate("");
+  };
   function downloadCsv() {
-    const csv = inventoryMovementHistoryCsv(movements);
+    const csv = inventoryMovementHistoryCsv(filteredMovements);
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
@@ -282,10 +302,24 @@ function MovementTable({
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
-  return <div className="panel data-table-wrap"><div className="toolbar"><h2>Movement history</h2><button type="button" className="button button-secondary" onClick={downloadCsv} disabled={!movements.length}>Export CSV</button></div><table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{movements.map((m) => {
+  return <div className="panel data-table-wrap">
+    <div className="toolbar"><h2>Movement history</h2><button type="button" className="button button-secondary" onClick={downloadCsv} disabled={!filteredMovements.length}>Export CSV</button></div>
+    <div className="toolbar" aria-label="Filter movement history">
+      <label>Product
+        <select value={productFilter} onChange={(event) => setProductFilter(event.target.value)}>
+          <option value="">All products</option>
+          {productOptions.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}
+        </select>
+      </label>
+      <label>From date<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+      <label>To date<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+      <button type="button" className="button button-secondary" onClick={clearFilters} disabled={!filtersActive}>Clear filters</button>
+      <span aria-live="polite">{invalidDateRange ? "From date must be on or before the to date." : `Showing ${filteredMovements.length} of ${movements.length} movements.`}</span>
+    </div>
+    <table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{filteredMovements.map((m) => {
     const correctionLink = correctionLinks.get(m.id) ?? "—";
     const hasCorrection = correctionLink !== "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString()}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !hasCorrection && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
+    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString(undefined, { timeZone: "Africa/Lusaka" })}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !hasCorrection && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
       {m.evidenceFiles.length ? <>{m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>)}{m.evidenceFiles.length > 1 && <><br /><a className="button button-secondary button-small" href={inventoryMovementEvidenceArchiveUrl(m.id)}>Download all files (.zip)</a></>}</> : "—"}
       {m.kind === "opening_stock" && m.evidenceFiles.length < 5 && <form className="inventory-evidence-append" onSubmit={(event) => onSubmit(event, async (data) => {
         const selected = data.get("additionalEvidence");
@@ -299,5 +333,5 @@ function MovementTable({
         <small>Files are added permanently; the count and existing files stay unchanged. Up to {5 - m.evidenceFiles.length} more.</small>
       </form>}
       </td></tr>;
-  })}{!movements.length && <tr><td colSpan={9}>No stock movements yet.</td></tr>}</tbody></table></div>;
+  })}{!filteredMovements.length && <tr><td colSpan={9}>{invalidDateRange ? "Correct the date range to view movements." : filtersActive ? "No movements match these filters." : "No stock movements yet."}</td></tr>}</tbody></table></div>;
 }

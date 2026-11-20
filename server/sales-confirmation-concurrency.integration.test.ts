@@ -49,6 +49,7 @@ test("concurrent stock reservations cannot overbook the same location", {
   let productId: number | undefined;
   let manualRaceProductId: number | undefined;
   let transferRaceProductId: number | undefined;
+  let writeOffRaceProductId: number | undefined;
   let locationId: number | undefined;
   let transferDestinationLocationId: number | undefined;
   const orderIds: number[] = [];
@@ -314,6 +315,76 @@ test("concurrent stock reservations cannot overbook the same location", {
       assert.deepEqual(sourceBalance, { onHand: 5, reserved: 4 }, "a completed confirmation keeps all five units at the source and reserves four");
       assert.deepEqual(destinationBalance, { onHand: 0, reserved: 0 }, "a blocked transfer leaves the destination unchanged");
     }
+
+    const [writeOffRaceProduct] = await db.insert(products).values({
+      sku: `SWOFF-${suffix}`,
+      name: `Concurrent write-off race product ${suffix}`,
+      status: "active",
+    }).returning();
+    writeOffRaceProductId = writeOffRaceProduct.id;
+    await db.insert(inventoryMovements).values({
+      productId: writeOffRaceProductId,
+      locationId,
+      kind: "opening_stock",
+      quantityDelta: 5,
+      reason: `Write-off and reservation race test ${suffix}`,
+      sourceKey: `writeoff-reservation-race-${suffix}`,
+    });
+    const [reservationResponse, writeOffResponse] = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/reservations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: writeOffRaceProductId,
+          locationId,
+          quantity: 4,
+          reference: `writeoff-race-${suffix}`,
+          reason: `Concurrent write-off reservation test ${suffix}`,
+        }),
+      }),
+      fetch(`${baseUrl}/api/inventory/adjustments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: writeOffRaceProductId,
+          locationId,
+          quantityDelta: -3,
+          reference: `writeoff-race-${suffix}`,
+          reason: `Concurrent stock write-off test ${suffix}`,
+        }),
+      }),
+    ]);
+    const [reservationRaceResult, writeOffRaceResult] = await Promise.all([
+      reservationResponse.json() as Promise<any>,
+      writeOffResponse.json() as Promise<any>,
+    ]);
+    const writeOffRaceStatuses = [reservationResponse.status, writeOffResponse.status].sort();
+    assert.deepEqual(writeOffRaceStatuses, [201, 409], "only the reservation or write-off may win the race");
+    const losingRaceResult = reservationResponse.status === 409 ? reservationRaceResult : writeOffRaceResult;
+    assert.match(losingRaceResult.error, /available to reserve|reserved units on hand/i, "the losing request must explain the stock conflict");
+    const [writeOffRaceOnHand] = await db.select({
+      quantity: sum(inventoryMovements.quantityDelta),
+    }).from(inventoryMovements).where(and(
+      eq(inventoryMovements.productId, writeOffRaceProductId),
+      eq(inventoryMovements.locationId, locationId),
+    ));
+    const [writeOffRaceReserved] = await db.select({
+      quantity: sum(inventoryReservations.quantity),
+    }).from(inventoryReservations).where(and(
+      eq(inventoryReservations.productId, writeOffRaceProductId),
+      eq(inventoryReservations.locationId, locationId),
+      eq(inventoryReservations.status, "active"),
+    ));
+    const writeOffRaceBalance = {
+      onHand: Number(writeOffRaceOnHand.quantity ?? 0),
+      reserved: Number(writeOffRaceReserved.quantity ?? 0),
+    };
+    assert.ok(writeOffRaceBalance.reserved <= writeOffRaceBalance.onHand, "active reservations must never exceed on-hand stock after a write-off race");
+    if (reservationResponse.status === 201) {
+      assert.deepEqual(writeOffRaceBalance, { onHand: 5, reserved: 4 });
+    } else {
+      assert.deepEqual(writeOffRaceBalance, { onHand: 2, reserved: 0 });
+    }
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -328,7 +399,7 @@ test("concurrent stock reservations cannot overbook the same location", {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1::int[])", [allOrderIds]);
         await client.query("DELETE FROM sales_orders WHERE id = ANY($1::int[])", [allOrderIds]);
       }
-      const allProductIds = [productId, manualRaceProductId, transferRaceProductId].filter((id): id is number => id !== undefined);
+      const allProductIds = [productId, manualRaceProductId, transferRaceProductId, writeOffRaceProductId].filter((id): id is number => id !== undefined);
       if (allProductIds.length) {
         await client.query("DELETE FROM inventory_reservations WHERE product_id = ANY($1::int[])", [allProductIds]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [allProductIds]);

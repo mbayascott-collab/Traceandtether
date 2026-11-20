@@ -137,11 +137,39 @@ test("split sales deliveries keep each location linked and release undelivered r
         locationAllocations: [{ locationId: locations[2]!.id, quantity: 4 }],
       }],
     }, 409);
-    const secondDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
+    const secondDeliveryRequest = {
       idempotencyKey: randomUUID(),
       deliveryDate: "2026-11-19",
       lines: [{ salesOrderLineId: line.id, quantity: 3 }],
-    }, 201);
+    };
+    const secondDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, secondDeliveryRequest, 201);
+    const reservationSnapshot = async () => (await db.select().from(inventoryReservations)
+      .where(eq(inventoryReservations.salesOrderId, salesOrderId))
+      .orderBy(asc(inventoryReservations.id)))
+      .map(({ id, locationId, quantity, status }) => ({ id, locationId, quantity, status }));
+    const fulfillmentSnapshot = async () => (await db.select({
+      id: inventoryMovements.id,
+      locationId: inventoryMovements.locationId,
+      quantityDelta: inventoryMovements.quantityDelta,
+      reservationId: inventoryMovements.reservationId,
+      salesDeliveryLineId: inventoryMovements.salesDeliveryLineId,
+    }).from(inventoryMovements).where(and(
+      eq(inventoryMovements.productId, product.id),
+      eq(inventoryMovements.kind, "reservation_fulfillment"),
+    )).orderBy(asc(inventoryMovements.id)));
+    const beforeRetryReservations = await reservationSnapshot();
+    const beforeRetryFulfillments = await fulfillmentSnapshot();
+    const retry = await post(`/api/sales-orders/${salesOrderId}/deliveries`, secondDeliveryRequest, 201);
+    assert.equal(retry.delivery.id, secondDelivery.delivery.id, "a retry must return the saved split delivery");
+    assert.deepEqual(await reservationSnapshot(), beforeRetryReservations, "a retry must not consume reservations again");
+    assert.deepEqual(await fulfillmentSnapshot(), beforeRetryFulfillments, "a retry must not create additional fulfillment movements");
+    const mismatchedRetry = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
+      ...secondDeliveryRequest,
+      lines: [{ salesOrderLineId: line.id, quantity: 2 }],
+    }, 409);
+    assert.match(mismatchedRetry.error, /already used for different details/i);
+    assert.deepEqual(await reservationSnapshot(), beforeRetryReservations, "a rejected key reuse must leave reservations unchanged");
+    assert.deepEqual(await fulfillmentSnapshot(), beforeRetryFulfillments, "a rejected key reuse must leave fulfillment movements unchanged");
 
     const deliveryLines = await db.select().from(salesDeliveryLines)
       .where(inArray(salesDeliveryLines.deliveryId, [firstDelivery.delivery.id, secondDelivery.delivery.id]))
