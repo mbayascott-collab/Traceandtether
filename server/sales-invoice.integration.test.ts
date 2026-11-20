@@ -3,9 +3,14 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { eq } from "drizzle-orm";
-import { customers, products, salesDeliveries, salesDeliveryInvoiceEmailAttempts, salesDeliveryLines, salesOrderLines, salesOrders } from "../shared/schema";
+import { asc, eq } from "drizzle-orm";
+import {
+  accountingAccounts, customers, inventoryLocations, journalEntries, journalLines,
+  products, salesDeliveries, salesDeliveryInvoiceEmailAttempts, salesDeliveryLines, salesOrderLines, salesOrders,
+} from "../shared/schema";
+import { salesInvoiceDocument } from "../src/lib/sales-invoice-document";
 import type { SalesDeliveryInvoiceEmailContent } from "./sales-delivery-invoice-email";
+import { ensureAccountingAccounts } from "./accounting-posting";
 
 function toCents(amount: string): bigint {
   const [whole, fraction = ""] = amount.split(".");
@@ -14,20 +19,29 @@ function toCents(amount: string): bigint {
 
 test("sales orders return delivery-specific invoice lines and exact cent totals", {
   skip: !process.env.DATABASE_URL,
-}, async () => {
+}, async (t) => {
   const [{ db, pool }, { registerSalesRoutes }] = await Promise.all([
     import("./db"),
     import("./sales-routes"),
   ]);
+  const auditTable = await pool.query<{ exists: boolean }>(
+    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  );
+  if (!auditTable.rows[0]?.exists) {
+    await pool.end();
+    t.skip("requires the business audit migration used by sales returns");
+    return;
+  }
 
   const suffix = randomUUID();
+  const actorEmail = `sales-invoice-${suffix}@example.test`;
   const app = express();
   app.use(express.json());
   const emailedInvoices: SalesDeliveryInvoiceEmailContent[] = [];
   let failEmail = false;
   let ambiguousEmail = false;
   const owner: RequestHandler = (_req, res, next) => {
-    res.locals.actor = { clerkUserId: `sales-invoice-${suffix}`, email: `sales-invoice-${suffix}@example.test`, role: "owner" };
+    res.locals.actor = { clerkUserId: `sales-invoice-${suffix}`, email: actorEmail, role: "owner" };
     next();
   };
   registerSalesRoutes(app, owner, {
@@ -47,6 +61,8 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
   const productIds: number[] = [];
   let orderId: number | undefined;
   const deliveryIds: number[] = [];
+  let returnLocationId: number | undefined;
+  let returnMovementId: number | undefined;
 
   try {
     const [customer] = await db.insert(customers).values({
@@ -62,6 +78,11 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
       { sku: `SINV-C-${suffix}`, name: `Invoice item C ${suffix}`, status: "active" },
     ]).returning();
     productIds.push(...fixtureProducts.map((product) => product.id));
+    const [returnLocation] = await db.insert(inventoryLocations).values({
+      name: `Sales invoice return location ${suffix}`,
+    }).returning();
+    returnLocationId = returnLocation.id;
+    await ensureAccountingAccounts(db);
 
     const [order] = await db.insert(salesOrders).values({
       orderNumber: `SO-${new Date().getUTCFullYear()}-${suffix.slice(0, 8)}`,
@@ -90,14 +111,14 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
     }).returning();
     deliveryIds.push(firstDelivery.id, secondDelivery.id);
 
-    await db.insert(salesDeliveryLines).values([
+    const deliveryLineRows = await db.insert(salesDeliveryLines).values([
       { deliveryId: firstDelivery.id, salesOrderLineId: orderLines[0]!.id, quantity: 2 },
       { deliveryId: firstDelivery.id, salesOrderLineId: orderLines[1]!.id, quantity: 1 },
       { deliveryId: firstDelivery.id, salesOrderLineId: orderLines[2]!.id, quantity: 3 },
       { deliveryId: secondDelivery.id, salesOrderLineId: orderLines[0]!.id, quantity: 3 },
       { deliveryId: secondDelivery.id, salesOrderLineId: orderLines[1]!.id, quantity: 2 },
       { deliveryId: secondDelivery.id, salesOrderLineId: orderLines[2]!.id, quantity: 1 },
-    ]);
+    ]).returning();
 
     const response = await fetch(`${baseUrl}/api/sales-orders`);
     assert.equal(response.status, 200);
@@ -179,7 +200,8 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
     assert.equal(confirmedRetry.status, 200);
 
     const firstAttemptRows = await db.select().from(salesDeliveryInvoiceEmailAttempts)
-      .where(eq(salesDeliveryInvoiceEmailAttempts.deliveryId, first.id));
+      .where(eq(salesDeliveryInvoiceEmailAttempts.deliveryId, first.id))
+      .orderBy(asc(salesDeliveryInvoiceEmailAttempts.id));
     assert.deepEqual(firstAttemptRows.map((attempt) => attempt.status), ["ambiguous", "sent"]);
 
     failEmail = true;
@@ -208,6 +230,72 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
     assert.equal(afterSendOrder.deliveredZmw, savedOrder.deliveredZmw);
     const failedDelivery = afterSendOrder.deliveries.find((delivery: any) => delivery.id === second.id);
     assert.deepEqual(failedDelivery.invoiceEmailAttempts.map((attempt: any) => attempt.status), ["failed", "sent"]);
+
+    const returnedLineRecord = deliveryLineRows.find((line) =>
+      line.deliveryId === second.id && line.salesOrderLineId === orderLines[0]!.id);
+    assert.ok(returnedLineRecord);
+    assert.ok(returnLocationId);
+    const returnResponse = await fetch(`${baseUrl}/api/sales-delivery-lines/${returnedLineRecord.id}/returns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        idempotencyKey: randomUUID(),
+        locationId: returnLocationId,
+        quantity: 1,
+        returnDate: "2026-11-20",
+        reason: "Customer returned one unit after delivery",
+      }),
+    });
+    const returnPayload = await returnResponse.json() as any;
+    assert.equal(returnResponse.status, 201, JSON.stringify(returnPayload));
+    returnMovementId = returnPayload.movement.id;
+
+    const afterReturn = await fetch(`${baseUrl}/api/sales-orders`);
+    assert.equal(afterReturn.status, 200);
+    const afterReturnPayload = await afterReturn.json() as { orders: any[] };
+    const afterReturnOrder = afterReturnPayload.orders.find((item) => item.id === order.id);
+    const returnedDelivery = afterReturnOrder.deliveries.find((delivery: any) => delivery.id === second.id);
+    const returnedLine = returnedDelivery.lines.find((line: any) =>
+      line.salesDeliveryLineId === returnedLineRecord.id);
+    assert.deepEqual({
+      quantity: returnedLine.quantity,
+      unitPriceZmw: returnedLine.unitPriceZmw,
+      lineTotalZmw: returnedLine.lineTotalZmw,
+      returnedQuantity: returnedLine.returnedQuantity,
+      returns: returnedLine.returns.map((item: any) => ({ quantity: item.quantity, reason: item.reason })),
+    }, {
+      quantity: 3,
+      unitPriceZmw: "12.34",
+      lineTotalZmw: "37.02",
+      returnedQuantity: 1,
+      returns: [{ quantity: 1, reason: "Customer returned one unit after delivery" }],
+    }, "the returned quantity must remain separate from the original invoice line");
+    assert.equal(returnedDelivery.totalZmw, "37.39", "the original delivery invoice total must remain unchanged");
+    assert.equal(afterReturnOrder.totalZmw, "62.33", "the original order invoice total must remain unchanged");
+    assert.equal(afterReturnOrder.deliveredZmw, "62.33", "gross delivered value remains distinct from returns");
+    assert.deepEqual(
+      salesInvoiceDocument(afterSendOrder, afterSendOrder.deliveries.find((delivery: any) => delivery.id === second.id)),
+      salesInvoiceDocument(afterReturnOrder, returnedDelivery),
+      "printing after a return must still produce the original delivery invoice",
+    );
+
+    const [returnJournal] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.sourceKey, `sales-return-${returnMovementId}-revenue`));
+    assert.ok(returnJournal, "the returned amount must be recorded separately in the customer-balance journal");
+    const returnJournalLines = await db.select({
+      account: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, returnJournal.id));
+    assert.deepEqual(
+      returnJournalLines.map((line) => [line.account, line.debitZmw, line.creditZmw]).sort(),
+      [
+        ["accounts_receivable", "0.00", "12.34"],
+        ["sales_revenue", "12.34", "0.00"],
+      ],
+    );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -215,6 +303,24 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (returnMovementId) {
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_type IN ('sales_return', 'sales_return_cogs') AND source_id = $1
+          )
+        `, [returnMovementId]);
+        await client.query(
+          "DELETE FROM journal_entries WHERE source_type IN ('sales_return', 'sales_return_cogs') AND source_id = $1",
+          [returnMovementId],
+        );
+        await client.query(
+          "DELETE FROM business_audit_logs WHERE actor_email = $1 AND entity_type = 'inventory_movement' AND entity_id = $2",
+          [actorEmail, returnMovementId],
+        );
+        await client.query("DELETE FROM inventory_movements WHERE id = $1", [returnMovementId]);
+      }
       if (deliveryIds.length) {
         await client.query("DELETE FROM sales_delivery_lines WHERE delivery_id = ANY($1::int[])", [deliveryIds]);
         await client.query("DELETE FROM sales_deliveries WHERE id = ANY($1::int[])", [deliveryIds]);
@@ -225,6 +331,7 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
       }
       if (productIds.length) await client.query("DELETE FROM products WHERE id = ANY($1::int[])", [productIds]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      if (returnLocationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [returnLocationId]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
