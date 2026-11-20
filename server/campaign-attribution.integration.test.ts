@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
-  inventoryLocations, inventoryMovements, marketingAttributions, marketingCampaigns, products, salesOrders,
+  businessAuditLogs, inventoryLocations, inventoryMovements, marketingAttributions, marketingCampaigns, products, salesOrders,
 } from "../shared/schema";
 
 test("only owners can replace campaign links", {
@@ -17,6 +17,7 @@ test("only owners can replace campaign links", {
   ]);
   const requiredColumns = new Set([
     "marketing_campaigns.tracking_code",
+    "business_audit_logs.actor_clerk_user_id",
     "business_audit_logs.actor_email",
   ]);
   const availableColumns = await pool.query<{ table_name: string; column_name: string }>(
@@ -24,6 +25,7 @@ test("only owners can replace campaign links", {
      WHERE table_schema = 'public'
        AND (table_name, column_name) IN (
          ('marketing_campaigns', 'tracking_code'),
+          ('business_audit_logs', 'actor_clerk_user_id'),
          ('business_audit_logs', 'actor_email')
        )`,
   );
@@ -36,12 +38,19 @@ test("only owners can replace campaign links", {
   const suffix = randomUUID();
   const campaignName = `Campaign link authorization test ${suffix}`;
   const trackingCode = randomUUID();
-  const actorEmail = `campaign-link-auth-${suffix}@example.test`;
+  const actorEmails = {
+    owner: `campaign-link-owner-${suffix}@example.test`,
+    manager: `campaign-link-manager-${suffix}@example.test`,
+  };
   const app = express();
   app.use(express.json());
   const access: RequestHandler = (req, res, next) => {
     const role = req.header("x-test-role") === "manager" ? "manager" : "owner";
-    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role };
+    res.locals.actor = {
+      clerkUserId: `test-${role}-${suffix}`,
+      email: actorEmails[role],
+      role,
+    };
     next();
   };
   registerMarketingRoutes(app, access);
@@ -75,11 +84,31 @@ test("only owners can replace campaign links", {
     const [unchangedCampaign] = await db.select({ trackingCode: marketingCampaigns.trackingCode })
       .from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
     assert.equal(unchangedCampaign?.trackingCode, trackingCode);
+    const deniedAudit = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "marketing_campaign"),
+      eq(businessAuditLogs.entityId, campaign.id),
+    ));
+    assert.equal(
+      deniedAudit.some((entry) => entry.changedFields.includes("trackingCode")),
+      false,
+      "a denied manager request must not create a tracking-code audit entry",
+    );
 
     const allowed = await replaceLink("owner", trackingCode);
     assert.equal(allowed.response.status, 200, JSON.stringify(allowed.payload));
     assert.ok(allowed.payload.campaign.trackingCode);
     assert.notEqual(allowed.payload.campaign.trackingCode, trackingCode);
+    const ownerAudit = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "marketing_campaign"),
+      eq(businessAuditLogs.entityId, campaign.id),
+    ));
+    assert.ok(ownerAudit.some((entry) =>
+      entry.action === "updated"
+      && entry.recordLabel === campaignName
+      && entry.actorClerkUserId === `test-owner-${suffix}`
+      && entry.actorEmail === actorEmails.owner
+      && entry.changedFields.includes("trackingCode"),
+    ), "a successful replacement must identify the campaign and responsible owner in audit history");
 
     const concurrentResults = await Promise.all([
       replaceLink("owner", allowed.payload.campaign.trackingCode),
@@ -100,7 +129,7 @@ test("only owners can replace campaign links", {
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (campaignId) {
-      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      await pool.query("DELETE FROM business_audit_logs WHERE actor_email = ANY($1)", [Object.values(actorEmails)]);
       await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
     }
   }

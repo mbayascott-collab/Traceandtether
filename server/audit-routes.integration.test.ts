@@ -454,6 +454,32 @@ test("route mutations across business areas keep their audit history and actor",
       customerGroupId: createdCustomerGroupId,
     }).returning();
     marketingCampaignId = linkedCampaign.id;
+    const campaignLinkReplacement = await expectStatus(
+      `/api/marketing/campaigns/${linkedCampaign.id}/replace-link`,
+      { trackingCode: linkedCampaign.trackingCode },
+      "POST",
+      200,
+    );
+    assert.notEqual(campaignLinkReplacement.campaign.trackingCode, linkedCampaign.trackingCode);
+    const campaignHistory = await request(
+      `/api/audit-logs?entityType=marketing_campaign&actor=${encodeURIComponent(actorEmail)}`,
+    );
+    assert.equal(campaignHistory.response.status, 200, JSON.stringify(campaignHistory.payload));
+    assert.ok(campaignHistory.payload.entries.some((entry: {
+      entityId: number;
+      recordLabel: string;
+      actorClerkUserId: string;
+      actorEmail: string;
+      action: string;
+      changedFields: string[];
+    }) =>
+      entry.entityId === linkedCampaign.id
+      && entry.recordLabel === linkedCampaign.name
+      && entry.actorClerkUserId === actorId
+      && entry.actorEmail === actorEmail
+      && entry.action === "updated"
+      && entry.changedFields.includes("trackingCode"),
+    ), "campaign-link replacement should be visible in audit history with its owner");
     const deletionImpact = await expectStatus(
       `/api/marketing/customer-groups/${createdCustomerGroupId}/deletion-impact`,
       undefined,
