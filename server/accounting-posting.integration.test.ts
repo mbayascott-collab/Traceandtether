@@ -67,6 +67,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
   let mismatchPurchaseOrderId: number | undefined;
   let mismatchShipmentId: number | undefined;
   let mismatchShipmentLineId: number | undefined;
+  let mismatchProductAId: number | undefined;
+  let mismatchProductBId: number | undefined;
   let salesOrderId: number | undefined;
   let deliveryId: number | undefined;
   const request = async (path: string, body: unknown, expectedStatus: number) => {
@@ -911,17 +913,36 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(afterIncrementalMultiProductAdjustment.adjustmentPreview.adjustmentAvailableZmw, "0.00");
     assert.equal(afterIncrementalMultiProductAdjustment.adjustmentPreview.unpostedClearingZmw, "210.00");
 
+    const [mismatchProductA] = await db.insert(products).values({
+      sku: `ACC-MISMATCH-A-${suffix}`,
+      name: `Receipt mismatch product A ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    const [mismatchProductB] = await db.insert(products).values({
+      sku: `ACC-MISMATCH-B-${suffix}`,
+      name: `Receipt mismatch product B ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    mismatchProductAId = mismatchProductA.id;
+    mismatchProductBId = mismatchProductB.id;
+    assert.notEqual(mismatchProductAId, mismatchProductBId);
     const { order: mismatchOrder } = await request("/api/purchase-orders", {
       supplierId,
       currency: "CNY",
       exchangeRateToZmw: "2",
       expectedAt: null,
       notes: null,
-      lines: [{ productId, quantityOrdered: 10, unitPrice: "100.00" }],
+      lines: [
+        { productId: mismatchProductAId, quantityOrdered: 10, unitPrice: "100.00" },
+        { productId: mismatchProductBId, quantityOrdered: 10, unitPrice: "100.00" },
+      ],
     }, 201);
     mismatchPurchaseOrderId = mismatchOrder.id;
-    const [mismatchOrderLine] = await db.select().from(purchaseOrderLines)
-      .where(eq(purchaseOrderLines.purchaseOrderId, mismatchPurchaseOrderId!));
+    const mismatchOrderLines = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, mismatchPurchaseOrderId!))
+      .orderBy(purchaseOrderLines.id);
     const { shipment: mismatchShipment } = await request("/api/shipments", {
       purchaseOrderIds: [mismatchPurchaseOrderId],
       shipmentReference: `ACC-MISMATCH-SHIP-${suffix}`,
@@ -930,17 +951,20 @@ test("database flow adjusts late import costs across partial receipts and sales"
       shippedAt: null,
       expectedAt: null,
       notes: null,
-      lines: [{ purchaseOrderLineId: mismatchOrderLine.id, quantityShipped: 10 }],
+      lines: mismatchOrderLines.map((line) => ({
+        purchaseOrderLineId: line.id, quantityShipped: 10,
+      })),
     }, 201);
     mismatchShipmentId = mismatchShipment.id;
-    const [mismatchShipmentLine] = await db.select().from(shipmentLines)
-      .where(eq(shipmentLines.shipmentId, mismatchShipmentId!));
-    mismatchShipmentLineId = mismatchShipmentLine.id;
+    const mismatchShipmentLines = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, mismatchShipmentId!))
+      .orderBy(shipmentLines.id);
+    mismatchShipmentLineId = mismatchShipmentLines[0].id;
     await request("/api/import-expenses", {
       purchaseOrderId: mismatchPurchaseOrderId,
       shipmentId: null,
       category: "Freight",
-      description: `Receipt clearing mismatch ${suffix}`,
+      description: `Initial receipt clearing mismatch freight ${suffix}`,
       amount: "100.00",
       currency: "USD",
       exchangeRateToZmw: "10",
@@ -950,9 +974,26 @@ test("database flow adjusts late import costs across partial receipts and sales"
       notes: null,
     }, 201);
     await patch(`/api/shipments/${mismatchShipmentId}/receive`, {
-      lines: [{ shipmentLineId: mismatchShipmentLineId, quantityReceived: 4 }],
+      lines: mismatchShipmentLines.map((line: any) => ({
+        shipmentLineId: line.id, quantityReceived: 4,
+      })),
     }, 200);
-    await request(`/api/inventory/receipts/${mismatchShipmentLineId}/post`, { locationId }, 201);
+    for (const line of mismatchShipmentLines) {
+      await request(`/api/inventory/receipts/${line.id}/post`, { locationId }, 201);
+    }
+    await request("/api/import-expenses", {
+      purchaseOrderId: mismatchPurchaseOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Late receipt clearing mismatch freight ${suffix}`,
+      amount: "40.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-20",
+      reference: null,
+      notes: null,
+    }, 201);
     const [mismatchMovement] = await db.select().from(inventoryMovements)
       .where(eq(inventoryMovements.sourceKey, `shipment-line-${mismatchShipmentLineId}-to-4`));
     const [mismatchReceiptEntry] = await db.select().from(journalEntries).where(and(
@@ -976,9 +1017,9 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(journalLines.journalEntryId, mismatchReceiptEntry.id),
       eq(journalLines.accountId, clearingAccount.id),
     ));
-    // The receipt should clear 400.00 ZMW; corrupt it by one ZMW to simulate
-    // a product-level difference in the posted receipt history.
-    await db.update(journalLines).set({ creditZmw: "401.00" })
+    // Product A should clear 200.00 ZMW; corrupt it by one ZMW. Product B
+    // remains valid and has a positive late-cost adjustment from the later bill.
+    await db.update(journalLines).set({ creditZmw: "201.00" })
       .where(eq(journalLines.id, receiptClearingLine.id));
 
     const { orders: [mismatchPreviewOrder] } = await request(
@@ -987,18 +1028,21 @@ test("database flow adjusts late import costs across partial receipts and sales"
     const mismatchPreview = mismatchPreviewOrder.adjustmentPreview;
     assert.equal(mismatchPreview.hasNegativeLine, true);
     assert.equal(mismatchPreview.canPost, false);
-    assert.equal(mismatchPreview.adjustmentAvailableZmw, "0.00");
+    assert.equal(mismatchPreview.adjustmentAvailableZmw, "80.00");
     assert.deepEqual(mismatchPreview.lines.map((line: any) => [
-      line.stockedQuantity, line.adjustmentZmw,
-    ]), [[4, "-1.00"]]);
+      line.productId, line.stockedQuantity, line.adjustmentZmw,
+    ]), [
+      [mismatchProductAId, 4, "-1.00"],
+      [mismatchProductBId, 4, "80.00"],
+    ]);
 
     const mismatchAdjustmentRequest = {
       reviewedAmountZmw: mismatchPreview.adjustmentAvailableZmw,
       reviewedLines: mismatchPreview.lines.map((line: any) => ({
         lineId: line.lineId,
-        adjustmentZmw: "0.00",
-        inventoryZmw: "0.00",
-        cogsZmw: "0.00",
+        adjustmentZmw: line.adjustmentZmw,
+        inventoryZmw: line.inventoryZmw,
+        cogsZmw: line.cogsZmw,
       })),
       note: "Review receipt clearing mismatch",
     };
@@ -1031,7 +1075,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
       if (auditTable.rows[0]?.exists) {
         await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [testEmail]);
       }
-      if (productId || multiProductAId || multiProductBId) {
+      if (productId || multiProductAId || multiProductBId || mismatchProductAId || mismatchProductBId) {
         await client.query(`
           DELETE FROM journal_lines
           WHERE journal_entry_id IN (
@@ -1056,7 +1100,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
           )
         `, [
           [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
-          [productId, multiProductAId, multiProductBId].filter(Boolean),
+          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
           [salesOrderId, multiProductSalesOrderId].filter(Boolean),
         ]);
         await client.query(`
@@ -1080,11 +1124,11 @@ test("database flow adjusts late import costs across partial receipts and sales"
           ))
         `, [
           [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
-          [productId, multiProductAId, multiProductBId].filter(Boolean),
+          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
           [salesOrderId, multiProductSalesOrderId].filter(Boolean),
         ]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [
-          [productId, multiProductAId, multiProductBId].filter(Boolean),
+          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
         ]);
       }
       if (deliveryId) await client.query(
@@ -1151,6 +1195,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       if (multiProductAId) await client.query("DELETE FROM products WHERE id = $1", [multiProductAId]);
       if (multiProductBId) await client.query("DELETE FROM products WHERE id = $1", [multiProductBId]);
+      if (mismatchProductAId) await client.query("DELETE FROM products WHERE id = $1", [mismatchProductAId]);
+      if (mismatchProductBId) await client.query("DELETE FROM products WHERE id = $1", [mismatchProductBId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
       if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
       await client.query("COMMIT");
