@@ -3,7 +3,7 @@ import { Copy, Download, Pencil, Plus, RefreshCw, X } from "lucide-react";
 import { customerGroupAccessAfterPermissionLoss, emptyCustomerGroupAccess } from "../lib/customer-group-access";
 import { installCustomerGroupRefresh } from "../lib/customer-group-refresh";
 
-type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null; audienceSnapshotCapturedAt?: string | null; audienceSnapshotEnabledAt?: string | null };
+export type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null; audienceSnapshotCapturedAt?: string | null; audienceSnapshotEnabledAt?: string | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
 type CustomerGroupRules = { minimumFulfilledOrders?: number; maximumFulfilledOrders?: number; noOrderInLastDays?: number; minimumLifetimeSalesZmw?: string };
@@ -76,7 +76,7 @@ async function request(path: string, method = "GET", body?: unknown) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = response.status === 204 ? null : await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed.");
+  if (!response.ok) throw new ApiError(data.error || "Request failed.", response.status);
   return data;
 }
 function money(value: string, currency = "ZMW") {
@@ -100,6 +100,36 @@ function campaignSpendZmw(campaignId: number, rows: Expense[]) {
 }
 function displayError(reason: unknown) {
   return reason instanceof Error ? reason.message : "The request could not be completed.";
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export async function refreshCampaignAfterLinkConflict(
+  reason: unknown,
+  dependencies: {
+    requestCampaigns: () => Promise<{ campaigns: Campaign[] }>;
+    setCampaigns: (campaigns: Campaign[]) => void;
+    setError: (message: string) => void;
+  },
+) {
+  if (!(reason instanceof ApiError) || reason.status !== 409) {
+    dependencies.setError(displayError(reason));
+    return;
+  }
+  try {
+    const result = await dependencies.requestCampaigns();
+    dependencies.setCampaigns(result.campaigns);
+    dependencies.setError("Another owner replaced this shop link. The campaign list now shows the current link.");
+  } catch (refreshReason) {
+    dependencies.setError(
+      `Another owner replaced this shop link, but the campaign list could not be refreshed. ${displayError(refreshReason)}`,
+    );
+  }
 }
 
 type CustomerGroupsPanelProps = {
@@ -385,7 +415,13 @@ export default function MarketingWorkspace() {
       });
       setMessage(`A new shop link is ready for ${campaign.name}. The previous link no longer attributes new requests.`);
       await load();
-    } catch (reason) { setError(displayError(reason)); }
+    } catch (reason) {
+      await refreshCampaignAfterLinkConflict(reason, {
+        requestCampaigns: () => request("/api/marketing/campaigns"),
+        setCampaigns,
+        setError,
+      });
+    }
   }
   async function viewCampaignAudience(campaign: Campaign) {
     setError("");

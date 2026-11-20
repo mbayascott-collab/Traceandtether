@@ -3,7 +3,8 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-  CampaignCustomerGroupSelector, CampaignCustomerGroupSummary, CustomerGroupsPanel,
+  ApiError, CampaignCustomerGroupSelector, CampaignCustomerGroupSummary, CustomerGroupsPanel,
+  refreshCampaignAfterLinkConflict, type Campaign,
 } from "./MarketingWorkspace";
 
 const group = {
@@ -22,6 +23,55 @@ const member = {
   lifetimeSalesZmw: "1250.00",
   lastOrderDate: "2026-11-10",
 };
+
+const campaign = {
+  id: 12,
+  name: "Winter offer",
+  objective: null,
+  channel: null,
+  status: "active",
+  startsOn: null,
+  endsOn: null,
+  budgetZmw: null,
+  notes: null,
+  trackingCode: "old-link",
+  customerGroupId: null,
+};
+
+test("stale campaign-link conflicts refresh the active link and explain the change", async () => {
+  const refreshedCampaign = { ...campaign, trackingCode: "new-link" };
+  let campaigns: Campaign[] = [campaign];
+  const errors: string[] = [];
+  let refreshCount = 0;
+
+  await refreshCampaignAfterLinkConflict(new ApiError("The link was already replaced.", 409), {
+    requestCampaigns: async () => {
+      refreshCount += 1;
+      return { campaigns: [refreshedCampaign] };
+    },
+    setCampaigns: (nextCampaigns) => { campaigns = nextCampaigns; },
+    setError: (message) => errors.push(message),
+  });
+
+  assert.equal(refreshCount, 1);
+  assert.deepEqual(campaigns, [refreshedCampaign]);
+  assert.match(errors.at(-1) ?? "", /another owner replaced this shop link/i);
+  assert.match(errors.at(-1) ?? "", /current link/i);
+});
+
+test("campaign-link conflict explains when the refreshed link cannot be loaded", async () => {
+  const errors: string[] = [];
+
+  await refreshCampaignAfterLinkConflict(new ApiError("The link was already replaced.", 409), {
+    requestCampaigns: async () => { throw new Error("Network unavailable."); },
+    setCampaigns: () => {},
+    setError: (message) => errors.push(message),
+  });
+
+  assert.match(errors.at(-1) ?? "", /another owner replaced this shop link/i);
+  assert.match(errors.at(-1) ?? "", /could not be refreshed/i);
+  assert.match(errors.at(-1) ?? "", /Network unavailable/);
+});
 
 function renderPanel(canManage: boolean, canViewMembers: boolean) {
   return renderToStaticMarkup(createElement(CustomerGroupsPanel, {
