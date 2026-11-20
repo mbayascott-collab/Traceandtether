@@ -272,9 +272,13 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
     assert.equal(afterReceiptEditDelivery.receipt.receivedBy, "Updated recipient");
     assert.equal(new Date(afterReceiptEditDelivery.receipt.receivedAt).toISOString(), "2026-11-20T13:00:00.000Z");
     assert.deepEqual(
-      afterReceiptEditDelivery.receipt.proofs.map((proof: any) => proof.id).sort((a: number, b: number) => a - b),
-      reloadedDelivery.receipt.proofs.map((proof: any) => proof.id).sort((a: number, b: number) => a - b),
-      "editing receipt details must leave every signed proof attached",
+      afterReceiptEditDelivery.receipt.proofs.map((proof: any) => ({
+        id: proof.id, fileName: proof.fileName, mimeType: proof.mimeType,
+      })).sort((left: any, right: any) => left.id - right.id),
+      reloadedDelivery.receipt.proofs.map((proof: any) => ({
+        id: proof.id, fileName: proof.fileName, mimeType: proof.mimeType,
+      })).sort((left: any, right: any) => left.id - right.id),
+      "editing receipt details must preserve each signed proof and its download details",
     );
 
     const download = async (url: string, role = "owner") => fetch(new URL(url, baseUrl), {
