@@ -1000,6 +1000,7 @@ export const marketingCampaigns = pgTable(
     budgetZmw: numeric("budget_zmw", { precision: 14, scale: 2 }),
     notes: text("notes"),
     trackingCode: varchar("tracking_code", { length: 36 }).notNull().default(sql`gen_random_uuid()::text`),
+    audienceSnapshotEnabledAt: timestamp("audience_snapshot_enabled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1027,6 +1028,33 @@ export const marketingCustomerGroups = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("marketing_customer_groups_name_idx").on(table.name)],
+);
+
+export const marketingCampaignAudienceSnapshots = pgTable(
+  "marketing_campaign_audience_snapshots",
+  {
+    id: serial("id").primaryKey(),
+    campaignId: integer("campaign_id").notNull().references(() => marketingCampaigns.id, { onDelete: "cascade" }),
+    sourceGroupId: integer("source_group_id"),
+    groupName: varchar("group_name", { length: 120 }).notNull(),
+    rules: jsonb("rules").$type<{
+      minimumFulfilledOrders?: number;
+      maximumFulfilledOrders?: number;
+      noOrderInLastDays?: number;
+      minimumLifetimeSalesZmw?: string;
+    }>().notNull(),
+    members: jsonb("members").$type<{
+      id: number;
+      name: string;
+      email: string | null;
+      phone: string | null;
+    }[]>().notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("marketing_campaign_audience_snapshots_campaign_unique").on(table.campaignId),
+    index("marketing_campaign_audience_snapshots_group_idx").on(table.sourceGroupId),
+  ],
 );
 
 export const marketingContentItems = pgTable(

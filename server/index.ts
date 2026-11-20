@@ -8,6 +8,7 @@ import { createServer as createViteServer } from "vite";
 import { pool } from "./db";
 import { registerApiRoutes } from "./routes";
 import { startGmailQuoteBouncePolling } from "./customer-quote-gmail-notices";
+import { startCampaignAudienceSnapshotPolling } from "./marketing-routes";
 import {
   CLERK_PROXY_PATH,
   clerkProxyMiddleware,
@@ -121,6 +122,7 @@ async function start() {
 
   server.listen(port, "0.0.0.0", () => {
     console.log(`Business operations app listening on port ${port}.`);
+    startCampaignAudienceSnapshotPolling();
     if (process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET) {
       startGmailQuoteBouncePolling(process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET);
     }

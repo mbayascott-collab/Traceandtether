@@ -2571,6 +2571,35 @@ textarea:focus-visible {
   font-weight: 400;
 }
 
+.marketing-dialog-body {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px 22px;
+}
+
+.marketing-dialog-body p,
+.marketing-dialog-body ul {
+  margin: 0;
+}
+
+.marketing-dialog-body ul {
+  padding-left: 20px;
+}
+
+.marketing-dialog-body label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.marketing-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .marketing-form {
   display: grid;
   gap: 11px;

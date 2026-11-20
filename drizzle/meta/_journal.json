@@ -414,6 +414,20 @@
       "when": 1795162500000,
       "tag": "0058_quote_invoice_email_histories",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1795173586589,
+      "tag": "0059_busy_spitfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1795173703971,
+      "tag": "0060_colossal_pride",
+      "breakpoints": true
     }
   ]
 }

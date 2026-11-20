@@ -1,11 +1,11 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { requireBusinessOwner } from "./access-control";
-import { accountingAccounts, customers, inventoryMovements, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
+import { accountingAccounts, customers, inventoryMovements, journalEntries, journalLines, marketingAttributions, marketingCampaignAudienceSnapshots, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { customerGroupContactsCsv, matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import {
@@ -59,8 +59,83 @@ async function loadCustomerHistory() {
   return { customers: allCustomers, history };
 }
 
+function zambiaToday() {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Africa/Lusaka",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+async function getCustomerGroupMembers(group: typeof marketingCustomerGroups.$inferSelect) {
+  const { customers: allCustomers, history } = await loadCustomerHistory();
+  return allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
+    fulfilledOrders: history.get(customer.id)?.fulfilledOrders ?? 0,
+    lifetimeSalesZmw: formatCents(history.get(customer.id)?.lifetimeSalesCents ?? 0n),
+    lastOrderDate: history.get(customer.id)?.lastOrderDate ?? null,
+  })).map((customer) => ({
+    id: customer.id,
+    name: customer.name,
+    email: customer.email,
+    phone: customer.phone,
+  }));
+}
+
+export async function captureDueCampaignAudienceSnapshots() {
+  const today = zambiaToday();
+  const dueCampaigns = await db.select().from(marketingCampaigns).where(and(
+    eq(marketingCampaigns.status, "active"),
+    isNotNull(marketingCampaigns.customerGroupId),
+    isNotNull(marketingCampaigns.audienceSnapshotEnabledAt),
+    or(isNull(marketingCampaigns.startsOn), lte(marketingCampaigns.startsOn, today)),
+    or(isNull(marketingCampaigns.endsOn), gte(marketingCampaigns.endsOn, today)),
+  ));
+  for (const campaign of dueCampaigns) {
+    const [existing] = await db.select({ id: marketingCampaignAudienceSnapshots.id })
+      .from(marketingCampaignAudienceSnapshots)
+      .where(eq(marketingCampaignAudienceSnapshots.campaignId, campaign.id))
+      .limit(1);
+    if (existing || campaign.customerGroupId === null) continue;
+    const [group] = await db.select().from(marketingCustomerGroups)
+      .where(eq(marketingCustomerGroups.id, campaign.customerGroupId)).limit(1);
+    if (!group) continue;
+    const members = await getCustomerGroupMembers(group);
+    await db.insert(marketingCampaignAudienceSnapshots).values({
+      campaignId: campaign.id,
+      sourceGroupId: group.id,
+      groupName: group.name,
+      rules: group.rules,
+      members,
+    }).onConflictDoNothing({ target: marketingCampaignAudienceSnapshots.campaignId });
+  }
+}
+
+let campaignAudienceSnapshotTimer: NodeJS.Timeout | undefined;
+export function startCampaignAudienceSnapshotPolling() {
+  if (campaignAudienceSnapshotTimer) return;
+  let running = false;
+  const capture = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await captureDueCampaignAudienceSnapshots();
+    } catch (error) {
+      console.error("Campaign audience snapshot refresh failed.", error instanceof Error ? error.name : "UnknownError");
+    } finally {
+      running = false;
+    }
+  };
+  void capture();
+  campaignAudienceSnapshotTimer = setInterval(() => void capture(), 60_000);
+  campaignAudienceSnapshotTimer.unref();
+}
+
 export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   const ownerOnly = requireBusinessOwner("Only the business owner can manage customer groups.");
+  const audienceOwnerOnly = requireBusinessOwner("Only the business owner can review campaign audiences.");
   const campaignLinkOwnerOnly = requireBusinessOwner("Only the business owner can replace campaign tracking links.");
 
   async function hasCampaign(id: number | null | undefined) {
@@ -75,15 +150,55 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     return Boolean(group);
   }
   app.get("/api/marketing/campaigns", owner, async (_req, res) => {
-    res.json({ campaigns: await db.select().from(marketingCampaigns).orderBy(desc(marketingCampaigns.createdAt)) });
+    const canManageAudiences = res.locals.actor?.role === "owner";
+    if (canManageAudiences) await captureDueCampaignAudienceSnapshots();
+    const campaigns = await db.select().from(marketingCampaigns).orderBy(desc(marketingCampaigns.createdAt));
+    const snapshots = canManageAudiences && campaigns.length
+      ? await db.select({
+        campaignId: marketingCampaignAudienceSnapshots.campaignId,
+        capturedAt: marketingCampaignAudienceSnapshots.capturedAt,
+      }).from(marketingCampaignAudienceSnapshots)
+        .where(inArray(marketingCampaignAudienceSnapshots.campaignId, campaigns.map((campaign) => campaign.id)))
+      : [];
+    const capturedByCampaign = new Map(snapshots.map((snapshot) => [snapshot.campaignId, snapshot.capturedAt]));
+    res.json({
+      campaigns: canManageAudiences
+        ? campaigns.map((campaign) => ({
+          ...campaign,
+          audienceSnapshotCapturedAt: capturedByCampaign.get(campaign.id)?.toISOString() ?? null,
+        }))
+        : campaigns.map((campaign) => ({
+          ...campaign,
+          customerGroupId: null,
+          audienceSnapshotCapturedAt: null,
+        })),
+    });
+  });
+  app.get("/api/marketing/campaigns/:id/audience-snapshot", owner, audienceOwnerOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
+    const [campaign] = await db.select({ id: marketingCampaigns.id }).from(marketingCampaigns)
+      .where(eq(marketingCampaigns.id, id)).limit(1);
+    if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+    await captureDueCampaignAudienceSnapshots();
+    const [snapshot] = await db.select().from(marketingCampaignAudienceSnapshots)
+      .where(eq(marketingCampaignAudienceSnapshots.campaignId, id)).limit(1);
+    if (!snapshot) return res.status(409).json({ error: "This campaign has not reached its launch date yet." });
+    res.json({ snapshot });
   });
   app.post("/api/marketing/campaigns", owner, async (req, res) => {
     const parsed = campaignSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error);
+    const canManageAudiences = res.locals.actor?.role === "owner";
+    if (!canManageAudiences && Object.hasOwn(req.body ?? {}, "customerGroupId")) {
+      return res.status(403).json({ error: "Only the business owner can assign a saved customer group." });
+    }
     if (!await hasCustomerGroup(parsed.data.customerGroupId)) return res.status(400).json({ error: "Choose an existing customer group." });
     const campaign = await db.transaction(async (tx) => {
       const [created] = await tx.insert(marketingCampaigns).values({
-        ...parsed.data, trackingCode: randomUUID(),
+        ...parsed.data,
+        trackingCode: randomUUID(),
+        audienceSnapshotEnabledAt: parsed.data.customerGroupId == null ? null : new Date(),
       }).returning();
       await recordBusinessAudit(tx, {
         entityType: "marketing_campaign", entityId: created.id, recordLabel: created.name,
@@ -91,15 +206,34 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       });
       return [created];
     });
-    res.status(201).json({ campaign });
+    res.status(201).json({
+      campaign: canManageAudiences ? campaign : { ...campaign, customerGroupId: null },
+    });
   });
   app.patch("/api/marketing/campaigns/:id", owner, async (req, res) => {
     const id = Number(req.params.id), parsed = campaignSchema.safeParse(req.body);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid campaign." });
     if (!parsed.success) return bad(res, parsed.error);
+    const canManageAudiences = res.locals.actor?.role === "owner";
+    if (!canManageAudiences && Object.hasOwn(req.body ?? {}, "customerGroupId")) {
+      return res.status(403).json({ error: "Only the business owner can assign a saved customer group." });
+    }
     if (!await hasCustomerGroup(parsed.data.customerGroupId)) return res.status(400).json({ error: "Choose an existing customer group." });
     const [campaign] = await db.transaction(async (tx) => {
-      const [updated] = await tx.update(marketingCampaigns).set({ ...parsed.data, updatedAt: new Date() }).where(eq(marketingCampaigns.id, id)).returning();
+      const [current] = await tx.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, id)).for("update").limit(1);
+      if (!current) return [undefined];
+      const audienceChanged = parsed.data.customerGroupId !== undefined
+        && parsed.data.customerGroupId !== current.customerGroupId;
+      const activated = current.status !== "active" && parsed.data.status === "active";
+      const shouldEnableSnapshots = parsed.data.customerGroupId !== null
+        && parsed.data.customerGroupId !== undefined
+        && (audienceChanged || activated)
+        && current.audienceSnapshotEnabledAt === null;
+      const [updated] = await tx.update(marketingCampaigns).set({
+        ...parsed.data,
+        ...(shouldEnableSnapshots ? { audienceSnapshotEnabledAt: new Date() } : {}),
+        updatedAt: new Date(),
+      }).where(eq(marketingCampaigns.id, id)).returning();
       if (updated) await recordBusinessAudit(tx, {
         entityType: "marketing_campaign", entityId: updated.id, recordLabel: updated.name,
         actor: res.locals.actor, action: "updated", changedFields: Object.keys(parsed.data),
@@ -107,7 +241,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return [updated];
     });
     if (!campaign) return res.status(404).json({ error: "Campaign not found." });
-    res.json({ campaign });
+    res.json({
+      campaign: canManageAudiences ? campaign : { ...campaign, customerGroupId: null },
+    });
   });
   app.post("/api/marketing/campaigns/:id/replace-link", owner, campaignLinkOwnerOnly, async (req, res) => {
     const id = Number(req.params.id);
@@ -215,6 +351,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/marketing/customer-groups", owner, async (_req, res) => {
+    if (res.locals.actor?.role !== "owner") {
+      return res.json({ groups: [], canManage: false, canViewMembers: false });
+    }
     const [groups, { customers: allCustomers, history }] = await Promise.all([
       db.select().from(marketingCustomerGroups).orderBy(asc(marketingCustomerGroups.name)),
       loadCustomerHistory(),
@@ -232,7 +371,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       canViewMembers: res.locals.actor?.role === "owner",
     });
   });
-  async function getCustomerGroupMembers(group: typeof marketingCustomerGroups.$inferSelect) {
+  async function getCustomerGroupMemberDetails(group: typeof marketingCustomerGroups.$inferSelect) {
     const { customers: allCustomers, history } = await loadCustomerHistory();
     return allCustomers.filter((customer) => matchesCustomerGroup(group.rules, {
       fulfilledOrders: history.get(customer.id)?.fulfilledOrders ?? 0,
@@ -269,13 +408,13 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   app.get("/api/marketing/customer-groups/:id/members", owner, ownerOnly, async (req, res) => {
     const group = await findCustomerGroup(req, res);
     if (!group) return;
-    const members = await getCustomerGroupMembers(group);
+    const members = await getCustomerGroupMemberDetails(group);
     res.json({ group, members });
   });
   app.get("/api/marketing/customer-groups/:id/export.csv", owner, ownerOnly, async (req, res) => {
     const group = await findCustomerGroup(req, res);
     if (!group) return;
-    const members = await getCustomerGroupMembers(group);
+    const members = await getCustomerGroupMemberDetails(group);
     const filename = `${group.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "customer-group"}-${group.id}.csv`;
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
@@ -330,14 +469,24 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer group." });
     const campaignIds = req.body?.campaignIds;
+    const replacementGroupId = req.body?.replacementGroupId ?? null;
     if (!Array.isArray(campaignIds) || !campaignIds.every((campaignId: unknown) =>
       Number.isSafeInteger(campaignId) && Number(campaignId) > 0)) {
       return res.status(400).json({ error: "Review the linked campaigns before deleting this group." });
     }
+    if (replacementGroupId !== null
+      && (!Number.isSafeInteger(replacementGroupId) || replacementGroupId <= 0 || replacementGroupId === id)) {
+      return res.status(400).json({ error: "Choose a different existing customer group as the replacement." });
+    }
     const result = await db.transaction(async (tx) => {
       const [existing] = await tx.select({ id: marketingCustomerGroups.id, name: marketingCustomerGroups.name })
-        .from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).limit(1);
+        .from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, id)).for("update").limit(1);
       if (!existing) return null;
+      if (replacementGroupId !== null) {
+        const [replacement] = await tx.select({ id: marketingCustomerGroups.id })
+          .from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, replacementGroupId)).for("update").limit(1);
+        if (!replacement) return { missingReplacement: true as const };
+      }
       const linkedCampaigns = await tx.select({
         id: marketingCampaigns.id,
         name: marketingCampaigns.name,
@@ -349,11 +498,11 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       if (expectedIds.length !== actualIds.length || expectedIds.some((campaignId, index) => campaignId !== actualIds[index])) {
         return { conflict: true as const, campaigns: linkedCampaigns };
       }
-      const unlinkedCampaigns = await tx.update(marketingCampaigns)
-        .set({ customerGroupId: null, updatedAt: new Date() })
+      const changedCampaigns = await tx.update(marketingCampaigns)
+        .set({ customerGroupId: replacementGroupId, updatedAt: new Date() })
         .where(eq(marketingCampaigns.customerGroupId, id))
         .returning({ id: marketingCampaigns.id, name: marketingCampaigns.name });
-      for (const campaign of unlinkedCampaigns) {
+      for (const campaign of changedCampaigns) {
         await recordBusinessAudit(tx, {
           entityType: "marketing_campaign", entityId: campaign.id, recordLabel: campaign.name,
           actor: res.locals.actor, action: "updated", changedFields: ["customerGroupId"],
@@ -367,6 +516,9 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return { conflict: false as const };
     });
     if (!result) return res.status(404).json({ error: "Customer group not found." });
+      if ("missingReplacement" in result) {
+        return res.status(404).json({ error: "Replacement customer group not found. Review the list and try again." });
+      }
     if (result.conflict) {
       return res.status(409).json({
         error: "Campaign links changed after the warning. Review the updated campaign links and try again.",

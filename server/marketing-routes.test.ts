@@ -6,7 +6,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
   accountingAccounts, businessAuditLogs, customers, inventoryMovements, journalEntries, journalLines, marketingAttributions,
-  marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
+  marketingCampaignAudienceSnapshots, marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
 
@@ -100,6 +100,299 @@ test("campaign link replacement is owner-only while managers retain ordinary cam
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (managerCreatedCampaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, managerCreatedCampaignId));
     if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    await db.delete(businessAuditLogs).where(inArray(businessAuditLogs.actorEmail, actorEmails));
+  }
+});
+
+test("managers cannot read or change saved campaign audience assignments", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const suffix = randomUUID();
+  const actorEmails = [`audience-owner-${suffix}@example.test`, `audience-manager-${suffix}@example.test`];
+  const app = express();
+  app.use(express.json());
+  const access: RequestHandler = (req, res, next) => {
+    const isManager = req.header("x-role") === "manager";
+    res.locals.actor = {
+      clerkUserId: `${isManager ? "manager" : "owner"}-${suffix}`,
+      email: actorEmails[isManager ? 1 : 0],
+      role: isManager ? "manager" : "owner",
+    };
+    next();
+  };
+  registerMarketingRoutes(app, access);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let groupId: number | undefined;
+  let campaignId: number | undefined;
+  const request = async (role: "owner" | "manager", path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        "x-role": role,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = response.status === 204 ? null : await response.json() as any;
+    return { response, payload };
+  };
+
+  try {
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: `Private audience ${suffix}`,
+      rules: { minimumFulfilledOrders: 2 },
+    }).returning();
+    groupId = group.id;
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `Audience campaign ${suffix}`,
+      status: "active",
+      customerGroupId: group.id,
+    }).returning();
+    campaignId = campaign.id;
+
+    const managerGroups = await request("manager", "/api/marketing/customer-groups");
+    assert.equal(managerGroups.response.status, 200);
+    assert.deepEqual(managerGroups.payload, { groups: [], canManage: false, canViewMembers: false });
+
+    const managerCampaigns = await request("manager", "/api/marketing/campaigns");
+    assert.equal(managerCampaigns.response.status, 200);
+    const managerCampaign = managerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id);
+    assert.equal(managerCampaign.customerGroupId, null);
+    assert.equal(JSON.stringify(managerCampaigns.payload).includes(group.name), false);
+
+    const deniedCreate = await request("manager", "/api/marketing/campaigns", "POST", {
+      name: `Manager audience attempt ${suffix}`,
+      status: "draft",
+      customerGroupId: group.id,
+    });
+    assert.equal(deniedCreate.response.status, 403);
+
+    const deniedClear = await request("manager", `/api/marketing/campaigns/${campaign.id}`, "PATCH", {
+      name: campaign.name,
+      status: "active",
+      customerGroupId: null,
+    });
+    assert.equal(deniedClear.response.status, 403);
+
+    const managerEdit = await request("manager", `/api/marketing/campaigns/${campaign.id}`, "PATCH", {
+      name: `Edited by manager ${suffix}`,
+      status: "active",
+    });
+    assert.equal(managerEdit.response.status, 200, JSON.stringify(managerEdit.payload));
+    assert.equal(managerEdit.payload.campaign.customerGroupId, null);
+    const [unchangedAssignment] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(unchangedAssignment.customerGroupId, group.id);
+
+    const ownerGroups = await request("owner", "/api/marketing/customer-groups");
+    assert.equal(ownerGroups.response.status, 200);
+    assert.ok(ownerGroups.payload.groups.some((item: any) => item.id === group.id && item.name === group.name));
+    const ownerCampaigns = await request("owner", "/api/marketing/campaigns");
+    assert.equal(ownerCampaigns.response.status, 200);
+    assert.equal(ownerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id).customerGroupId, group.id);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    await db.delete(businessAuditLogs).where(inArray(businessAuditLogs.actorEmail, actorEmails));
+  }
+});
+
+test("deleting a customer group can move linked campaigns to a replacement atomically", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const suffix = randomUUID();
+  const actorEmail = `group-replacement-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `owner-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerMarketingRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let oldGroupId: number | undefined;
+  let replacementGroupId: number | undefined;
+  let campaignId: number | undefined;
+  const request = async (path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return {
+      response,
+      payload: response.status === 204 ? null : await response.json() as any,
+    };
+  };
+
+  try {
+    const [oldGroup] = await db.insert(marketingCustomerGroups).values({
+      name: `Old audience ${suffix}`,
+      rules: { minimumFulfilledOrders: 1 },
+    }).returning();
+    oldGroupId = oldGroup.id;
+    const [replacement] = await db.insert(marketingCustomerGroups).values({
+      name: `Replacement audience ${suffix}`,
+      rules: { noOrderInLastDays: 90 },
+    }).returning();
+    replacementGroupId = replacement.id;
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `Linked campaign ${suffix}`,
+      status: "active",
+      customerGroupId: oldGroup.id,
+    }).returning();
+    campaignId = campaign.id;
+
+    const stale = await request(`/api/marketing/customer-groups/${oldGroup.id}`, "DELETE", {
+      campaignIds: [],
+      replacementGroupId: replacement.id,
+    });
+    assert.equal(stale.response.status, 409);
+    assert.equal((await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, oldGroup.id))).length, 1);
+
+    const removed = await request(`/api/marketing/customer-groups/${oldGroup.id}`, "DELETE", {
+      campaignIds: [campaign.id],
+      replacementGroupId: replacement.id,
+    });
+    assert.equal(removed.response.status, 204, JSON.stringify(removed.payload));
+    assert.equal((await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, oldGroup.id))).length, 0);
+    const [savedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(savedCampaign.customerGroupId, replacement.id);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    if (oldGroupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, oldGroupId));
+    if (replacementGroupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, replacementGroupId));
+    await db.delete(businessAuditLogs).where(eq(businessAuditLogs.actorEmail, actorEmail));
+  }
+});
+
+test("campaign launch audiences remain reviewable after group rules change or the group is deleted", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const suffix = randomUUID();
+  const actorEmails = [`snapshot-owner-${suffix}@example.test`, `snapshot-manager-${suffix}@example.test`];
+  const app = express();
+  app.use(express.json());
+  const access: RequestHandler = (req, res, next) => {
+    const isManager = req.header("x-role") === "manager";
+    res.locals.actor = {
+      clerkUserId: `${isManager ? "manager" : "owner"}-${suffix}`,
+      email: actorEmails[isManager ? 1 : 0],
+      role: isManager ? "manager" : "owner",
+    };
+    next();
+  };
+  registerMarketingRoutes(app, access);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let customerId: number | undefined;
+  let groupId: number | undefined;
+  let campaignId: number | undefined;
+  const request = async (role: "owner" | "manager", path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        "x-role": role,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = response.status === 204 ? null : await response.json() as any;
+    return { response, payload };
+  };
+
+  try {
+    const [customer] = await db.insert(customers).values({
+      name: `Snapshot customer ${suffix}`,
+      email: `snapshot-${suffix}@example.test`,
+      phone: `+260-${suffix.slice(0, 8)}`,
+    }).returning();
+    customerId = customer.id;
+    assert.ok(customer.email);
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: `Launch group ${suffix}`,
+      rules: { noOrderInLastDays: 365 },
+    }).returning();
+    groupId = group.id;
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `Launch snapshot ${suffix}`,
+      status: "active",
+      startsOn: "2000-01-01",
+      customerGroupId: group.id,
+      audienceSnapshotEnabledAt: new Date(),
+    }).returning();
+    campaignId = campaign.id;
+
+    const ownerCampaigns = await request("owner", "/api/marketing/campaigns");
+    assert.equal(ownerCampaigns.response.status, 200, JSON.stringify(ownerCampaigns.payload));
+    assert.ok(ownerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id).audienceSnapshotCapturedAt);
+
+    const initial = await request("owner", `/api/marketing/campaigns/${campaign.id}/audience-snapshot`);
+    assert.equal(initial.response.status, 200, JSON.stringify(initial.payload));
+    assert.equal(initial.payload.snapshot.groupName, group.name);
+    assert.deepEqual(initial.payload.snapshot.rules, group.rules);
+    assert.deepEqual(initial.payload.snapshot.members.map((member: any) => ({
+      id: member.id, name: member.name, email: member.email,
+    })), [{ id: customer.id, name: customer.name, email: customer.email }]);
+
+    const editedGroup = await request("owner", `/api/marketing/customer-groups/${group.id}`, "PATCH", {
+      name: `Changed group ${suffix}`,
+      rules: { minimumFulfilledOrders: 100 },
+    });
+    assert.equal(editedGroup.response.status, 200, JSON.stringify(editedGroup.payload));
+    const removedGroup = await request("owner", `/api/marketing/customer-groups/${group.id}`, "DELETE", {
+      campaignIds: [campaign.id],
+      replacementGroupId: null,
+    });
+    assert.equal(removedGroup.response.status, 204, JSON.stringify(removedGroup.payload));
+    groupId = undefined;
+
+    const preserved = await request("owner", `/api/marketing/campaigns/${campaign.id}/audience-snapshot`);
+    assert.equal(preserved.response.status, 200, JSON.stringify(preserved.payload));
+    assert.equal(preserved.payload.snapshot.groupName, group.name);
+    assert.deepEqual(preserved.payload.snapshot.rules, group.rules);
+    assert.equal(preserved.payload.snapshot.members[0].email, customer.email);
+
+    const managerSnapshot = await request("manager", `/api/marketing/campaigns/${campaign.id}/audience-snapshot`);
+    assert.equal(managerSnapshot.response.status, 403);
+    assert.equal(JSON.stringify(managerSnapshot.payload).includes(customer.email), false);
+    const managerCampaigns = await request("manager", "/api/marketing/campaigns");
+    const managerCampaign = managerCampaigns.payload.campaigns.find((item: any) => item.id === campaign.id);
+    assert.equal(managerCampaign.customerGroupId, null);
+    assert.equal(managerCampaign.audienceSnapshotCapturedAt, null);
+
+    const [savedSnapshot] = await db.select().from(marketingCampaignAudienceSnapshots)
+      .where(eq(marketingCampaignAudienceSnapshots.campaignId, campaign.id));
+    assert.equal(savedSnapshot.groupName, group.name);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
     await db.delete(businessAuditLogs).where(inArray(businessAuditLogs.actorEmail, actorEmails));
   }
 });

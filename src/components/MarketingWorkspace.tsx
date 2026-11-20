@@ -1,12 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Download, Pencil, Plus, RefreshCw, X } from "lucide-react";
+import { emptyCustomerGroupAccess } from "../lib/customer-group-access";
 
-type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null };
+type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null; audienceSnapshotCapturedAt?: string | null; audienceSnapshotEnabledAt?: string | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
 type Expense = { id: number; campaignId: number | null; campaignName: string | null; category: string; description: string; amount: string; currency: string; exchangeRateToZmw: string; expenseDate: string; paid: boolean };
 type CustomerGroupRules = { minimumFulfilledOrders?: number; maximumFulfilledOrders?: number; noOrderInLastDays?: number; minimumLifetimeSalesZmw?: string };
 type CustomerGroup = { id: number; name: string; rules: CustomerGroupRules; memberCount: number };
 type CustomerGroupMember = { id: number; name: string; email: string | null; phone: string | null; fulfilledOrders: number; lifetimeSalesZmw: string; lastOrderDate: string | null };
+type GroupDeletionReview = { group: CustomerGroup; campaigns: Pick<Campaign, "id" | "name">[] };
+type CampaignAudienceSnapshot = {
+  groupName: string;
+  rules: CustomerGroupRules;
+  capturedAt: string;
+  members: { id: number; name: string; email: string | null; phone: string | null }[];
+};
 type MarketingReport = {
   period: { from: string | null; to: string | null };
   totals: { spendZmw: string; attributedRevenueZmw: string; productCostZmw: string; landedCostAdjustmentZmw: string; unallocatedLandedCostAdjustmentZmw: string; netContributionZmw: string | null; missingCostOrders: number; attributedOrders: number; campaignLinkOrders: number; ordersWithoutCampaignLinks: number; unattributedRevenueZmw: string; unattributedOrders: number; revenueToSpend: string | null };
@@ -120,6 +128,9 @@ export default function MarketingWorkspace() {
   const [editingCustomerGroup, setEditingCustomerGroup] = useState<number | null>(null);
   const [selectedCustomerGroup, setSelectedCustomerGroup] = useState<number | null>(null);
   const [customerGroupMembers, setCustomerGroupMembers] = useState<CustomerGroupMember[]>([]);
+  const [groupDeletionReview, setGroupDeletionReview] = useState<GroupDeletionReview | null>(null);
+  const [replacementGroupId, setReplacementGroupId] = useState("");
+  const [campaignAudienceSnapshot, setCampaignAudienceSnapshot] = useState<CampaignAudienceSnapshot | null>(null);
   const [membersLoading, setMembersLoading] = useState(false);
   const [campaignForm, setCampaignForm] = useState(campaignEmpty);
   const [contentForm, setContentForm] = useState(contentEmpty);
@@ -135,6 +146,22 @@ export default function MarketingWorkspace() {
   const [reportLoading, setReportLoading] = useState(false);
   const [selectedSegment, setSelectedSegment] = useState("repeat");
 
+  function clearCustomerGroupAccess() {
+    const access = emptyCustomerGroupAccess<CustomerGroup, CustomerGroupMember>();
+    setCustomerGroups(access.groups);
+    setCanManageCustomerGroups(access.canManage);
+    setCanViewCustomerGroupMembers(access.canViewMembers);
+    setSelectedCustomerGroup(access.selectedGroupId);
+    setCustomerGroupMembers(access.members);
+    setMembersLoading(false);
+    setEditingCustomerGroup(null);
+    setCustomerGroupForm(customerGroupEmpty);
+    setCampaignForm((current) => ({ ...current, customerGroupId: "" }));
+    setGroupDeletionReview(null);
+    setReplacementGroupId("");
+    setCampaignAudienceSnapshot(null);
+  }
+
   async function load() {
     setLoading(true);
     try {
@@ -144,7 +171,7 @@ export default function MarketingWorkspace() {
       ]);
       setCampaigns(c.campaigns); setContent(p.content); setExpenses(e.expenses);
       setCustomerGroups(g.groups); setCanManageCustomerGroups(g.canManage); setCanViewCustomerGroupMembers(g.canViewMembers); setError("");
-    } catch (reason) { setError(displayError(reason)); }
+    } catch (reason) { clearCustomerGroupAccess(); setError(displayError(reason)); }
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
@@ -164,6 +191,7 @@ export default function MarketingWorkspace() {
         }
         setError("");
       } catch (reason) {
+        clearCustomerGroupAccess();
         setError(displayError(reason));
       } finally {
         refreshing = false;
@@ -193,8 +221,16 @@ export default function MarketingWorkspace() {
   async function submitCampaign(event: FormEvent) {
     event.preventDefault(); setError(""); setMessage("");
     try {
+      const campaignPayload = {
+        ...campaignForm,
+        ...(canManageCustomerGroups ? { customerGroupId: campaignForm.customerGroupId ? Number(campaignForm.customerGroupId) : null } : {}),
+        startsOn: campaignForm.startsOn || null,
+        endsOn: campaignForm.endsOn || null,
+        budgetZmw: campaignForm.budgetZmw || null,
+      };
+      if (!canManageCustomerGroups) delete (campaignPayload as Partial<typeof campaignPayload>).customerGroupId;
       await request(editingCampaign ? `/api/marketing/campaigns/${editingCampaign}` : "/api/marketing/campaigns",
-        editingCampaign ? "PATCH" : "POST", { ...campaignForm, customerGroupId: campaignForm.customerGroupId ? Number(campaignForm.customerGroupId) : null, startsOn: campaignForm.startsOn || null, endsOn: campaignForm.endsOn || null, budgetZmw: campaignForm.budgetZmw || null });
+        editingCampaign ? "PATCH" : "POST", campaignPayload);
       setCampaignForm(campaignEmpty); setEditingCampaign(null); setMessage("Campaign saved."); await load();
     } catch (reason) { setError(displayError(reason)); }
   }
@@ -251,21 +287,42 @@ export default function MarketingWorkspace() {
     setError(""); setMessage("");
     try {
       const preview = await request(`/api/marketing/customer-groups/${group.id}/deletion-impact`);
-      const linkedCampaigns: Campaign[] = preview.campaigns;
-      const campaignNames = linkedCampaigns.map((campaign) => `• ${campaign.name}`).join("\n");
-      const warning = linkedCampaigns.length
-        ? `Remove the customer group “${group.name}”?\n\nThese campaigns will be unlinked:\n${campaignNames}\n\nHistorical orders and their campaign sales attribution will not change.`
-        : `Remove the customer group “${group.name}”?\n\nHistorical orders and their campaign sales attribution will not change.`;
-      if (!window.confirm(warning)) return;
+      setGroupDeletionReview({ group, campaigns: preview.campaigns });
+      setReplacementGroupId("");
+    } catch (reason) { setError(displayError(reason)); }
+  }
+  async function confirmDeleteCustomerGroup() {
+    if (!groupDeletionReview) return;
+    const { group, campaigns } = groupDeletionReview;
+    const replacementGroup = customerGroups.find((candidate) => String(candidate.id) === replacementGroupId);
+    setError(""); setMessage("");
+    try {
       await request(`/api/marketing/customer-groups/${group.id}`, "DELETE", {
-        campaignIds: linkedCampaigns.map((campaign) => campaign.id),
+        campaignIds: campaigns.map((campaign) => campaign.id),
+        replacementGroupId: replacementGroup?.id ?? null,
       });
       if (selectedCustomerGroup === group.id) { setSelectedCustomerGroup(null); setCustomerGroupMembers([]); }
-      setMessage(linkedCampaigns.length
-        ? `Customer group removed. Unlinked campaigns: ${linkedCampaigns.map((campaign) => campaign.name).join(", ")}. Historical orders were not changed.`
-        : "Customer group removed. Historical orders were not changed.");
+      setMessage(replacementGroup
+        ? `Customer group removed. ${campaigns.length} campaign${campaigns.length === 1 ? " was" : "s were"} moved to ${replacementGroup.name}.`
+        : campaigns.length
+          ? `Customer group removed. Unlinked campaigns: ${campaigns.map((campaign) => campaign.name).join(", ")}.`
+          : "Customer group removed.");
+      setGroupDeletionReview(null);
+      setReplacementGroupId("");
       await load();
-    } catch (reason) { setError(displayError(reason)); }
+    } catch (reason) {
+      const message = displayError(reason);
+      setError(message);
+      if (/campaign links changed/i.test(message)) {
+        try {
+          const refreshed = await request(`/api/marketing/customer-groups/${group.id}/deletion-impact`);
+          setGroupDeletionReview({ group, campaigns: refreshed.campaigns });
+        } catch (refreshReason) {
+          setGroupDeletionReview(null);
+          setError(displayError(refreshReason));
+        }
+      }
+    }
   }
   async function copyShopLink(campaign: Campaign) {
     try {
@@ -290,6 +347,13 @@ export default function MarketingWorkspace() {
       await load();
     } catch (reason) { setError(displayError(reason)); }
   }
+  async function viewCampaignAudience(campaign: Campaign) {
+    setError("");
+    try {
+      const result = await request(`/api/marketing/campaigns/${campaign.id}/audience-snapshot`);
+      setCampaignAudienceSnapshot(result.snapshot);
+    } catch (reason) { setError(displayError(reason)); }
+  }
   function shopLink(campaign: Campaign) {
     const url = new URL("/shop", window.location.origin);
     url.searchParams.set("ref", campaign.trackingCode);
@@ -297,7 +361,7 @@ export default function MarketingWorkspace() {
   }
   function editCampaign(item: Campaign) {
     setEditingCampaign(item.id);
-    setCampaignForm({ name: item.name, objective: item.objective ?? "", channel: item.channel ?? "", status: item.status, startsOn: item.startsOn ?? "", endsOn: item.endsOn ?? "", budgetZmw: item.budgetZmw ?? "", notes: item.notes ?? "", customerGroupId: item.customerGroupId !== null && customerGroups.some((group) => group.id === item.customerGroupId) ? String(item.customerGroupId) : "" });
+    setCampaignForm({ name: item.name, objective: item.objective ?? "", channel: item.channel ?? "", status: item.status, startsOn: item.startsOn ?? "", endsOn: item.endsOn ?? "", budgetZmw: item.budgetZmw ?? "", notes: item.notes ?? "", customerGroupId: canManageCustomerGroups && item.customerGroupId !== null && customerGroups.some((group) => group.id === item.customerGroupId) ? String(item.customerGroupId) : "" });
   }
   function editItem(item: ContentItem) {
     setEditingContent(item.id);
@@ -321,15 +385,33 @@ export default function MarketingWorkspace() {
               <div className="form-grid"><label>Channel<input placeholder="Social, retail, email…" value={campaignForm.channel} onChange={(e) => setCampaignForm({ ...campaignForm, channel: e.target.value })} /></label><label>Status<select value={campaignForm.status} onChange={(e) => setCampaignForm({ ...campaignForm, status: e.target.value })}>{["draft","active","paused","completed","cancelled"].map((x) => <option key={x}>{x}</option>)}</select></label></div>
               <label>Objective<textarea rows={2} value={campaignForm.objective} onChange={(e) => setCampaignForm({ ...campaignForm, objective: e.target.value })} /></label>
               <div className="form-grid"><label>Launch date<input type="date" value={campaignForm.startsOn} onChange={(e) => setCampaignForm({ ...campaignForm, startsOn: e.target.value })} /><span className="field-hint">Set the status to active and choose a future date to schedule link attribution.</span></label><label>Ends<input type="date" value={campaignForm.endsOn} onChange={(e) => setCampaignForm({ ...campaignForm, endsOn: e.target.value })} /></label></div>
-               <label>Saved customer group<select value={campaignForm.customerGroupId} onChange={(e) => setCampaignForm({ ...campaignForm, customerGroupId: e.target.value })}><option value="">No saved group</option>{customerGroups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}</option>)}</select><span className="field-hint">Membership stays linked to the group’s current saved rules.</span></label>
+               {canManageCustomerGroups && <label>Saved customer group<select value={campaignForm.customerGroupId} onChange={(e) => setCampaignForm({ ...campaignForm, customerGroupId: e.target.value })}><option value="">No saved group</option>{customerGroups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}</option>)}</select><span className="field-hint">Membership stays linked to the group’s current saved rules.</span></label>}
               <label>Budget (ZMW, optional)<input type="number" min="0" step="0.01" value={campaignForm.budgetZmw} onChange={(e) => setCampaignForm({ ...campaignForm, budgetZmw: e.target.value })} /></label>
               <button className="button button-primary button-small"><Plus /> {editingCampaign ? "Save campaign" : "Add campaign"}</button>
               {editingCampaign && <button type="button" className="button button-quiet button-small" onClick={() => { setEditingCampaign(null); setCampaignForm(campaignEmpty); }}><X /> Cancel edit</button>}
             </form>
-              <div className="marketing-list">{campaigns.map((item) => {
-                const group = item.customerGroupId === null ? undefined : customerGroups.find((savedGroup) => savedGroup.id === item.customerGroupId);
-                return <article className="marketing-row" key={item.id}><div><strong>{item.name}</strong><span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}{group ? ` · ${group.name} · ${group.memberCount} customer${group.memberCount === 1 ? "" : "s"}` : ""}</span><input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} /></div><button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button>{canManageCustomerGroups && <button className="icon-button" aria-label={`Replace shop link for ${item.name}`} title="Replace shop link" onClick={() => void replaceShopLink(item)}><RefreshCw /></button>}<button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button></article>;
-              })}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
+               <div className="marketing-list">{campaigns.map((item) => {
+                 const group = item.customerGroupId === null ? undefined : customerGroups.find((savedGroup) => savedGroup.id === item.customerGroupId);
+                 const audienceStatus = item.audienceSnapshotCapturedAt
+                   ? ` · Audience saved ${new Date(item.audienceSnapshotCapturedAt).toLocaleDateString("en-ZM")}`
+                   : item.audienceSnapshotEnabledAt
+                     ? " · Audience snapshot will be saved on launch"
+                     : item.status === "active" && group
+                       ? " · Launch audience not recorded for this older campaign"
+                       : "";
+                 return <article className="marketing-row" key={item.id}>
+                   <div>
+                     <strong>{item.name}</strong>
+                     <span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}{canManageCustomerGroups && group ? ` · ${group.name} · ${group.memberCount} customer${group.memberCount === 1 ? "" : "s"}` : ""}{canManageCustomerGroups && group ? audienceStatus : ""}
+                     </span>
+                     <input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} />
+                   </div>
+                   {canManageCustomerGroups && item.audienceSnapshotCapturedAt && <button className="button button-secondary button-small" type="button" onClick={() => void viewCampaignAudience(item)}>View launch audience</button>}
+                   {canManageCustomerGroups && <button className="icon-button" aria-label={`Copy shop link for ${item.name}`} title="Copy shop link" onClick={() => void copyShopLink(item)}><Copy /></button>}
+                   {canManageCustomerGroups && <button className="icon-button" aria-label={`Replace shop link for ${item.name}`} title="Replace shop link" onClick={() => void replaceShopLink(item)}><RefreshCw /></button>}
+                   <button className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => editCampaign(item)}><Pencil /></button>
+                 </article>;
+               })}{campaigns.length === 0 && <p className="muted-empty">No campaigns yet.</p>}</div>
           </section>
 
           <section className="panel marketing-section">
@@ -378,6 +460,52 @@ export default function MarketingWorkspace() {
         onEditGroup={editCustomerGroup}
         onDeleteGroup={(group) => void deleteCustomerGroup(group)}
       />
+      {groupDeletionReview && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setGroupDeletionReview(null);
+      }}>
+        <section className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="delete-group-title">
+          <header className="modal-header">
+            <div><p className="eyebrow">Customer group</p><h2 id="delete-group-title">Remove {groupDeletionReview.group.name}?</h2></div>
+            <button className="icon-button" type="button" aria-label="Close" onClick={() => setGroupDeletionReview(null)}><X /></button>
+          </header>
+          <div className="marketing-dialog-body">
+            {groupDeletionReview.campaigns.length > 0 ? <>
+              <p>These campaigns currently use this audience:</p>
+              <ul>{groupDeletionReview.campaigns.map((campaign) => <li key={campaign.id}>{campaign.name}</li>)}</ul>
+              <label>Move linked campaigns to
+                <select value={replacementGroupId} onChange={(event) => setReplacementGroupId(event.target.value)}>
+                  <option value="">No replacement — unlink campaigns</option>
+                  {customerGroups.filter((group) => group.id !== groupDeletionReview.group.id).map((group) => (
+                    <option key={group.id} value={group.id}>{group.name} · {group.memberCount} customer{group.memberCount === 1 ? "" : "s"}</option>
+                  ))}
+                </select>
+              </label>
+            </> : <p>No campaigns currently use this audience.</p>}
+            <p className="report-footnote">Historical order attribution will not change.</p>
+            <div className="marketing-dialog-actions">
+              <button className="button button-secondary" type="button" onClick={() => setGroupDeletionReview(null)}>Cancel</button>
+              <button className="button button-primary" type="button" onClick={() => void confirmDeleteCustomerGroup()}>Remove group</button>
+            </div>
+          </div>
+        </section>
+      </div>}
+      {campaignAudienceSnapshot && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setCampaignAudienceSnapshot(null);
+      }}>
+        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="campaign-audience-title">
+          <header className="modal-header">
+            <div><p className="eyebrow">Saved at campaign launch</p><h2 id="campaign-audience-title">{campaignAudienceSnapshot.groupName}</h2></div>
+            <button className="icon-button" type="button" aria-label="Close" onClick={() => setCampaignAudienceSnapshot(null)}><X /></button>
+          </header>
+          <div className="marketing-dialog-body">
+            <p>Captured {new Date(campaignAudienceSnapshot.capturedAt).toLocaleString("en-ZM")}. This audience stays unchanged when the saved group is edited or removed.</p>
+            <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Email</th><th>Phone</th></tr></thead><tbody>
+              {campaignAudienceSnapshot.members.map((member) => <tr key={member.id}><td>{member.name}</td><td>{member.email || "—"}</td><td>{member.phone || "—"}</td></tr>)}
+              {campaignAudienceSnapshot.members.length === 0 && <tr><td colSpan={3}>No customers matched the group at launch.</td></tr>}
+            </tbody></table></div>
+          </div>
+        </section>
+      </div>}
       <section className="panel marketing-report">
         <div className="panel-heading"><div><h2>Marketing reports</h2><span>Campaign sales include fulfilled orders linked to a campaign. Built-in customer segments use lifetime fulfilled orders; saved groups can also use sales and recency.</span></div></div>
         <div className="marketing-report-controls">
