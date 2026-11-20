@@ -1209,6 +1209,267 @@ test("database flow adjusts late import costs across partial receipts and sales"
   }
 });
 
+test("correcting receipt clearing restores a postable landed-cost adjustment", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [
+    { db, pool },
+    { registerProcurementRoutes },
+    { registerInventoryRoutes },
+  ] = await Promise.all([
+    import("./db"),
+    import("./procurement-routes"),
+    import("./inventory-routes"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const suffix = randomUUID();
+  const testEmail = `receipt-clearing-repair-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: testEmail, role: "owner" };
+    next();
+  };
+  registerProcurementRoutes(app, owner);
+  registerInventoryRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let supplierId: number | undefined;
+  let productId: number | undefined;
+  let locationId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  let shipmentId: number | undefined;
+
+  const request = async (path: string, body: unknown, expectedStatus: number) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const responseText = await response.text();
+    let payload: any;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      throw new Error(`Expected a JSON response from ${path}, got ${response.status}: ${responseText.slice(0, 1000)}`);
+    }
+    assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+    return payload;
+  };
+  const patch = async (path: string, body: unknown, expectedStatus: number) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as any;
+    assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+    return payload;
+  };
+
+  try {
+    const [supplier] = await db.insert(suppliers).values({
+      name: `Receipt repair supplier ${suffix}`,
+    }).returning();
+    supplierId = supplier.id;
+    const [product] = await db.insert(products).values({
+      sku: `ACC-REPAIR-${suffix}`,
+      name: `Receipt repair product ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const [location] = await db.insert(inventoryLocations).values({
+      name: `Receipt repair location ${suffix}`,
+    }).returning();
+    locationId = location.id;
+
+    const { order } = await request("/api/purchase-orders", {
+      supplierId,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [{ productId, quantityOrdered: 10, unitPrice: "100.00" }],
+    }, 201);
+    purchaseOrderId = order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId!));
+    const { shipment } = await request("/api/shipments", {
+      purchaseOrderIds: [purchaseOrderId],
+      shipmentReference: `ACC-REPAIR-SHIP-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: [{ purchaseOrderLineId: orderLine.id, quantityShipped: 10 }],
+    }, 201);
+    shipmentId = shipment.id;
+    const [shipmentLine] = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, shipmentId!));
+    await request("/api/import-expenses", {
+      purchaseOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Before-receipt freight ${suffix}`,
+      amount: "100.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    await patch(`/api/shipments/${shipmentId}/receive`, {
+      lines: [{ shipmentLineId: shipmentLine.id, quantityReceived: 4 }],
+    }, 200);
+    await request(`/api/inventory/receipts/${shipmentLine.id}/post`, { locationId }, 201);
+    await request("/api/import-expenses", {
+      purchaseOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `After-receipt freight ${suffix}`,
+      amount: "20.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-20",
+      reference: null,
+      notes: null,
+    }, 201);
+
+    const [movement] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLine.id}-to-4`));
+    const [receiptEntry] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, movement.id),
+    ));
+    const [clearingAccount] = await db.select().from(accountingAccounts)
+      .where(eq(accountingAccounts.systemKey, "landed_cost_clearing"));
+    const [receiptClearingLine] = await db.select().from(journalLines).where(and(
+      eq(journalLines.journalEntryId, receiptEntry.id),
+      eq(journalLines.accountId, clearingAccount.id),
+    ));
+    // The original posted share is 400.00; recording 481.00 makes the current
+    // difference negative despite the later 80.00 adjustment.
+    await db.update(journalLines).set({ creditZmw: "481.00" })
+      .where(eq(journalLines.id, receiptClearingLine.id));
+    const { orders: [mismatchedOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    assert.equal(mismatchedOrder.adjustmentPreview.hasNegativeLine, true,
+      JSON.stringify(mismatchedOrder.adjustmentPreview));
+    assert.equal(mismatchedOrder.adjustmentPreview.canPost, false);
+    assert.equal(mismatchedOrder.adjustmentPreview.lines[0].adjustmentZmw, "-1.00");
+
+    const adjustmentRequestFor = (preview: any) => ({
+      reviewedAmountZmw: preview.adjustmentAvailableZmw,
+      reviewedLines: preview.lines.map((line: any) => ({
+        lineId: line.lineId,
+        adjustmentZmw: line.adjustmentZmw,
+        inventoryZmw: line.inventoryZmw,
+        cogsZmw: line.cogsZmw,
+      })),
+      note: "Repair receipt clearing history",
+    });
+    await request(`/api/landed-costs/${purchaseOrderId}/adjust`,
+      adjustmentRequestFor(mismatchedOrder.adjustmentPreview), 409);
+
+    await db.update(journalLines).set({ creditZmw: "400.00" })
+      .where(eq(journalLines.id, receiptClearingLine.id));
+    const { orders: [repairedOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    const preview = repairedOrder.adjustmentPreview;
+    assert.equal(preview.receipts[0].clearedAmountZmw, "400.00");
+    assert.equal(preview.hasNegativeLine, false);
+    assert.equal(preview.canPost, true);
+    assert.equal(preview.adjustmentAvailableZmw, "80.00");
+    assert.equal(preview.lines[0].adjustmentZmw, "80.00");
+
+    const { journalEntry } = await request(
+      `/api/landed-costs/${purchaseOrderId}/adjust`,
+      adjustmentRequestFor(preview),
+      201,
+    );
+    const postedLines = await db.select({
+      systemKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, journalEntry.id));
+    assert.deepEqual(postedLines.map((line) => [
+      line.systemKey, line.debitZmw, line.creditZmw,
+    ]), [
+      ["inventory", "80.00", "0.00"],
+      ["landed_cost_clearing", "0.00", "80.00"],
+    ]);
+    assert.equal(journalLinesAreBalanced(postedLines.map((line) => ({
+      accountKey: line.systemKey ?? "",
+      debitZmw: line.debitZmw,
+      creditZmw: line.creditZmw,
+    }))), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [testEmail]);
+      if (purchaseOrderId) {
+        await client.query(`
+          DELETE FROM journal_lines WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE (source_type = 'import_expense' AND source_id IN (
+              SELECT id FROM import_expenses WHERE purchase_order_id = $1
+            ))
+            OR (source_type = 'stock_receipt' AND source_id IN (
+              SELECT id FROM inventory_movements WHERE product_id = $2
+            ))
+            OR (source_type = 'landed_cost_adjustment' AND source_id = $1)
+          )
+        `, [purchaseOrderId, productId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE (source_type = 'import_expense' AND source_id IN (
+            SELECT id FROM import_expenses WHERE purchase_order_id = $1
+          ))
+          OR (source_type = 'stock_receipt' AND source_id IN (
+            SELECT id FROM inventory_movements WHERE product_id = $2
+          ))
+          OR (source_type = 'landed_cost_adjustment' AND source_id = $1)
+        `, [purchaseOrderId, productId]);
+        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        await client.query("DELETE FROM import_expenses WHERE purchase_order_id = $1", [purchaseOrderId]);
+      }
+      if (shipmentId) {
+        await client.query("DELETE FROM shipment_lines WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipments WHERE id = $1", [shipmentId]);
+      }
+      if (purchaseOrderId) {
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+      if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+});
+
 test("repeated opening-stock corrections stay linked to the latest count", {
   skip: !process.env.DATABASE_URL,
 }, async () => {

@@ -381,7 +381,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       reviewedAmountZmw: z.string().trim().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
       reviewedLines: z.array(z.object({
         lineId: z.number().int().positive(),
-        adjustmentZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
+        adjustmentZmw: z.string().regex(/^-?\d{1,12}(?:\.\d{1,2})?$/),
         inventoryZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
         cogsZmw: z.string().regex(/^\d{1,12}(?:\.\d{1,2})?$/),
       }).strict()).max(100),
