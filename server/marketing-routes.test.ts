@@ -2567,6 +2567,7 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
   let campaignId: number | undefined;
   let customerId: number | undefined;
   let productId: number | undefined;
+  let missingCostProductId: number | undefined;
   const orderIds: number[] = [];
   try {
     const baseline = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
@@ -2583,6 +2584,13 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
       status: "active",
     }).returning();
     productId = product.id;
+    const [missingCostProduct] = await db.insert(products).values({
+      sku: `CLR-MISSING-${suffix}`,
+      name: `${prefix} missing-cost product`,
+      sellingPriceZmw: "25.00",
+      status: "active",
+    }).returning();
+    missingCostProductId = missingCostProduct.id;
     const [customer] = await db.insert(customers).values({ name: `${prefix} customer` }).returning();
     customerId = customer.id;
 
@@ -2599,9 +2607,10 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
       orderDate: reportDate,
     }).returning();
     orderIds.push(manualOrder.id, linkOrder.id);
-    const [manualLine, linkLine] = await db.insert(salesOrderLines).values([
+    const [manualLine, linkLine, missingCostLine] = await db.insert(salesOrderLines).values([
       { salesOrderId: manualOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
       { salesOrderId: linkOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "50.00" },
+      { salesOrderId: manualOrder.id, productId: missingCostProduct.id, quantity: 1, unitPriceZmw: "25.00" },
     ]).returning();
     await db.insert(marketingAttributions).values([
       { salesOrderId: manualOrder.id, campaignId: campaign.id, source: "manual" },
@@ -2619,6 +2628,7 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     }).returning();
     await db.insert(salesDeliveryLines).values([
       { deliveryId: manualDelivery.id, salesOrderLineId: manualLine.id, quantity: 1 },
+      { deliveryId: manualDelivery.id, salesOrderLineId: missingCostLine.id, quantity: 1 },
       { deliveryId: linkDelivery.id, salesOrderLineId: linkLine.id, quantity: 1 },
     ]);
     await Promise.all([
@@ -2662,10 +2672,10 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     const campaignBefore = beforeClear.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
     assert.ok(campaignBefore);
     assert.equal(campaignBefore.orderCount, 2);
-    assert.equal(campaignBefore.attributedRevenueZmw, "150.00");
+    assert.equal(campaignBefore.attributedRevenueZmw, "175.00");
     assert.equal(campaignBefore.productCostZmw, "55.00");
     assert.equal(campaignBefore.landedCostAdjustmentZmw, "5.00");
-    assert.deepEqual(campaignBefore.missingCostOrders, []);
+    assert.deepEqual(campaignBefore.missingCostOrders, [manualOrder.orderNumber]);
     assert.equal(beforeClear.payload.totals.campaignLinkOrders, baseline.payload.totals.campaignLinkOrders + 1);
     assert.equal(beforeClear.payload.totals.ordersWithoutCampaignLinks, baseline.payload.totals.ordersWithoutCampaignLinks + 1);
 
@@ -2709,7 +2719,7 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     assert.equal(
       BigInt(afterClear.payload.totals.unattributedRevenueZmw.replace(".", "")) -
         BigInt(baseline.payload.totals.unattributedRevenueZmw.replace(".", "")),
-      10000n,
+      12500n,
     );
     assert.equal(afterClear.payload.totals.campaignLinkOrders, baseline.payload.totals.campaignLinkOrders + 1);
     assert.equal(afterClear.payload.totals.ordersWithoutCampaignLinks, baseline.payload.totals.ordersWithoutCampaignLinks + 1);
@@ -2739,6 +2749,7 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
       if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (missingCostProductId) await client.query("DELETE FROM products WHERE id = $1", [missingCostProductId]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
