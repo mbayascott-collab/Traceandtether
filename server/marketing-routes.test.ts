@@ -2318,6 +2318,7 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
 
   let campaignId: number | undefined;
   let destinationCampaignId: number | undefined;
+  let finalCampaignId: number | undefined;
   let customerId: number | undefined;
   const productIds: number[] = [];
   const orderIds: number[] = [];
@@ -2335,6 +2336,11 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       status: "active",
     }).returning();
     destinationCampaignId = destinationCampaign.id;
+    const [finalCampaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} final destination`,
+      status: "active",
+    }).returning();
+    finalCampaignId = finalCampaign.id;
     const [productA, productB] = await db.insert(products).values([
       {
         sku: `CANCEL-${suffix}-A`,
@@ -2466,6 +2472,42 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       campaignLinkOrdersDelta: 1,
       ordersWithoutLinksDelta: 0,
     });
+
+    const movedAgain = await request(`/api/sales-orders/${order.id}/attribution`, "PATCH", {
+      campaignId: finalCampaign.id,
+    });
+    assert.equal(movedAgain.response.status, 200, JSON.stringify(movedAgain.payload));
+    const afterSecondMove = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(afterSecondMove.response.status, 200, JSON.stringify(afterSecondMove.payload));
+    const oldCampaignAfterSecondMove = afterSecondMove.payload.campaigns.find(
+      (item: { id: number }) => item.id === campaign.id,
+    );
+    const previousDestinationAfterSecondMove = afterSecondMove.payload.campaigns.find(
+      (item: { id: number }) => item.id === destinationCampaign.id,
+    );
+    const finalCampaignAfterSecondMove = afterSecondMove.payload.campaigns.find(
+      (item: { id: number }) => item.id === finalCampaign.id,
+    );
+    assert.deepEqual({
+      firstCampaign: [oldCampaignAfterSecondMove.orderCount, oldCampaignAfterSecondMove.attributedRevenueZmw],
+      previousDestination: [
+        previousDestinationAfterSecondMove.orderCount,
+        previousDestinationAfterSecondMove.attributedRevenueZmw,
+      ],
+      finalDestination: [finalCampaignAfterSecondMove.orderCount, finalCampaignAfterSecondMove.attributedRevenueZmw],
+      attributedOrdersDelta: afterSecondMove.payload.totals.attributedOrders - before.payload.totals.attributedOrders,
+      campaignLinkOrdersDelta:
+        afterSecondMove.payload.totals.campaignLinkOrders - before.payload.totals.campaignLinkOrders,
+      ordersWithoutLinksDelta:
+        afterSecondMove.payload.totals.ordersWithoutCampaignLinks - before.payload.totals.ordersWithoutCampaignLinks,
+    }, {
+      firstCampaign: [0, "0.00"],
+      previousDestination: [0, "0.00"],
+      finalDestination: [1, "380.00"],
+      attributedOrdersDelta: 1,
+      campaignLinkOrdersDelta: 1,
+      ordersWithoutLinksDelta: 0,
+    });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -2484,6 +2526,7 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       }
       if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
       if (destinationCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [destinationCampaignId]);
+      if (finalCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [finalCampaignId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       if (productIds.length) await client.query("DELETE FROM products WHERE id = ANY($1)", [productIds]);
       await client.query("COMMIT");
