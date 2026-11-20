@@ -1982,6 +1982,202 @@ test("marketing report counts partial campaign deliveries once and matches poste
   }
 });
 
+test("campaign reports show negative delivery shares for reversed landed costs", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerMarketingRoutes }, { postJournal }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+    import("./accounting-posting"),
+  ]);
+  const availableColumns = await pool.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'marketing_attributions'
+       AND column_name = 'source'`,
+  );
+  if (availableColumns.rows.length === 0) {
+    t.skip("requires the campaign attribution source migration");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const prefix = `negative-landed-cost-${suffix}`;
+  const actorEmail = `${prefix}@example.test`;
+  const reportDate = "9999-12-31";
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerMarketingRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const requestReport = async () => {
+    const response = await fetch(`${baseUrl}/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    return { response, payload: await response.json() as any };
+  };
+  let customerId: number | undefined;
+  let productId: number | undefined;
+  let campaignId: number | undefined;
+  let orderId: number | undefined;
+  const orderLineIds: number[] = [];
+  const deliveryIds: number[] = [];
+  const deliveryLineIds: number[] = [];
+  const journalEntryIds: number[] = [];
+
+  try {
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} campaign`,
+      status: "active",
+    }).returning();
+    campaignId = campaign.id;
+    const [customer] = await db.insert(customers).values({
+      name: `${prefix} customer`,
+    }).returning();
+    customerId = customer.id;
+    const [product] = await db.insert(products).values({
+      sku: `NLC-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [order] = await db.insert(salesOrders).values({
+      orderNumber: `NLC-${suffix.slice(0, 20)}-1`,
+      customerId: customer.id,
+      status: "fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    orderId = order.id;
+    const [line] = await db.insert(salesOrderLines).values({
+      salesOrderId: order.id,
+      productId: product.id,
+      quantity: 4,
+      unitPriceZmw: "100.00",
+    }).returning();
+    orderLineIds.push(line.id);
+    const deliveries = await db.insert(salesDeliveries).values([
+      { deliveryNumber: `NLC-${suffix.slice(0, 16)}-D1`, salesOrderId: order.id, deliveryDate: reportDate },
+      { deliveryNumber: `NLC-${suffix.slice(0, 16)}-D2`, salesOrderId: order.id, deliveryDate: reportDate },
+    ]).returning();
+    deliveryIds.push(...deliveries.map((delivery) => delivery.id));
+    const deliveryLines = await db.insert(salesDeliveryLines).values([
+      { deliveryId: deliveries[0]!.id, salesOrderLineId: line.id, quantity: 1 },
+      { deliveryId: deliveries[1]!.id, salesOrderLineId: line.id, quantity: 3 },
+    ]).returning();
+    deliveryLineIds.push(...deliveryLines.map((deliveryLine) => deliveryLine.id));
+    await db.insert(marketingAttributions).values({
+      salesOrderId: order.id,
+      campaignId: campaign.id,
+      source: "manual",
+    });
+
+    for (const [index, delivery] of deliveries.entries()) {
+      const amount = index === 0 ? "10.00" : "30.00";
+      const entry = await db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-delivery-cogs-${delivery.id}`,
+        sourceType: "sales_delivery_cogs",
+        sourceId: delivery.id,
+        memo: `${prefix} delivery cost`,
+        entryDate: reportDate,
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: amount },
+          { accountKey: "inventory", productId: product.id, creditZmw: amount },
+        ],
+      }));
+      journalEntryIds.push(entry.id);
+    }
+
+    const baseline = await requestReport();
+    assert.equal(baseline.response.status, 200, JSON.stringify(baseline.payload));
+    const baselineCampaign = baseline.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    assert.ok(baselineCampaign);
+    assert.equal(baselineCampaign.productCostZmw, "40.00");
+    assert.equal(baselineCampaign.landedCostAdjustmentZmw, "0.00");
+
+    const reversal = await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-landed-cost-reversal`,
+      sourceType: "landed_cost_adjustment",
+      sourceId: product.id,
+      memo: `${prefix} landed-cost reversal`,
+      entryDate: reportDate,
+      lines: [
+        { accountKey: "inventory", productId: product.id, debitZmw: "0.05" },
+        { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.05" },
+      ],
+    }));
+    journalEntryIds.push(reversal.id);
+    const readReversalJournal = () => db.select({
+      systemKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalEntries.id, reversal.id));
+    const sourceJournal = await readReversalJournal();
+    const report = await requestReport();
+    assert.equal(report.response.status, 200, JSON.stringify(report.payload));
+    const campaignReport = report.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    assert.ok(campaignReport);
+    assert.equal(campaignReport.orderCount, 1);
+    assert.equal(campaignReport.attributedRevenueZmw, "400.00");
+    assert.equal(campaignReport.productCostZmw, "39.95");
+    assert.equal(campaignReport.landedCostAdjustmentZmw, "-0.05");
+    assert.equal(campaignReport.netContributionZmw, "360.05");
+    assert.deepEqual(
+      campaignReport.landedCostAdjustmentDeliveries.map((delivery: {
+        deliveryNumber: string;
+        adjustmentZmw: string;
+        products: { productId: number; adjustmentZmw: string }[];
+      }) => [
+        delivery.deliveryNumber,
+        delivery.adjustmentZmw,
+        delivery.products.map((item) => [item.productId, item.adjustmentZmw]),
+      ]),
+      [
+        [`NLC-${suffix.slice(0, 16)}-D1`, "-0.01", [[product.id, "-0.01"]]],
+        [`NLC-${suffix.slice(0, 16)}-D2`, "-0.04", [[product.id, "-0.04"]]],
+      ],
+    );
+    const allocatedCents = campaignReport.landedCostAdjustmentDeliveries
+      .flatMap((delivery: { adjustmentZmw: string }) => [BigInt(delivery.adjustmentZmw.replace(".", ""))])
+      .reduce((total: bigint, amount: bigint) => total + amount, 0n);
+    const postedCogsAdjustmentCents = sourceJournal
+      .filter((line) => line.systemKey === "cost_of_goods_sold")
+      .reduce((total, line) =>
+        total + BigInt(line.debitZmw.replace(".", "")) - BigInt(line.creditZmw.replace(".", "")), 0n);
+    assert.equal(allocatedCents, postedCogsAdjustmentCents);
+    assert.equal(allocatedCents, -5n);
+    assert.equal(
+      BigInt(campaignReport.productCostZmw.replace(".", ""))
+        - BigInt(baselineCampaign.productCostZmw.replace(".", "")),
+      allocatedCents,
+    );
+    assert.deepEqual(await readReversalJournal(), sourceJournal);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (orderId) await db.delete(marketingAttributions).where(eq(marketingAttributions.salesOrderId, orderId));
+    if (journalEntryIds.length) {
+      await db.delete(journalLines).where(inArray(journalLines.journalEntryId, journalEntryIds));
+      await db.delete(journalEntries).where(inArray(journalEntries.id, journalEntryIds));
+    }
+    if (deliveryLineIds.length) await db.delete(salesDeliveryLines).where(inArray(salesDeliveryLines.id, deliveryLineIds));
+    if (deliveryIds.length) await db.delete(salesDeliveries).where(inArray(salesDeliveries.id, deliveryIds));
+    if (orderLineIds.length) await db.delete(salesOrderLines).where(inArray(salesOrderLines.id, orderLineIds));
+    if (orderId) await db.delete(salesOrders).where(eq(salesOrders.id, orderId));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
+    if (productId) await db.delete(products).where(eq(products.id, productId));
+    await db.delete(businessAuditLogs).where(eq(businessAuditLogs.actorEmail, actorEmail));
+  }
+});
+
 test("campaign reporting keeps delivered revenue after the remainder of an order is cancelled", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
