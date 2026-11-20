@@ -371,6 +371,7 @@ export function registerSalesRoutes(
           .where(and(
             eq(marketingCampaigns.trackingCode, parsed.data.trackingCode),
             eq(marketingCampaigns.status, "active"),
+            sql`(${marketingCampaigns.startsOn} is null or ${marketingCampaigns.startsOn} <= CURRENT_DATE)`,
           )).limit(1).for("share")
         : [];
       const ids = parsed.data.lines.map((line) => line.productId);

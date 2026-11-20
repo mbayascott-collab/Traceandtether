@@ -174,6 +174,8 @@ test("public shop campaign links attribute orders and reports count them without
   const actorEmail = `campaign-attribution-${suffix}@example.test`;
   const clientIp = `198.51.100.${Number.parseInt(suffix.slice(0, 2), 16) % 254 + 1}`;
   const clientIpHash = createHash("sha256").update(clientIp).digest("hex");
+  const scheduledClientIp = `203.0.113.${Number.parseInt(suffix.slice(2, 4), 16) % 254 + 1}`;
+  const scheduledClientIpHash = createHash("sha256").update(scheduledClientIp).digest("hex");
   const oldReportDate = "2001-01-01";
   const app = express();
   app.set("trust proxy", true);
@@ -190,11 +192,12 @@ test("public shop campaign links attribute orders and reports count them without
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
-  const headers = { "content-type": "application/json", "x-forwarded-for": clientIp };
-  const request = async (path: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
+  const request = async (path: string, body?: unknown, method = body === undefined ? "GET" : "POST", ip = clientIp) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: body === undefined ? { "x-forwarded-for": clientIp } : headers,
+      headers: body === undefined
+        ? { "x-forwarded-for": ip }
+        : { "content-type": "application/json", "x-forwarded-for": ip },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const payload = await response.json() as any;
@@ -204,6 +207,7 @@ test("public shop campaign links attribute orders and reports count them without
   let productId: number | undefined;
   let campaignId: number | undefined;
   let secondCampaignId: number | undefined;
+  let scheduledCampaignId: number | undefined;
   const orderNumbers: string[] = [];
 
   try {
@@ -243,7 +247,7 @@ test("public shop campaign links attribute orders and reports count them without
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000));
 
-    const submitOrder = async (index: number, code: string | undefined, challenge: string) => {
+    const submitOrder = async (index: number, code: string | undefined, challenge: string, ip = clientIp) => {
       const { response, payload } = await request("/api/shop/orders", {
         name: `Campaign attribution customer ${suffix}-${index}`,
         phone: `+260 977 ${String(index).padStart(3, "0")} 000`,
@@ -254,12 +258,13 @@ test("public shop campaign links attribute orders and reports count them without
         lines: [{ productId, quantity: 1 }],
         trackingCode: code,
         challenge,
-      });
+      }, "POST", ip);
       assert.equal(response.status, 201, JSON.stringify(payload));
       assert.deepEqual(Object.keys(payload).sort(), ["orderNumber"]);
       assert.equal(JSON.stringify(payload).includes(campaignName), false);
       assert.equal(JSON.stringify(payload).includes(code ?? trackingCode), false);
       orderNumbers.push(payload.orderNumber);
+      return payload.orderNumber as string;
     };
     await submitOrder(0, trackingCode, challenges[0]);
 
@@ -337,6 +342,46 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 3);
     assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 3);
     assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
+
+    const [databaseDate] = (await pool.query<{ today: string; tomorrow: string }>(
+      "SELECT CURRENT_DATE::text AS today, (CURRENT_DATE + 1)::text AS tomorrow",
+    )).rows;
+    const scheduledTrackingCode = randomUUID();
+    const [scheduledCampaign] = await db.insert(marketingCampaigns).values({
+      name: `Scheduled campaign ${suffix}`,
+      trackingCode: scheduledTrackingCode,
+      status: "active",
+      startsOn: databaseDate.tomorrow,
+    }).returning();
+    scheduledCampaignId = scheduledCampaign.id;
+    const getScheduledChallenge = async () => {
+      const shop = await request("/api/shop/products", undefined, undefined, scheduledClientIp);
+      assert.equal(shop.response.status, 200);
+      assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      return shop.payload.challenge as string;
+    };
+    const scheduledOrderNumber = await submitOrder(
+      5, scheduledTrackingCode, await getScheduledChallenge(), scheduledClientIp,
+    );
+    const [scheduledOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
+      .where(eq(salesOrders.orderNumber, scheduledOrderNumber));
+    const earlyAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, scheduledOrder.id));
+    assert.equal(earlyAttribution.length, 0, "a future-dated campaign link must not attribute early");
+
+    await db.update(marketingCampaigns).set({ startsOn: databaseDate.today })
+      .where(eq(marketingCampaigns.id, scheduledCampaign.id));
+    const launchDayOrderNumber = await submitOrder(
+      6, scheduledTrackingCode, await getScheduledChallenge(), scheduledClientIp,
+    );
+    const [launchDayOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
+      .where(eq(salesOrders.orderNumber, launchDayOrderNumber));
+    const launchDayAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, launchDayOrder.id));
+    assert.equal(launchDayAttribution.length, 1, "link attribution must become eligible on its start date");
+    assert.equal(launchDayAttribution[0].campaignId, scheduledCampaign.id);
+    assert.equal(launchDayAttribution[0].source, "campaign_link");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -366,7 +411,9 @@ test("public shop campaign links attribute orders and reports count them without
       }
       if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
       if (secondCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [secondCampaignId]);
+      if (scheduledCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [scheduledCampaignId]);
       await client.query("DELETE FROM public_shop_order_limits WHERE ip_hash = $1", [clientIpHash]);
+      await client.query("DELETE FROM public_shop_order_limits WHERE ip_hash = $1", [scheduledClientIpHash]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
