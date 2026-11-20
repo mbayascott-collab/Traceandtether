@@ -58,7 +58,13 @@ test("campaign link replacement is owner-only while managers retain ordinary cam
   try {
     const [campaign] = await db.insert(marketingCampaigns).values({
       name: `${prefix} original`,
+      objective: "Promote repeat purchases",
+      channel: "Facebook",
       status: "active",
+      startsOn: "2025-01-10",
+      endsOn: "2025-02-10",
+      budgetZmw: "275.50",
+      notes: "Keep the approved promotion details",
       trackingCode: suffix,
     }).returning();
     campaignId = campaign.id;
@@ -87,12 +93,29 @@ test("campaign link replacement is owner-only while managers retain ordinary cam
 
     const [unchangedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
     assert.equal(unchangedCampaign.trackingCode, suffix);
+    const [campaignBeforeOwnerReplace] = await db.select().from(marketingCampaigns)
+      .where(eq(marketingCampaigns.id, campaign.id));
+    const stableCampaignFields = (item: typeof campaign) => ({
+      name: item.name,
+      objective: item.objective,
+      channel: item.channel,
+      status: item.status,
+      startsOn: item.startsOn,
+      endsOn: item.endsOn,
+      budgetZmw: item.budgetZmw,
+      notes: item.notes,
+      customerGroupId: item.customerGroupId,
+    });
 
     const ownerReplace = await request("test-owner", `/api/marketing/campaigns/${campaign.id}/replace-link`, "POST", {
       trackingCode: suffix,
     });
     assert.equal(ownerReplace.response.status, 200, JSON.stringify(ownerReplace.payload));
     assert.notEqual(ownerReplace.payload.campaign.trackingCode, suffix);
+    assert.deepEqual(stableCampaignFields(ownerReplace.payload.campaign), stableCampaignFields(campaignBeforeOwnerReplace));
+    const [campaignAfterOwnerReplace] = await db.select().from(marketingCampaigns)
+      .where(eq(marketingCampaigns.id, campaign.id));
+    assert.deepEqual(stableCampaignFields(campaignAfterOwnerReplace), stableCampaignFields(campaignBeforeOwnerReplace));
 
     const managerCampaignsAfterReplacement = await request("test-manager", "/api/marketing/campaigns");
     assert.equal(managerCampaignsAfterReplacement.response.status, 200, JSON.stringify(managerCampaignsAfterReplacement.payload));
