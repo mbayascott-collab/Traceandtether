@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { ReplitConnectors } from "@replit/connectors-sdk";
-import { customerQuotes } from "../shared/schema";
+import { customerQuoteEmailAttempts, customerQuotes } from "../shared/schema";
 import { db } from "./db";
 
 const bounceSearch = "newer_than:7d {from:mailer-daemon from:postmaster}";
@@ -99,14 +99,29 @@ async function forwardBounceEvent(input: {
   port: number;
 }): Promise<boolean> {
   const [quote] = await db.select({
+    id: customerQuotes.id,
     emailProviderMessageId: customerQuotes.emailProviderMessageId,
     emailSendStatus: customerQuotes.emailSendStatus,
     emailAttemptedAt: customerQuotes.emailAttemptedAt,
   }).from(customerQuotes).where(eq(customerQuotes.quoteNumber, input.quoteNumber)).limit(1);
-  if (!quote?.emailProviderMessageId
-    || !quote.emailAttemptedAt
-    || quote.emailAttemptedAt.getTime() !== input.attemptedAt.getTime()
-    || !["sent", "bounced"].includes(quote.emailSendStatus)) return false;
+  if (!quote) return false;
+  let messageId = quote.emailAttemptedAt?.getTime() === input.attemptedAt.getTime()
+    && ["sent", "bounced"].includes(quote.emailSendStatus)
+    ? quote.emailProviderMessageId
+    : null;
+  if (!messageId) {
+    const [attempt] = await db.select({
+      providerMessageId: customerQuoteEmailAttempts.providerMessageId,
+      status: customerQuoteEmailAttempts.status,
+    }).from(customerQuoteEmailAttempts).where(and(
+      eq(customerQuoteEmailAttempts.customerQuoteId, quote.id),
+      eq(customerQuoteEmailAttempts.attemptedAt, input.attemptedAt),
+    )).limit(1);
+    if (attempt && ["sent", "delivered", "bounced"].includes(attempt.status)) {
+      messageId = attempt.providerMessageId;
+    }
+  }
+  if (!messageId) return false;
 
   const response = await fetch(`http://127.0.0.1:${input.port}/api/webhooks/customer-quote-email`, {
     method: "POST",
@@ -117,7 +132,7 @@ async function forwardBounceEvent(input: {
     body: JSON.stringify({
       provider: "gmail",
       eventId: input.messageId,
-      messageId: quote.emailProviderMessageId,
+      messageId,
       status: "bounced",
       occurredAt: input.occurredAt.toISOString(),
       error: input.error,

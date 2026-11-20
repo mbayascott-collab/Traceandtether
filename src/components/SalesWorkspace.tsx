@@ -543,7 +543,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             {o.deliveries.map((delivery) => <div key={`invoice-${delivery.id}`} className="delivery-actions">
               {delivery.invoiceEmailAttempts?.[0] && <small className="invoice-email-history-summary">
                 {delivery.invoiceEmailAttempts.length} email attempt{delivery.invoiceEmailAttempts.length === 1 ? "" : "s"} · latest {delivery.invoiceEmailAttempts[0].status}
+                {delivery.invoiceEmailAttempts[0].recipientEmail ? ` to ${delivery.invoiceEmailAttempts[0].recipientEmail}` : ""}
                 {delivery.invoiceEmailAttempts[0].attemptedAt ? ` · ${new Date(delivery.invoiceEmailAttempts[0].attemptedAt).toLocaleString("en-ZM")}` : ""}
+                {delivery.invoiceEmailAttempts[0].providerMessageId ? ` · Gmail reference ${delivery.invoiceEmailAttempts[0].providerMessageId}` : ""}
                 {delivery.invoiceEmailAttempts[0].error ? ` · ${delivery.invoiceEmailAttempts[0].error}` : ""}
                 {delivery.invoiceEmailAttempts.length > 1 && <details>
                   <summary>Show invoice email history</summary>

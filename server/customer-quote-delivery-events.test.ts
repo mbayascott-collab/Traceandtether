@@ -4,7 +4,7 @@ import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { and, eq } from "drizzle-orm";
-import { businessAuditLogs, customerQuoteEmailEvents, customers, customerQuotes, unmatchedCustomerQuoteEmailEvents } from "../shared/schema";
+import { businessAuditLogs, customerQuoteEmailAttempts, customerQuoteEmailEvents, customers, customerQuotes, unmatchedCustomerQuoteEmailEvents } from "../shared/schema";
 import {
   customerQuoteDeliveryEventSchema, hasValidDeliveryWebhookToken,
   isValidCustomerQuoteDeliveryEventTime, shouldApplyCustomerQuoteDeliveryEvent,
@@ -193,9 +193,16 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
     assert.equal(orderedEvents.length, 2);
 
     const retriedQuote = await createQuote("current");
+    const priorAttemptAt = new Date(Date.now() - 90_000);
+    await db.insert(customerQuoteEmailAttempts).values({
+      customerQuoteId: retriedQuote.id, attemptNumber: 1, attemptedAt: priorAttemptAt,
+      recipientEmail: `delivery-event-test-${suffix}@example.test`, status: "sent",
+      sentAt: priorAttemptAt, providerMessageId: `gmail-${suffix}-previous-attempt`,
+    });
     await db.update(customerQuotes).set({
       emailProviderMessageId: `gmail-${suffix}-current-attempt`,
       emailSendStatus: "sent",
+      emailAttemptedAt: new Date(),
     }).where(eq(customerQuotes.id, retriedQuote.id));
     const earlierAttempt = await postEvent({
       provider: "gmail",
@@ -206,7 +213,7 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
       error: "An earlier send attempt bounced.",
     });
     assert.equal(earlierAttempt.status, 200);
-    assert.equal(earlierAttempt.payload.unmatched, true);
+    assert.equal(earlierAttempt.payload.stale, true);
     const [savedCurrentAttempt] = await db.select().from(customerQuotes)
       .where(eq(customerQuotes.id, retriedQuote.id));
     assert.equal(savedCurrentAttempt?.emailSendStatus, "sent");
@@ -215,10 +222,24 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
     assert.equal(savedCurrentAttempt?.emailSendError, null);
     const oldAttemptEvents = await db.select().from(customerQuoteEmailEvents)
       .where(eq(customerQuoteEmailEvents.customerQuoteId, retriedQuote.id));
-    assert.equal(oldAttemptEvents.length, 0);
+    assert.equal(oldAttemptEvents.length, 1);
+    const [savedOldAttempt] = await db.select().from(customerQuoteEmailAttempts)
+      .where(eq(customerQuoteEmailAttempts.providerMessageId, `gmail-${suffix}-previous-attempt`));
+    assert.equal(savedOldAttempt?.status, "bounced");
+
+    const unknownNotice = await postEvent({
+      provider: "gmail",
+      eventId: `event-${suffix}-unknown`,
+      messageId: `gmail-${suffix}-unknown`,
+      status: "bounced",
+      occurredAt: new Date(Date.now() - 15_000).toISOString(),
+      error: "The notice could not be correlated to an attempt.",
+    });
+    assert.equal(unknownNotice.status, 200);
+    assert.equal(unknownNotice.payload.unmatched, true);
     const [savedUnmatchedNotice] = await db.select().from(unmatchedCustomerQuoteEmailEvents)
-      .where(eq(unmatchedCustomerQuoteEmailEvents.providerEventId, `event-${suffix}-old-attempt`));
-    assert.equal(savedUnmatchedNotice?.providerMessageId, `gmail-${suffix}-previous-attempt`);
+      .where(eq(unmatchedCustomerQuoteEmailEvents.providerEventId, `event-${suffix}-unknown`));
+    assert.equal(savedUnmatchedNotice?.providerMessageId, `gmail-${suffix}-unknown`);
     assert.equal(savedUnmatchedNotice?.outcome, "bounced");
     unmatchedEventId = savedUnmatchedNotice?.id;
     const reviewResponse = await fetch(`${baseUrl}/api/customer-quote-email-notices/${unmatchedEventId}/reviewed`, {

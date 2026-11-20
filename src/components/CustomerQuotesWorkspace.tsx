@@ -39,7 +39,11 @@ export default function CustomerQuotesWorkspace() {
     let alive = true;
     const refreshQuotes = () => {
       if (document.visibilityState === "hidden") return;
-      fetchCustomerQuotes().then((latest) => { if (alive) setQuotes(latest); }).catch(() => {});
+      Promise.all([fetchCustomerQuotes(), fetchUnmatchedCustomerQuoteEmailEvents()])
+        .then(([latest, events]) => {
+          if (alive) { setQuotes(latest); setUnmatchedEvents(events); }
+        })
+        .catch(() => {});
     };
     const interval = window.setInterval(refreshQuotes, 30_000);
     window.addEventListener("focus", refreshQuotes);

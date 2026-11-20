@@ -126,6 +126,14 @@ test("sends the encoded message using Gmail and reports provider errors", async 
     ok: false,
     error: "Gmail could not send the quote (HTTP 403): Insufficient Permission",
   });
+  const unknownResult = await sendCustomerQuoteEmail(quote, {
+    async proxy() { return new Response(JSON.stringify({}), { status: 200 }); },
+  });
+  assert.deepEqual(unknownResult, {
+    ok: false,
+    ambiguous: true,
+    error: "Gmail accepted the email but did not return a message reference. Check Gmail Sent before retrying.",
+  });
 });
 
 test("does not contact Gmail when printable quote PDF generation fails", async () => {

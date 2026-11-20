@@ -99,8 +99,11 @@ test("long customer quotes print every row, repeat table headings, and keep appr
     execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
     const pages = readFileSync(textPath, "utf8").split("\f").map((page) => page.trim()).filter(Boolean);
     assert.equal(pages.length, pageCount, "Extracted PDF pages should match pdfinfo.");
-
     const normalize = (value: string) => value.replace(/\s+/g, " ").toLocaleLowerCase();
+    pages.forEach((page, index) => {
+      assert.match(normalize(page), new RegExp(`page ${index + 1} of ${pageCount}`), `PDF page ${index + 1} should show its page number.`);
+    });
+
     const allText = normalize(pages.join("\n"));
     for (let index = 1; index <= rowCount; index += 1) {
       const itemName = `Regression fixture item ${String(index).padStart(3, "0")}`;
@@ -128,6 +131,7 @@ test("long customer quotes print every row, repeat table headings, and keep appr
     }
 
     assert.match(css, /@page\s*\{\s*size:\s*A4/i, "Print stylesheet must continue to declare A4 page size.");
+    assert.match(css, /@page\s+customer-documents[\s\S]*?content:\s*"Page "\s*counter\(page\)\s*" of "\s*counter\(pages\)/i, "Customer quotes, invoices, and delivery notes need page number footers.");
     assert.match(css, /\.customer-quote-document-table thead\s*\{\s*display:\s*table-header-group/i, "Print stylesheet must repeat quote table headings.");
   } finally {
     rmSync(directory, { recursive: true, force: true });

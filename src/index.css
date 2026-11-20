@@ -3042,6 +3042,20 @@ textarea:focus-visible {
   font-weight: 800;
   text-transform: uppercase;
 }
+.quote-email-history,
+.quote-email-events,
+.invoice-email-history-summary details { margin-top: 6px; }
+.quote-email-history summary,
+.invoice-email-history-summary summary { cursor: pointer; color: #1d6e64; font-weight: 700; }
+.quote-email-history ol,
+.invoice-email-history-summary ol { display: grid; gap: 6px; margin: 7px 0 0; padding-left: 19px; }
+.quote-email-history li,
+.quote-email-events,
+.invoice-email-history-summary li { color: #526963; font-size: 11px; line-height: 1.45; }
+.quote-email-history li { display: grid; gap: 2px; }
+.quote-email-history li strong { color: #193c39; }
+.quote-email-events { display: grid; gap: 4px; margin-top: 8px; }
+.invoice-email-history-summary { display: block; max-width: 390px; white-space: normal; }
 .customer-quote-document-customer { display: grid; gap: 5px; margin: 25px 0; }
 .customer-quote-document-customer strong { font-size: 16px; }
 .customer-quote-document-customer p { margin: 0; color: #526963; font-size: 11px; white-space: pre-line; }

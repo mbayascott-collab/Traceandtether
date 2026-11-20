@@ -96,7 +96,10 @@ function paethPredictor(left: number, up: number, upperLeft: number) {
     : upDistance <= upperLeftDistance ? up : upperLeft;
 }
 
+let cachedQuoteLogo: { width: number; height: number; rgb: Buffer; alpha: Buffer } | null = null;
+
 function quoteLogoImage() {
+  if (cachedQuoteLogo) return cachedQuoteLogo;
   const png = readFileSync(fileURLToPath(new URL("../attached_assets/google_profile_1793771922305.png", import.meta.url)));
   const width = png.readUInt32BE(16);
   const height = png.readUInt32BE(20);
@@ -147,12 +150,13 @@ function quoteLogoImage() {
     rgbRows.push(Buffer.concat([Buffer.from([0]), rgb]));
     alphaRows.push(Buffer.concat([Buffer.from([0]), alpha]));
   }
-  return {
+  cachedQuoteLogo = {
     width,
     height,
     rgb: deflateSync(Buffer.concat(rgbRows)),
     alpha: deflateSync(Buffer.concat(alphaRows)),
   };
+  return cachedQuoteLogo;
 }
 
 export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
@@ -181,7 +185,7 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
   const firstPageCapacity = 54;
   const nextPageCapacity = 56;
   pageLines.push(lines.slice(0, firstPageCapacity));
-  for (let offset = firstPageCapacity; offset < lines.length; offset += nextPageCapacity) {
+  for (let offset = firstPageCapacity; offset < lines.length; offset += nextPageCapacity - 1) {
     pageLines.push([`Customer quotation ${content.quoteNumber} (continued)`, ...lines.slice(offset, offset + nextPageCapacity - 1)]);
   }
 

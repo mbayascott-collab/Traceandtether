@@ -81,4 +81,12 @@ test("reports Gmail send success and provider failure", async () => {
     ok: false,
     error: "Gmail could not send the invoice (HTTP 403): Insufficient Permission",
   });
+  const unclear = await sendSalesDeliveryInvoiceEmail(invoice, {
+    async proxy() { return new Response(JSON.stringify({}), { status: 200 }); },
+  });
+  assert.deepEqual(unclear, {
+    ok: false,
+    ambiguous: true,
+    error: "Gmail accepted the email but did not confirm it. Check Gmail Sent before retrying.",
+  });
 });

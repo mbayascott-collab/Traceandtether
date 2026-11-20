@@ -22,6 +22,7 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
 
   const suffix = randomUUID();
   const app = express();
+  app.use(express.json());
   const emailedInvoices: SalesDeliveryInvoiceEmailContent[] = [];
   let failEmail = false;
   let ambiguousEmail = false;
@@ -193,9 +194,13 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
     assert.equal(afterSend.status, 200);
     const afterSendPayload = await afterSend.json() as { orders: any[] };
     const afterSendOrder = afterSendPayload.orders.find((item) => item.id === order.id);
+    const normalizedDeliveries = (deliveries: any[]) => deliveries.map(({ invoiceEmailAttempts: _attempts, ...delivery }: any) => ({
+      ...delivery,
+      lines: [...delivery.lines].sort((left: any, right: any) => left.salesDeliveryLineId - right.salesDeliveryLineId),
+    })).sort((left: any, right: any) => left.id - right.id);
     assert.deepEqual(
-      afterSendOrder.deliveries.map(({ invoiceEmailAttempts: _attempts, ...delivery }: any) => delivery),
-      savedOrder.deliveries.map(({ invoiceEmailAttempts: _attempts, ...delivery }: any) => delivery),
+      normalizedDeliveries(afterSendOrder.deliveries),
+      normalizedDeliveries(savedOrder.deliveries),
       "sending an invoice must not alter the delivery's date, quantities, or receipt details",
     );
     assert.equal(afterSendOrder.status, savedOrder.status, "sending an invoice must not alter the order");
