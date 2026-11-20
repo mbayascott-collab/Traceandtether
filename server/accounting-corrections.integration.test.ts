@@ -452,6 +452,13 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(correctionAuditRows.length, corrections.length);
     for (const correction of corrections) {
       const audit = correctionAuditRows.find((row) => row.entityId === correction.id);
+      assert.equal(audit?.entityType, "accounting_correction");
+      assert.equal(audit?.action, "created");
+      assert.equal(
+        audit?.actorClerkUserId,
+        `correction-test-${suffix}-owner`,
+        "the audit entry must identify the owner account that made the correction",
+      );
       assert.equal(audit?.actorEmail, `${suffix}@example.test`, "the owner must remain identified in correction history");
       assert.ok(
         audit?.changedFields.includes(`reason: ${correction.reason}`),
