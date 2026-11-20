@@ -518,6 +518,15 @@ test("customer-group CSV exports reflect updated rules and customer order histor
   let groupId: number | undefined;
   const orderIds: number[] = [];
   const orderLineIds: number[] = [];
+  const deliveryIds: number[] = [];
+  const deliveryLineIds: number[] = [];
+  const dateDaysAgo = (days: number) => {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() - days);
+    return date.toISOString().slice(0, 10);
+  };
+  const olderDeliveryDate = dateDaysAgo(60);
+  const recentDeliveryDate = dateDaysAgo(5);
 
   const download = async () => {
     const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${groupId}/export.csv`);
@@ -562,7 +571,7 @@ test("customer-group CSV exports reflect updated rules and customer order histor
       orderNumber: `GF-${suffix.slice(0, 20)}-1`,
       customerId: firstCustomer.id,
       status: "fulfilled",
-      orderDate: "2026-11-01",
+      orderDate: olderDeliveryDate,
     }).returning();
     orderIds.push(firstOrder.id);
     const [secondOrder] = await db.insert(salesOrders).values({
@@ -577,6 +586,18 @@ test("customer-group CSV exports reflect updated rules and customer order histor
       { salesOrderId: secondOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
     ]).returning();
     orderLineIds.push(...orderLines.map((line) => line.id));
+    const [delivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `GF-${suffix.slice(0, 16)}-D1`,
+      salesOrderId: firstOrder.id,
+      deliveryDate: olderDeliveryDate,
+    }).returning();
+    deliveryIds.push(delivery.id);
+    const [deliveryLine] = await db.insert(salesDeliveryLines).values({
+      deliveryId: delivery.id,
+      salesOrderLineId: orderLines[0]!.id,
+      quantity: 1,
+    }).returning();
+    deliveryLineIds.push(deliveryLine.id);
 
     const beforeRuleChange = await download();
     assert.equal(beforeRuleChange.response.status, 200, beforeRuleChange.body);
@@ -604,8 +625,31 @@ test("customer-group CSV exports reflect updated rules and customer order histor
     assert.ok(afterHistoryChange.body.includes(secondEmail));
     assert.ok(afterHistoryChange.body.includes(secondName));
     assert.ok(afterHistoryChange.body.includes(secondPhone));
+
+    await Promise.all([
+      db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, firstOrder.id)),
+      db.update(salesOrders).set({ status: "confirmed" }).where(eq(salesOrders.id, secondOrder.id)),
+    ]);
+    const [resetSecondOrder] = await db.select({ status: salesOrders.status })
+      .from(salesOrders).where(eq(salesOrders.id, secondOrder.id));
+    assert.equal(resetSecondOrder?.status, "confirmed");
+    await patchGroup({ noOrderInLastDays: 30 });
+    const beforeDeliveryDateChange = await download();
+    assert.equal(beforeDeliveryDateChange.response.status, 200, beforeDeliveryDateChange.body);
+    assertColumns(beforeDeliveryDateChange.body);
+    assert.ok(beforeDeliveryDateChange.body.includes(firstEmail));
+    assert.ok(beforeDeliveryDateChange.body.includes(firstName));
+    assert.ok(beforeDeliveryDateChange.body.includes(firstPhone));
+    await db.update(salesDeliveries).set({ deliveryDate: recentDeliveryDate })
+      .where(eq(salesDeliveries.id, deliveryIds[0]!));
+    const afterDeliveryDateChange = await download();
+    assert.equal(afterDeliveryDateChange.response.status, 200, afterDeliveryDateChange.body);
+    assertColumns(afterDeliveryDateChange.body);
+    assert.ok(!afterDeliveryDateChange.body.includes(firstEmail));
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (deliveryLineIds.length) await db.delete(salesDeliveryLines).where(inArray(salesDeliveryLines.id, deliveryLineIds));
+    if (deliveryIds.length) await db.delete(salesDeliveries).where(inArray(salesDeliveries.id, deliveryIds));
     if (orderLineIds.length) await db.delete(salesOrderLines).where(inArray(salesOrderLines.id, orderLineIds));
     if (orderIds.length) await db.delete(salesOrders).where(inArray(salesOrders.id, orderIds));
     if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
