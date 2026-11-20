@@ -2003,7 +2003,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
   const suffix = randomUUID();
   const prefix = `negative-landed-cost-${suffix}`;
   const actorEmail = `${prefix}@example.test`;
-  const reportDate = "9999-12-31";
+  const reportDate = "9999-12-30";
   const app = express();
   app.use(express.json());
   const owner: RequestHandler = (_req, res, next) => {
@@ -2099,6 +2099,9 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     assert.ok(baselineCampaign);
     assert.equal(baselineCampaign.productCostZmw, "40.00");
     assert.equal(baselineCampaign.landedCostAdjustmentZmw, "0.00");
+    assert.equal(baseline.payload.totals.productCostZmw, "40.00");
+    assert.equal(baseline.payload.totals.landedCostAdjustmentZmw, "0.00");
+    assert.equal(baseline.payload.totals.netContributionZmw, "360.00");
 
     const reversal = await db.transaction((tx) => postJournal(tx, {
       sourceKey: `${prefix}-landed-cost-reversal`,
@@ -2130,6 +2133,9 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     assert.equal(campaignReport.productCostZmw, "39.95");
     assert.equal(campaignReport.landedCostAdjustmentZmw, "-0.05");
     assert.equal(campaignReport.netContributionZmw, "360.05");
+    assert.equal(report.payload.totals.productCostZmw, "39.95");
+    assert.equal(report.payload.totals.landedCostAdjustmentZmw, "-0.05");
+    assert.equal(report.payload.totals.netContributionZmw, "360.05");
     assert.deepEqual(
       campaignReport.landedCostAdjustmentDeliveries.map((delivery: {
         deliveryNumber: string;
@@ -2158,6 +2164,16 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       BigInt(campaignReport.productCostZmw.replace(".", ""))
         - BigInt(baselineCampaign.productCostZmw.replace(".", "")),
       allocatedCents,
+    );
+    assert.equal(
+      BigInt(report.payload.totals.productCostZmw.replace(".", ""))
+        - BigInt(baseline.payload.totals.productCostZmw.replace(".", "")),
+      -5n,
+    );
+    assert.equal(
+      BigInt(report.payload.totals.netContributionZmw.replace(".", ""))
+        - BigInt(baseline.payload.totals.netContributionZmw.replace(".", "")),
+      5n,
     );
     assert.deepEqual(await readReversalJournal(), sourceJournal);
   } finally {
