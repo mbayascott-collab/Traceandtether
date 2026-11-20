@@ -106,10 +106,15 @@ test("Clerk first sign-in provisions only the configured verified owner", {
   const accessUrl = `http://127.0.0.1:${address.port}/api/user-access`;
   const originalInsert = db.insert.bind(db);
   let failOwnerGrantInsert = true;
+  let failOwnerRecordInsert = false;
   t.mock.method(db, "insert", (table: any) => {
     if (table === appUserAccess && failOwnerGrantInsert) {
       failOwnerGrantInsert = false;
       throw new Error("temporary database error");
+    }
+    if (table === appUsers && failOwnerRecordInsert) {
+      failOwnerRecordInsert = false;
+      throw new Error("temporary user-record database error");
     }
     return originalInsert(table);
   });
@@ -159,6 +164,36 @@ test("Clerk first sign-in provisions only the configured verified owner", {
       .where(eq(appUsers.clerkUserId, ownerUserId));
     assert.equal(ownerRecords.length, 1);
     assert.equal(ownerRecords[0]?.role, "owner");
+
+    await db.delete(appUsers).where(eq(appUsers.clerkUserId, ownerUserId));
+    failOwnerRecordInsert = true;
+    const failedProfileWriteResponse = await fetch(currentUserUrl);
+    assert.equal(failedProfileWriteResponse.status, 503);
+    assert.deepEqual(await failedProfileWriteResponse.json(), {
+      error: "Account access could not be checked. Try again shortly.",
+    });
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerEmail))).length, 1,
+    "the owner grant remains available after the user-record write fails");
+    assert.equal((await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, ownerUserId))).length, 0,
+    "the failed user-record write must not leave a partial profile");
+
+    const profileRetryResponse = await fetch(currentUserUrl);
+    assert.equal(profileRetryResponse.status, 200);
+    assert.deepEqual(await profileRetryResponse.json(), {
+      authorized: true,
+      email: ownerEmail,
+      role: "owner",
+    });
+    assert.equal((await db.select().from(appUserAccess)
+      .where(eq(appUserAccess.email, ownerEmail))).length, 1,
+    "retry must not duplicate the existing owner grant");
+    const recoveredOwnerRecords = await db.select().from(appUsers)
+      .where(eq(appUsers.clerkUserId, ownerUserId));
+    assert.equal(recoveredOwnerRecords.length, 1);
+    assert.equal(recoveredOwnerRecords[0]?.role, "owner");
+
     assert.equal((await db.select().from(appUserAccess)
       .where(eq(appUserAccess.email, ownerSecondaryEmail))).length, 0,
     "a verified secondary address must not receive a separate owner grant");
