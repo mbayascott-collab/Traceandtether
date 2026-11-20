@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Download, Pencil, Plus, RefreshCw, X } from "lucide-react";
 import { customerGroupAccessAfterPermissionLoss, emptyCustomerGroupAccess } from "../lib/customer-group-access";
+import { installCustomerGroupRefresh } from "../lib/customer-group-refresh";
 
 type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null; audienceSnapshotCapturedAt?: string | null; audienceSnapshotEnabledAt?: string | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
@@ -232,39 +233,21 @@ export default function MarketingWorkspace() {
   }
   useEffect(() => { void load(); }, []);
   useEffect(() => {
-    let refreshing = false;
-    async function refreshGroups() {
-      if (refreshing || document.visibilityState === "hidden") return;
-      refreshing = true;
-      try {
-        const groups = await request("/api/marketing/customer-groups");
-        if (!applyCustomerGroupAccess(groups)) {
-          setError("");
-          return;
-        }
-        if (selectedCustomerGroup !== null && groups.canViewMembers) {
-          const members = await request(`/api/marketing/customer-groups/${selectedCustomerGroup}/members`);
-          setCustomerGroupMembers(members.members);
-        }
-        setError("");
-      } catch (reason) {
-        clearCustomerGroupAccess();
-        setError(displayError(reason));
-      } finally {
-        refreshing = false;
-      }
-    }
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void refreshGroups();
-    };
-    const interval = window.setInterval(() => void refreshGroups(), 30_000);
-    window.addEventListener("focus", refreshWhenVisible);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refreshWhenVisible);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
+    return installCustomerGroupRefresh<CustomerGroup, CustomerGroupMember>({
+      selectedGroupId: selectedCustomerGroup,
+      requestGroups: () => request("/api/marketing/customer-groups"),
+      applyGroups: applyCustomerGroupAccess,
+      requestMembers: (groupId) => request(`/api/marketing/customer-groups/${groupId}/members`),
+      applyMembers: setCustomerGroupMembers,
+      clearAccess: clearCustomerGroupAccess,
+      setError,
+      displayError,
+    }, {
+      window,
+      document,
+      setInterval: (callback, delay) => window.setInterval(callback, delay),
+      clearInterval: (handle) => window.clearInterval(handle as number),
+    });
   }, [selectedCustomerGroup]);
   async function runReport() {
     setError(""); setReportLoading(true);
