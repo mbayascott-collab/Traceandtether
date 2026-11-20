@@ -2502,7 +2502,29 @@ textarea:focus-visible {
 
 .shop-submit:disabled { opacity: .6; cursor: wait; }
 .shop-submit svg { width: 16px; height: 16px; }
-.shop-error { padding: 12px; color: #8f4439; background: #fff2ee; border-radius: 8px; font-size: 12px; }
+.shop-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  color: #8f4439;
+  background: #fff2ee;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.shop-retry-button {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  color: inherit;
+  background: #fff;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.shop-retry-button:disabled { opacity: .65; cursor: wait; }
 
 .shop-success {
   position: fixed;

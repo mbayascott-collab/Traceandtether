@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowLeft, ArrowRight, Minus, Plus, ShoppingBag } from "lucide-react";
 import { Link } from "wouter";
+import {
+  loadPublicShopCatalog, PUBLIC_SHOP_RETRY_MESSAGE, type PublicShopProduct,
+} from "../lib/public-shop-catalog";
 
-type ShopProduct = { id: number; name: string; description: string | null; unit: string; sellingPriceZmw: string };
+type ShopProduct = PublicShopProduct;
 type Cart = Record<number, number>;
 
 function money(value: string) {
@@ -24,17 +27,24 @@ export default function PublicShop() {
   });
   const [customer, setCustomer] = useState({ name: "", phone: "", email: "", address: "", notes: "" });
 
-  useEffect(() => {
-    fetch("/api/shop/products")
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Could not load products.");
-        setProducts(data.products);
-        setChallenge(data.challenge);
-      })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load products."))
-      .finally(() => setLoading(false));
+  const loadCatalog = useCallback(async () => {
+    setLoading(true);
+    try {
+      const catalog = await loadPublicShopCatalog();
+      setProducts(catalog.products);
+      setChallenge(catalog.challenge);
+      setError("");
+    } catch {
+      setChallenge("");
+      setError(PUBLIC_SHOP_RETRY_MESSAGE);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadCatalog();
+  }, [loadCatalog]);
 
   const cartProducts = useMemo(() => products.filter((product) => cart[product.id]), [products, cart]);
   const total = cartProducts.reduce((sum, product) => sum + Number(product.sellingPriceZmw) * cart[product.id], 0);
@@ -119,7 +129,15 @@ export default function PublicShop() {
       </section>
       <section className="shop-catalog" aria-labelledby="shop-catalog-heading">
         <div className="shop-section-heading"><div><span className="shop-eyebrow">THE CATALOGUE</span><h2 id="shop-catalog-heading">Available now</h2></div><span>{products.length} items</span></div>
-        {error && <div className="shop-error" role="alert">{error}</div>}
+        {error && <div className="shop-error" role="alert">
+          <span>{error}</span>
+          <button
+            type="button"
+            className="shop-retry-button"
+            onClick={() => void loadCatalog()}
+            disabled={loading}
+          >{loading ? "Trying again…" : "Try again"}</button>
+        </div>}
         {loading ? <p className="shop-empty">Loading the catalogue…</p> : products.length === 0 ? (
           <div className="shop-empty"><ShoppingBag /><h3>Nothing is available just yet</h3><p>Please check back soon.</p></div>
         ) : (
