@@ -2004,6 +2004,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
   const prefix = `negative-landed-cost-${suffix}`;
   const actorEmail = `${prefix}@example.test`;
   const reportDate = "9999-12-30";
+  const nextReportDate = "9999-12-31";
   const app = express();
   app.use(express.json());
   const owner: RequestHandler = (_req, res, next) => {
@@ -2017,8 +2018,8 @@ test("campaign reports show negative delivery shares for reversed landed costs",
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
-  const requestReport = async () => {
-    const response = await fetch(`${baseUrl}/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+  const requestReport = async (from = reportDate, to = nextReportDate) => {
+    const response = await fetch(`${baseUrl}/api/marketing/reports?from=${from}&to=${to}`);
     return { response, payload: await response.json() as any };
   };
   let customerId: number | undefined;
@@ -2063,7 +2064,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     orderLineIds.push(line.id);
     const deliveries = await db.insert(salesDeliveries).values([
       { deliveryNumber: `NLC-${suffix.slice(0, 16)}-D1`, salesOrderId: order.id, deliveryDate: reportDate },
-      { deliveryNumber: `NLC-${suffix.slice(0, 16)}-D2`, salesOrderId: order.id, deliveryDate: reportDate },
+      { deliveryNumber: `NLC-${suffix.slice(0, 16)}-D2`, salesOrderId: order.id, deliveryDate: nextReportDate },
     ]).returning();
     deliveryIds.push(...deliveries.map((delivery) => delivery.id));
     const deliveryLines = await db.insert(salesDeliveryLines).values([
@@ -2084,7 +2085,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
         sourceType: "sales_delivery_cogs",
         sourceId: delivery.id,
         memo: `${prefix} delivery cost`,
-        entryDate: reportDate,
+        entryDate: delivery.deliveryDate,
         lines: [
           { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: amount },
           { accountKey: "inventory", productId: product.id, creditZmw: amount },
@@ -2108,7 +2109,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       sourceType: "landed_cost_adjustment",
       sourceId: product.id,
       memo: `${prefix} landed-cost reversal`,
-      entryDate: reportDate,
+      entryDate: nextReportDate,
       lines: [
         { accountKey: "inventory", productId: product.id, debitZmw: "0.05" },
         { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.05" },
@@ -2124,10 +2125,18 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
       .where(eq(journalEntries.id, reversal.id));
     const sourceJournal = await readReversalJournal();
+    const firstPeriod = await requestReport(reportDate, reportDate);
+    const secondPeriod = await requestReport(nextReportDate, nextReportDate);
     const report = await requestReport();
     assert.equal(report.response.status, 200, JSON.stringify(report.payload));
+    assert.equal(firstPeriod.response.status, 200, JSON.stringify(firstPeriod.payload));
+    assert.equal(secondPeriod.response.status, 200, JSON.stringify(secondPeriod.payload));
     const campaignReport = report.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    const firstPeriodCampaign = firstPeriod.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    const secondPeriodCampaign = secondPeriod.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
     assert.ok(campaignReport);
+    assert.ok(firstPeriodCampaign);
+    assert.ok(secondPeriodCampaign);
     assert.equal(campaignReport.orderCount, 1);
     assert.equal(campaignReport.attributedRevenueZmw, "400.00");
     assert.equal(campaignReport.productCostZmw, "39.95");
@@ -2151,6 +2160,31 @@ test("campaign reports show negative delivery shares for reversed landed costs",
         [`NLC-${suffix.slice(0, 16)}-D2`, "-0.04", [[product.id, "-0.04"]]],
       ],
     );
+    assert.deepEqual({
+      firstPeriod: [
+        firstPeriodCampaign.attributedRevenueZmw,
+        firstPeriodCampaign.productCostZmw,
+        firstPeriodCampaign.landedCostAdjustmentZmw,
+        firstPeriodCampaign.netContributionZmw,
+      ],
+      secondPeriod: [
+        secondPeriodCampaign.attributedRevenueZmw,
+        secondPeriodCampaign.productCostZmw,
+        secondPeriodCampaign.landedCostAdjustmentZmw,
+        secondPeriodCampaign.netContributionZmw,
+      ],
+    }, {
+      firstPeriod: ["100.00", "9.99", "-0.01", "90.01"],
+      secondPeriod: ["300.00", "29.96", "-0.04", "270.04"],
+    });
+    for (const field of ["attributedRevenueZmw", "productCostZmw", "landedCostAdjustmentZmw", "netContributionZmw"] as const) {
+      assert.equal(
+        BigInt(firstPeriodCampaign[field].replace(".", ""))
+          + BigInt(secondPeriodCampaign[field].replace(".", "")),
+        BigInt(campaignReport[field].replace(".", "")),
+        `${field} from the adjacent periods must equal the combined report`,
+      );
+    }
     const allocatedCents = campaignReport.landedCostAdjustmentDeliveries
       .flatMap((delivery: { adjustmentZmw: string }) => [BigInt(delivery.adjustmentZmw.replace(".", ""))])
       .reduce((total: bigint, amount: bigint) => total + amount, 0n);
