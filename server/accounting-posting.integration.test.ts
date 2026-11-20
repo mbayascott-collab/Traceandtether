@@ -1044,9 +1044,9 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(journalLines.journalEntryId, mismatchReceiptEntry.id),
       eq(journalLines.accountId, clearingAccount.id),
     ));
-    // Product A should clear 200.00 ZMW; corrupt it by one ZMW. Product B
-    // remains valid and has a positive late-cost adjustment from the later bill.
-    await db.update(journalLines).set({ creditZmw: "201.00" })
+    // Product A should clear 280.00 ZMW after both freight bills; corrupt it
+    // by one ZMW. Product B remains valid with its 80.00 late-cost adjustment.
+    await db.update(journalLines).set({ creditZmw: "281.00" })
       .where(eq(journalLines.id, receiptClearingLine.id));
 
     const { orders: [mismatchPreviewOrder] } = await request(

@@ -155,6 +155,7 @@ test("route mutations across business areas keep their audit history and actor",
   let customerGroupId: number | undefined;
   let marketingCampaignId: number | undefined;
   let statementLineId: number | undefined;
+  let statementMatchSalesOrderId: number | undefined;
   let paymentTestSalesOrderId: number | undefined;
   let paymentTestReceiptId: number | undefined;
   let paymentTestPurchaseOrderId: number | undefined;
@@ -363,6 +364,18 @@ test("route mutations across business areas keep their audit history and actor",
       reason: `Audit route test stock ${suffix}`,
       sourceKey: `audit-route-seed-${suffix}`,
     });
+    const [mainLocation] = await db.select({ id: inventoryLocations.id })
+      .from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
+    if (mainLocation) {
+      await db.insert(inventoryMovements).values({
+        productId,
+        locationId: mainLocation.id,
+        kind: "opening_stock",
+        quantityDelta: 10,
+        reason: `Audit route public shop stock ${suffix}`,
+        sourceKey: `audit-route-main-stock-${suffix}`,
+      });
+    }
 
     // Sales: create and delete a draft order through the HTTP routes.
     const sales = await expectStatus("/api/sales-orders", {
@@ -436,10 +449,17 @@ test("route mutations across business areas keep their audit history and actor",
     assert.ok(statementLine);
     statementLineId = statementLine.id;
     await expectAudit("payment_statement_line", statementLineId, "created");
+    const [statementMatchOrder] = await db.insert(salesOrders).values({
+      orderNumber: `AUD-STATEMENT-${safeSuffix.slice(0, 12)}`,
+      customerId: customerId!,
+      status: "fulfilled",
+      orderDate: "2026-11-18",
+    }).returning();
+    statementMatchSalesOrderId = statementMatchOrder.id;
     const [statementMatchPayment] = await db.insert(businessPayments).values({
       paymentNumber: `AUD-STATEMENT-MATCH-${safeSuffix.slice(0, 12)}`,
       direction: "customer_receipt",
-      salesOrderId: paymentTestSalesOrderId!,
+      salesOrderId: statementMatchSalesOrderId,
       amountZmw: "1.00",
       paymentDate: "2026-11-18",
       method: "cash",
@@ -751,6 +771,9 @@ test("route mutations across business areas keep their audit history and actor",
       );
       if (paymentTestReceiptId) await client.query(
         "DELETE FROM business_payments WHERE id = $1", [paymentTestReceiptId],
+      );
+      if (statementMatchSalesOrderId) await client.query(
+        "DELETE FROM sales_orders WHERE id = $1", [statementMatchSalesOrderId],
       );
       if (paymentTestSalesOrderId) {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [paymentTestSalesOrderId]);
