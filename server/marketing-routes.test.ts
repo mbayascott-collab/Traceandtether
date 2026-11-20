@@ -485,7 +485,7 @@ test("customer-group CSV downloads are limited to owners", {
   }
 });
 
-test("customer-group CSV exports reflect updated rules and customer order history", {
+test("customer-group CSV exports reflect updated rules and delivered customer history", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const [{ db }, { registerMarketingRoutes }] = await Promise.all([
@@ -582,7 +582,7 @@ test("customer-group CSV exports reflect updated rules and customer order histor
     }).returning();
     orderIds.push(secondOrder.id);
     const orderLines = await db.insert(salesOrderLines).values([
-      { salesOrderId: firstOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
+      { salesOrderId: firstOrder.id, productId: product.id, quantity: 2, unitPriceZmw: "100.00" },
       { salesOrderId: secondOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
     ]).returning();
     orderLineIds.push(...orderLines.map((line) => line.id));
@@ -646,6 +646,28 @@ test("customer-group CSV exports reflect updated rules and customer order histor
     assert.equal(afterDeliveryDateChange.response.status, 200, afterDeliveryDateChange.body);
     assertColumns(afterDeliveryDateChange.body);
     assert.ok(!afterDeliveryDateChange.body.includes(firstEmail));
+
+    await patchGroup({ minimumLifetimeSalesZmw: "150.00" });
+    const beforeDeliveredSalesChange = await download();
+    assert.equal(beforeDeliveredSalesChange.response.status, 200, beforeDeliveredSalesChange.body);
+    assertColumns(beforeDeliveredSalesChange.body);
+    assert.ok(!beforeDeliveredSalesChange.body.includes(firstEmail));
+
+    await db.update(salesDeliveryLines).set({ quantity: 2 })
+      .where(eq(salesDeliveryLines.id, deliveryLineIds[0]!));
+    const afterDeliveredQuantityChange = await download();
+    assert.equal(afterDeliveredQuantityChange.response.status, 200, afterDeliveredQuantityChange.body);
+    assertColumns(afterDeliveredQuantityChange.body);
+    assert.ok(afterDeliveredQuantityChange.body.includes(firstEmail));
+    assert.ok(afterDeliveredQuantityChange.body.includes(firstName));
+    assert.ok(afterDeliveredQuantityChange.body.includes(firstPhone));
+
+    await db.update(salesOrderLines).set({ unitPriceZmw: "60.00" })
+      .where(eq(salesOrderLines.id, orderLineIds[0]!));
+    const afterDeliveredPriceChange = await download();
+    assert.equal(afterDeliveredPriceChange.response.status, 200, afterDeliveredPriceChange.body);
+    assertColumns(afterDeliveredPriceChange.body);
+    assert.ok(!afterDeliveredPriceChange.body.includes(firstEmail));
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (deliveryLineIds.length) await db.delete(salesDeliveryLines).where(inArray(salesDeliveryLines.id, deliveryLineIds));
