@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
+import { TRUSTED_PROXY_HOPS } from "./trusted-proxy";
 
 test("concurrent blocked shop submissions preserve aggregate reason totals without visitor details", {
   skip: !process.env.DATABASE_URL,
@@ -37,11 +38,13 @@ test("concurrent blocked shop submissions preserve aggregate reason totals witho
   const suffix = randomUUID();
   const rateLimitedIp = "198.18.0.1";
   const botCheckIps = Array.from({ length: 12 }, (_, index) => `198.19.${index}.${suffix.slice(0, 2).charCodeAt(0)}`);
-  const visitorIps = [rateLimitedIp, ...botCheckIps];
+  const independentClientIps = ["198.20.0.1", "198.20.0.2"];
+  const visitorIps = [rateLimitedIp, ...botCheckIps, ...independentClientIps];
   const visitorIpHashes = visitorIps.map((ip) => createHash("sha256").update(ip).digest("hex"));
+  const untrustedForwardedAddresses = new Set<string>();
   const privateMarker = `visitor-private-${suffix}`;
   const app = express();
-  app.set("trust proxy", "loopback");
+  app.set("trust proxy", TRUSTED_PROXY_HOPS);
   app.use(express.json());
   const approvedAccess: RequestHandler = (req, res, next) => {
     const role = req.header("x-test-role");
@@ -67,10 +70,13 @@ test("concurrent blocked shop submissions preserve aggregate reason totals witho
     assert.equal(response.status, 200, JSON.stringify(payload));
     return payload;
   };
-  const postBlockedAttempt = async (ip: string, body: Record<string, unknown>) => {
+  const postBlockedAttempt = async (ip: string, body: Record<string, unknown>, spoofedPrefix?: string) => {
+    const untrustedPrefix = spoofedPrefix ?? `203.0.113.${untrustedForwardedAddresses.size + 1}`;
+    untrustedForwardedAddresses.add(untrustedPrefix);
     const response = await fetch(`${baseUrl}/api/shop/orders`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-forwarded-for": ip },
+      // Simulate an incoming spoofed prefix followed by the trusted proxy's actual client address.
+      headers: { "content-type": "application/json", "x-forwarded-for": `${untrustedPrefix}, ${ip}` },
       body: JSON.stringify(body),
     });
     return response;
@@ -89,17 +95,17 @@ test("concurrent blocked shop submissions preserve aggregate reason totals witho
       const response = await postBlockedAttempt(rateLimitedIp, {
         challenge: `invalid-${privateMarker}-${index}`,
         website: "",
-      });
+      }, `203.0.113.${index + 1}`);
       assert.equal(response.status, 400);
       await response.body?.cancel();
     }
 
-    const concurrentRateLimited = Array.from({ length: 24 }, () =>
-      postBlockedAttempt(rateLimitedIp, { challenge: `invalid-${privateMarker}`, website: "" }));
+    const concurrentRateLimited = Array.from({ length: 24 }, (_, index) =>
+      postBlockedAttempt(rateLimitedIp, { challenge: `invalid-${privateMarker}`, website: "" }, `192.0.2.${index + 1}`));
     const concurrentChallengeFailures = botCheckIps.slice(0, 6).map((ip, index) =>
-      postBlockedAttempt(ip, { challenge: `invalid-${privateMarker}-${index}`, website: "" }));
-    const concurrentHoneypotFailures = botCheckIps.slice(6).map((ip) =>
-      postBlockedAttempt(ip, { challenge: "", website: privateMarker }));
+      postBlockedAttempt(ip, { challenge: `invalid-${privateMarker}-${index}`, website: "" }, `192.0.2.${index + 30}`));
+    const concurrentHoneypotFailures = botCheckIps.slice(6).map((ip, index) =>
+      postBlockedAttempt(ip, { challenge: "", website: privateMarker }, `192.0.2.${index + 40}`));
     const concurrentResponses = await Promise.all([
       ...concurrentRateLimited,
       ...concurrentChallengeFailures,
@@ -116,14 +122,31 @@ test("concurrent blocked shop submissions preserve aggregate reason totals witho
     );
     await Promise.all(concurrentResponses.map((response) => response.body?.cancel()));
 
+    for (const [index, ip] of independentClientIps.entries()) {
+      for (let attempt = 0; attempt < allowance; attempt += 1) {
+        const response = await postBlockedAttempt(ip, {
+          challenge: `invalid-independent-${privateMarker}-${index}-${attempt}`,
+          website: "",
+        }, `192.0.2.${index + 60 + attempt}`);
+        assert.equal(response.status, 400, "each real visitor should receive its own full attempt allowance");
+        await response.body?.cancel();
+      }
+      const overLimit = await postBlockedAttempt(ip, {
+        challenge: `invalid-independent-${privateMarker}-${index}-over-limit`,
+        website: "",
+      }, `192.0.2.${index + 70}`);
+      assert.equal(overLimit.status, 429, "each real visitor should be limited only after its own allowance");
+      await overLimit.body?.cancel();
+    }
+
     const afterSummaryPayload = await analyticsRequest(summaryUrl);
     const afterDaysPayload = await analyticsRequest(daysUrl);
     const afterSummary = afterSummaryPayload.summary;
     const afterDay = afterDaysPayload.days.find((item: { day: string }) => item.day === day);
     assert.ok(afterDay);
 
-    const expectedBotCheckFailures = allowance + botCheckIps.length;
-    const expectedRateLimitedFailures = concurrentRateLimited.length;
+    const expectedBotCheckFailures = allowance + botCheckIps.length + independentClientIps.length * allowance;
+    const expectedRateLimitedFailures = concurrentRateLimited.length + independentClientIps.length;
     for (const [label, after, before] of [
       ["lifetime", afterSummary, beforeSummary],
       ["daily", afterDay, beforeDay],
@@ -143,10 +166,23 @@ test("concurrent blocked shop submissions preserve aggregate reason totals witho
     assert.doesNotMatch(analyticsText, /email|phone|address/i);
     assert.doesNotMatch(analyticsText, new RegExp(privateMarker));
     for (const ip of visitorIps) assert.equal(analyticsText.includes(ip), false);
+
+    const untrustedIpHashes = [...untrustedForwardedAddresses]
+      .map((ip) => createHash("sha256").update(ip).digest("hex"));
+    const untrustedCounters = await pool.query(
+      "SELECT ip_hash FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
+      [untrustedIpHashes],
+    );
+    assert.equal(untrustedCounters.rowCount, 0, "untrusted X-Forwarded-For prefixes must never become visitor limit keys");
   } finally {
     try {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      await pool.query("DELETE FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])", [visitorIpHashes]);
+      const untrustedIpHashes = [...untrustedForwardedAddresses]
+        .map((ip) => createHash("sha256").update(ip).digest("hex"));
+      await pool.query(
+        "DELETE FROM public_shop_order_limits WHERE ip_hash = ANY($1::text[])",
+        [[...visitorIpHashes, ...untrustedIpHashes]],
+      );
     } finally {
       await pool.end();
     }

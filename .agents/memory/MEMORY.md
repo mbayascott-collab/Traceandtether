@@ -9,3 +9,4 @@
 - [Quote email retry safety](customer-quote-email-attempts.md) — Keep ambiguous attempts unresolved until an owner confirms retry, and prevent older send results from replacing newer attempts.
 - [Payment reminder balance snapshots](payment-reminder-balance-snapshots.md) — Keep the order locked through Gmail's response so receipts cannot change the balance between capture and send.
 - [Shared test database pools](integration-test-pool-lifecycle.md) — Close a shared test pool once after all tests in a module finish, not after each test.
+- [Trusted proxy address handling](trusted-proxy-address.md) — Keep visitor IP extraction and request tests aligned with the single trusted ingress hop.

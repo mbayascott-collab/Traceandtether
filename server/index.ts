@@ -14,12 +14,13 @@ import {
   clerkProxyMiddleware,
   getClerkProxyHost,
 } from "./middlewares/clerkProxyMiddleware";
+import { TRUSTED_PROXY_HOPS } from "./trusted-proxy";
 
 const app = express();
 const server = createServer(app);
 const port = Number(process.env.PORT ?? 5000);
 
-app.set("trust proxy", 1);
+app.set("trust proxy", TRUSTED_PROXY_HOPS);
 
 // Clerk's production proxy must run before body parsers so request bytes stay intact.
 app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
