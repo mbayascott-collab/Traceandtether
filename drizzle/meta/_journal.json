@@ -407,6 +407,13 @@
       "when": 1795122742826,
       "tag": "0057_allow_repeated_purchase_order_products",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1795162500000,
+      "tag": "0058_quote_invoice_email_histories",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { deflateSync, inflateSync } from "node:zlib";
 import { ReplitConnectors } from "@replit/connectors-sdk";
 
 export type CustomerQuoteEmailContent = {
@@ -83,9 +86,81 @@ function pdfObject(value: string | Buffer) {
   return Buffer.isBuffer(value) ? value : Buffer.from(value, "latin1");
 }
 
+function paethPredictor(left: number, up: number, upperLeft: number) {
+  const estimate = left + up - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  return leftDistance <= upDistance && leftDistance <= upperLeftDistance
+    ? left
+    : upDistance <= upperLeftDistance ? up : upperLeft;
+}
+
+function quoteLogoImage() {
+  const png = readFileSync(fileURLToPath(new URL("../attached_assets/google_profile_1793771922305.png", import.meta.url)));
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  if (png[24] !== 8 || png[25] !== 6) throw new Error("The quote logo must be an 8-bit RGBA PNG.");
+  const chunks: Buffer[] = [];
+  for (let offset = 8; offset < png.length;) {
+    const length = png.readUInt32BE(offset);
+    const type = png.toString("ascii", offset + 4, offset + 8);
+    if (type === "IDAT") chunks.push(png.subarray(offset + 8, offset + 8 + length));
+    offset += 12 + length;
+    if (type === "IEND") break;
+  }
+  const compressed = inflateSync(Buffer.concat(chunks));
+  const stride = width * 4;
+  const rgba = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = compressed[y * (stride + 1)]!;
+    const rowStart = y * (stride + 1) + 1;
+    const outputStart = y * stride;
+    for (let x = 0; x < stride; x += 1) {
+      const raw = compressed[rowStart + x]!;
+      const left = x >= 4 ? rgba[outputStart + x - 4]! : 0;
+      const up = y > 0 ? rgba[outputStart + x - stride]! : 0;
+      const upperLeft = y > 0 && x >= 4 ? rgba[outputStart + x - stride - 4]! : 0;
+      const predictor = filter === 0 ? 0
+        : filter === 1 ? left
+          : filter === 2 ? up
+            : filter === 3 ? Math.floor((left + up) / 2)
+              : filter === 4 ? paethPredictor(left, up, upperLeft)
+                : NaN;
+      if (!Number.isFinite(predictor)) throw new Error("The quote logo uses an unsupported PNG filter.");
+      rgba[outputStart + x] = (raw + predictor) & 0xff;
+    }
+  }
+  const rgbRows: Buffer[] = [];
+  const alphaRows: Buffer[] = [];
+  for (let y = 0; y < height; y += 1) {
+    const rgb = Buffer.alloc(width * 3);
+    const alpha = Buffer.alloc(width);
+    for (let x = 0; x < width; x += 1) {
+      const source = y * stride + x * 4;
+      const target = x * 3;
+      rgb[target] = rgba[source]!;
+      rgb[target + 1] = rgba[source + 1]!;
+      rgb[target + 2] = rgba[source + 2]!;
+      alpha[x] = rgba[source + 3]!;
+    }
+    rgbRows.push(Buffer.concat([Buffer.from([0]), rgb]));
+    alphaRows.push(Buffer.concat([Buffer.from([0]), alpha]));
+  }
+  return {
+    width,
+    height,
+    rgb: deflateSync(Buffer.concat(rgbRows)),
+    alpha: deflateSync(Buffer.concat(alphaRows)),
+  };
+}
+
 export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
   const lines = [
     "TRACE AND TETHER CRAFT STUDIO LIMITED",
+    "164 Mpundu Street, Chelston Extension, Lusaka, Zambia",
+    "traceandtether@gmail.com | +260-0977-101-967",
+    "",
     "CUSTOMER QUOTATION",
     `Quote number: ${content.quoteNumber}`,
     `Prepared for: ${content.customerName}`,
@@ -100,7 +175,7 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
   }
   lines.push("", `TOTAL: ${formatMoney(content.totalZmw)}`);
   if (content.notes) lines.push("", ...wrapText(`Notes: ${content.notes}`));
-  lines.push("", "All prices are in ZMW.");
+  lines.push("", "All prices are in ZMW.", "", "CUSTOMER APPROVAL", "Name and signature: __________________________", "Date: __________________");
 
   const pageLines: string[][] = [];
   const firstPageCapacity = 54;
@@ -111,6 +186,9 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
   }
 
   const objects: Buffer[] = [];
+  const logo = quoteLogoImage();
+  const logoObjectNumber = 4 + pageLines.length * 2;
+  const alphaObjectNumber = logoObjectNumber + 1;
   const pageRefs = pageLines.map((_, index) => `${4 + index * 2} 0 R`).join(" ");
   objects.push(pdfObject("<< /Type /Catalog /Pages 2 0 R >>"));
   objects.push(pdfObject(`<< /Type /Pages /Kids [${pageRefs}] /Count ${pageLines.length} >>`));
@@ -119,9 +197,10 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
     const pageObjectNumber = 4 + index * 2;
     const contentObjectNumber = pageObjectNumber + 1;
     const commands = [
+      ...(index === 0 ? ["q", "48 720 58 58 cm", "/Logo Do", "Q"] : []),
       "BT",
       "/F1 10 Tf",
-      "48 790 Td",
+      index === 0 ? "118 790 Td" : "48 790 Td",
       ...page.flatMap((line, lineIndex) => [
         `(${escapePdfText(line)}) Tj`,
         ...(lineIndex < page.length - 1 ? ["0 -13 Td"] : []),
@@ -130,7 +209,7 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
     ].join("\n");
     const stream = Buffer.from(commands, "latin1");
     objects.push(pdfObject(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R >>${index === 0 ? ` /XObject << /Logo ${logoObjectNumber} 0 R >>` : ""} >> /Contents ${contentObjectNumber} 0 R >>`,
     ));
     objects.push(Buffer.concat([
       pdfObject(`<< /Length ${stream.length} >>\nstream\n`),
@@ -138,6 +217,16 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
       pdfObject("\nendstream"),
     ]));
   });
+  objects.push(Buffer.concat([
+    pdfObject(`<< /Type /XObject /Subtype /Image /Width ${logo.width} /Height ${logo.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /SMask ${alphaObjectNumber} 0 R /Length ${logo.rgb.length} >>\nstream\n`),
+    logo.rgb,
+    pdfObject("\nendstream"),
+  ]));
+  objects.push(Buffer.concat([
+    pdfObject(`<< /Type /XObject /Subtype /Image /Width ${logo.width} /Height ${logo.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${logo.alpha.length} >>\nstream\n`),
+    logo.alpha,
+    pdfObject("\nendstream"),
+  ]));
 
   const header = Buffer.from("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n", "latin1");
   const chunks = [header];
@@ -236,7 +325,7 @@ export async function sendCustomerQuoteEmail(
   content: CustomerQuoteEmailContent,
   gmail: GmailProxy = new ReplitConnectors(),
   generatePdf: (content: CustomerQuoteEmailContent) => Buffer = buildCustomerQuotePdf,
-): Promise<{ ok: true; messageId: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; messageId: string } | { ok: false; error: string; ambiguous?: boolean }> {
   let raw: string;
   try {
     const pdf = generatePdf(content);
@@ -272,6 +361,7 @@ export async function sendCustomerQuoteEmail(
       }
       return {
         ok: false,
+        ambiguous: true,
         error: "Gmail accepted the email but did not return a message reference. Check Gmail Sent before retrying.",
       };
     }
@@ -284,14 +374,19 @@ export async function sendCustomerQuoteEmail(
       details = null;
     }
     const suffix = details ? `: ${details.replace(/[\r\n]+/g, " ").slice(0, 300)}` : "";
-    return { ok: false, error: `Gmail could not send the quote (HTTP ${response.status})${suffix}` };
+    return {
+      ok: false,
+      ...(response.status >= 500 ? { ambiguous: true } : {}),
+      error: `Gmail could not send the quote (HTTP ${response.status})${suffix}`,
+    };
   } catch (cause) {
     if (cause instanceof Error && cause.name === "AbortError") {
-      return { ok: false, error: "Gmail did not confirm whether the email was sent. Check Gmail Sent before retrying." };
+      return { ok: false, ambiguous: true, error: "Gmail did not confirm whether the email was sent. Check Gmail Sent before retrying." };
     }
     const detail = cause instanceof Error ? cause.message.replace(/[\r\n]+/g, " ").slice(0, 300) : "";
     return {
       ok: false,
+      ambiguous: true,
       error: detail ? `Gmail could not send the quote: ${detail}` : "Gmail could not send the quote. Check the Gmail connection and try again.",
     };
   } finally {

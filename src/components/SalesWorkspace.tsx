@@ -4,7 +4,9 @@ import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopBlockedSpike, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
-import { matchesCustomerPurchaseHistory } from "../lib/customer-purchase-history";
+import { filterCustomerPurchaseHistory } from "../lib/customer-purchase-history";
+import { salesInvoiceDocument } from "../lib/sales-invoice-document";
+import { clearSalesProofRetryKey, getSalesProofRetryKey } from "../lib/sales-proof-retry";
 import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
 
 type Mode = "customers" | "orders";
@@ -187,16 +189,31 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   }
   async function emailDeliveryInvoice(delivery: SalesDelivery) {
     if (deliveryInvoiceSendingId !== null) return;
+    const latest = delivery.invoiceEmailAttempts?.[0];
+    const staleSending = latest?.status === "sending"
+      && Date.now() - new Date(latest.attemptedAt).getTime() > 5 * 60 * 1000;
+    const options: { confirmAmbiguousRetry?: boolean; confirmResend?: boolean } = {};
+    if (latest?.status === "sending" || latest?.status === "ambiguous") {
+      if (!staleSending && latest.status === "sending") return;
+      if (!window.confirm(
+        `The previous invoice email may have reached ${latest.recipientEmail}. Check Gmail Sent first. If it is not there, retry ${delivery.deliveryNumber}?`,
+      )) return;
+      options.confirmAmbiguousRetry = true;
+    } else if (latest?.status === "sent") {
+      if (!window.confirm(`Invoice ${delivery.deliveryNumber} was already emailed to ${latest.recipientEmail}. Send it again?`)) return;
+      options.confirmResend = true;
+    }
     setDeliveryInvoiceSendingId(delivery.id);
     setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "success", message: "Sending invoice…" } }));
     try {
-      const message = await sendSalesDeliveryInvoice(delivery.id);
+      const message = await sendSalesDeliveryInvoice(delivery.id, options);
       setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "success", message } }));
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Could not send the delivery invoice.";
       setDeliveryInvoiceFeedback((current) => ({ ...current, [delivery.id]: { kind: "error", message } }));
     } finally {
       setDeliveryInvoiceSendingId((current) => current === delivery.id ? null : current);
+      setReload((value) => value + 1);
     }
   }
   async function submitReceipt(event: FormEvent<HTMLFormElement>, delivery: SalesDelivery) {
@@ -226,6 +243,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       });
       for (const upload of uploads) {
         const proof = await addSalesDeliveryReceiptProof(delivery.id, upload.file, upload.idempotencyKey);
+        clearSalesProofRetryKey(window.sessionStorage, delivery.id, upload.file);
         if (!savedProofs.some((saved) => saved.id === proof.id)) savedProofs.push(proof);
         setReceiptDelivery((current) => current?.delivery.id === delivery.id
           ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
@@ -292,9 +310,6 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   function documentDate(value: string) {
     return new Date(value).toLocaleDateString("en-ZM", { day: "numeric", month: "long", year: "numeric" });
   }
-  function invoiceNumber(order: SalesOrder) {
-    return `INV-${order.orderNumber.replace(/^SO-/, "")}`;
-  }
   function deliveryNoteNumber(order: SalesOrder) {
     return `DN-${order.orderNumber.replace(/^SO-/, "")}`;
   }
@@ -358,7 +373,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         const purchases = orders
           .filter((order) => order.customerId === customer.id && Number(order.deliveredZmw) > 0)
           .sort((a, b) => b.orderDate.localeCompare(a.orderDate));
-        const matchingPurchases = purchases.filter((order) => matchesCustomerPurchaseHistory(order, purchaseHistorySearch));
+        const matchingPurchases = filterCustomerPurchaseHistory(purchases, purchaseHistorySearch);
         return <div className="panel data-table-wrap">
           <div className="panel-heading"><div><p className="eyebrow">Customer account</p><h2>{customer.name}</h2><p>Customer ID: <strong>{customerCode(customer.id)}</strong></p></div><div><button className="button button-secondary button-small" onClick={() => setEditingCustomer(customer)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close customer</button></div></div>
           <p><strong>Contact person:</strong> {customer.contactPerson || "—"}</p>
@@ -526,16 +541,30 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
               </div>
             </span>)}
             {o.deliveries.map((delivery) => <div key={`invoice-${delivery.id}`} className="delivery-actions">
+              {delivery.invoiceEmailAttempts?.[0] && <small className="invoice-email-history-summary">
+                {delivery.invoiceEmailAttempts.length} email attempt{delivery.invoiceEmailAttempts.length === 1 ? "" : "s"} · latest {delivery.invoiceEmailAttempts[0].status}
+                {delivery.invoiceEmailAttempts[0].attemptedAt ? ` · ${new Date(delivery.invoiceEmailAttempts[0].attemptedAt).toLocaleString("en-ZM")}` : ""}
+                {delivery.invoiceEmailAttempts[0].error ? ` · ${delivery.invoiceEmailAttempts[0].error}` : ""}
+                {delivery.invoiceEmailAttempts.length > 1 && <details>
+                  <summary>Show invoice email history</summary>
+                  <ol>{delivery.invoiceEmailAttempts.map((attempt) => <li key={attempt.id}>
+                    Attempt {attempt.attemptNumber}: {attempt.status} · {attempt.recipientEmail} · {new Date(attempt.attemptedAt).toLocaleString("en-ZM")}
+                    {attempt.providerMessageId ? ` · Gmail reference ${attempt.providerMessageId}` : ""}
+                    {attempt.error ? ` · ${attempt.error}` : ""}
+                  </li>)}</ol>
+                </details>}
+              </small>}
               <button className="button button-secondary button-small" onClick={() => setInvoicePrint({ order: o, delivery })}>
                 Invoice {delivery.deliveryNumber} / PDF
               </button>
               <button
                 className="button button-secondary button-small"
-                disabled={deliveryInvoiceSendingId !== null}
+                disabled={deliveryInvoiceSendingId !== null || (delivery.invoiceEmailAttempts?.[0]?.status === "sending"
+                  && Date.now() - new Date(delivery.invoiceEmailAttempts[0].attemptedAt).getTime() <= 5 * 60 * 1000)}
                 onClick={() => emailDeliveryInvoice(delivery)}
                 aria-label={`Email invoice for ${delivery.deliveryNumber} to ${customers.find((customer) => customer.id === o.customerId)?.email || "the customer's saved email address"}`}
               >
-                {deliveryInvoiceSendingId === delivery.id ? "Sending invoice…" : "Email invoice"}
+                {deliveryInvoiceSendingId === delivery.id ? "Sending invoice…" : delivery.invoiceEmailAttempts?.[0]?.status === "sending" || delivery.invoiceEmailAttempts?.[0]?.status === "ambiguous" ? "Check Gmail & retry" : "Email invoice"}
               </button>
               {deliveryInvoiceFeedback[delivery.id] && <small
                 className={deliveryInvoiceFeedback[delivery.id]!.kind === "error" ? "order-action-error" : ""}
@@ -599,9 +628,17 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         <label>Date and time received<input name="receivedAt" type="datetime-local" required defaultValue={localDateTime(receiptDelivery.delivery.receipt?.receivedAt)} /></label>
         <label>Signed proof files (PDF or image, up to 5 MB each)
           <input name="proofFiles" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => {
-            setReceiptProofUploads(Array.from(event.currentTarget.files ?? []).map((file) => ({
-              file, idempotencyKey: window.crypto.randomUUID(),
-            })));
+            try {
+              setError("");
+              setReceiptProofUploads(Array.from(event.currentTarget.files ?? []).map((file) => ({
+                file,
+                idempotencyKey: getSalesProofRetryKey(
+                  window.sessionStorage, receiptDelivery.delivery.id, file, () => window.crypto.randomUUID(),
+                ),
+              })));
+            } catch {
+              setError("This browser could not save a safe retry key for the proof upload. Check storage settings and select the file again.");
+            }
           }} />
         </label>
         {!!receiptDelivery.delivery.receipt?.proofs.length && <div>
@@ -648,14 +685,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     {mode === "orders" && invoicePrint && (() => {
       const { order, delivery } = invoicePrint;
       const customer = customers.find((item) => item.id === order.customerId);
-      const invoiceRef = delivery
-        ? `INV-${delivery.deliveryNumber.replace(/^DN-/, "")}`
-        : invoiceNumber(order);
-      const date = delivery?.deliveryDate ?? order.fulfilledAt ?? order.orderDate;
-      const invoiceLines = delivery
-        ? delivery.lines.map((line) => ({ ...line, id: line.salesOrderLineId }))
-        : order.lines;
-      const invoiceTotal = delivery?.totalZmw ?? order.totalZmw;
+      const invoice = salesInvoiceDocument(order, delivery);
       return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="invoice-preview-title">
         <div className="quote-preview-panel">
           <div className="quote-preview-toolbar">
@@ -666,9 +696,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             <header className="customer-quote-document-header">
               <div className="customer-quote-document-brand"><img src={companyLogo} alt={`${companyName} logo`} /><div><strong>{companyName}</strong><small>{companyAddress}<br />{companyEmail}<br />{companyPhone}</small></div></div>
               <div className="customer-quote-document-title">
-                <div><span className="customer-quote-document-kicker">{delivery ? "DELIVERY INVOICE" : "SALES INVOICE"}</span><h1>{invoiceRef}</h1></div>
+                <div><span className="customer-quote-document-kicker">{delivery ? "DELIVERY INVOICE" : "SALES INVOICE"}</span><h1>{invoice.invoiceRef}</h1></div>
                 <div className="customer-quote-document-meta">
-                  <div><span>Invoice date</span><strong>{documentDate(date)}</strong></div>
+                  <div><span>Invoice date</span><strong>{documentDate(invoice.date)}</strong></div>
                   <div><span>Sales order</span><strong>{order.orderNumber}</strong></div>
                   {delivery && <div><span>Delivery</span><strong>{delivery.deliveryNumber}</strong></div>}
                 </div>
@@ -683,13 +713,13 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             </section>
             <table className="customer-quote-document-table">
               <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Qty</th><th className="quote-number-cell">Unit price</th><th className="quote-number-cell">Amount</th></tr></thead>
-              <tbody>{invoiceLines.map((line) => <tr key={line.id}>
+              <tbody>{invoice.lines.map((line) => <tr key={line.id}>
                 <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td><td className="quote-number-cell">{zmw(line.unitPriceZmw)}</td><td className="quote-number-cell">{zmw(line.lineTotalZmw)}</td>
               </tr>)}</tbody>
             </table>
-            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoiceTotal)}</strong></div>
+            <div className="customer-quote-document-total"><span>Total (ZMW)</span><strong>{zmw(invoice.totalZmw)}</strong></div>
             {order.notes && <section className="customer-quote-document-notes"><span>NOTES</span><p>{order.notes}</p></section>}
-            <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoiceRef} · Sales order: {order.orderNumber}{delivery ? ` · Delivery: ${delivery.deliveryNumber}` : ""}</footer>
+            <footer className="customer-quote-document-footer">All prices are in ZMW. Invoice reference: {invoice.invoiceRef} · Sales order: {order.orderNumber}{delivery ? ` · Delivery: ${delivery.deliveryNumber}` : ""}</footer>
           </article>
         </div>
       </div>;

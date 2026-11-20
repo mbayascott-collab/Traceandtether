@@ -247,6 +247,30 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
     assert.equal(reloadedNoProofDelivery.receipt.receivedBy, "Recipient without proof");
     assert.equal(new Date(reloadedNoProofDelivery.receipt.receivedAt).toISOString(), expectedNoProofReceivedAt.toISOString());
 
+    const editedReceiptResponse = await fetch(
+      `${baseUrl}/api/sales-deliveries/${delivery.id}/receipt-proof?${new URLSearchParams({
+        receivedBy: "Updated recipient",
+        receivedAt: "2026-11-20T13:00:00.000Z",
+      })}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Uint8Array(),
+      },
+    );
+    assert.equal(editedReceiptResponse.status, 200);
+    const afterReceiptEditResponse = await fetch(`${baseUrl}/api/sales-orders`);
+    const afterReceiptEditPayload = await afterReceiptEditResponse.json() as { orders: any[] };
+    const afterReceiptEditOrder = afterReceiptEditPayload.orders.find((item) => item.id === order.id);
+    const afterReceiptEditDelivery = afterReceiptEditOrder?.deliveries.find((item: any) => item.id === delivery.id);
+    assert.equal(afterReceiptEditDelivery.receipt.receivedBy, "Updated recipient");
+    assert.equal(new Date(afterReceiptEditDelivery.receipt.receivedAt).toISOString(), "2026-11-20T13:00:00.000Z");
+    assert.deepEqual(
+      afterReceiptEditDelivery.receipt.proofs.map((proof: any) => proof.id).sort((a: number, b: number) => a - b),
+      reloadedDelivery.receipt.proofs.map((proof: any) => proof.id).sort((a: number, b: number) => a - b),
+      "editing receipt details must leave every signed proof attached",
+    );
+
     const download = async (url: string) => fetch(new URL(url, baseUrl));
     for (const [ownDeliveryId, proof] of [
       [delivery.id, { id: original.payload.proof.id, mimeType: "application/pdf", data: firstFile }],
@@ -303,7 +327,7 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
         eq(businessAuditLogs.entityType, "sales_delivery_receipt"),
         eq(businessAuditLogs.entityId, receiptId),
       ));
-      assert.equal(auditEntries.length, receiptId === receipt.id ? 5 : receiptId === otherReceipt.id ? 1 : 0);
+      assert.equal(auditEntries.length, receiptId === receipt.id ? 6 : receiptId === otherReceipt.id ? 1 : 0);
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

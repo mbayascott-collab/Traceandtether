@@ -68,7 +68,7 @@ test("reports Gmail send success and provider failure", async () => {
       return new Response(JSON.stringify({ id: "gmail-delivery-invoice-1" }), { status: 200 });
     },
   });
-  assert.deepEqual(success, { ok: true });
+  assert.deepEqual(success, { ok: true, messageId: "gmail-delivery-invoice-1" });
   assert.ok(raw);
   assert.deepEqual(decodeEmail(raw).pdf, buildSalesDeliveryInvoicePdf(invoice));
 

@@ -4,7 +4,7 @@ import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { and, eq } from "drizzle-orm";
-import { businessAuditLogs, customerQuoteEmailEvents, customers, customerQuotes } from "../shared/schema";
+import { businessAuditLogs, customerQuoteEmailEvents, customers, customerQuotes, unmatchedCustomerQuoteEmailEvents } from "../shared/schema";
 import {
   customerQuoteDeliveryEventSchema, hasValidDeliveryWebhookToken,
   isValidCustomerQuoteDeliveryEventTime, shouldApplyCustomerQuoteDeliveryEvent,
@@ -61,23 +61,25 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
     import("./db"),
     import("./sales-routes"),
   ]);
-  const migrationTables = await pool.query<{ events: string | null; audits: string | null }>(
+  const migrationTables = await pool.query<{ events: string | null; audits: string | null; histories: string | null }>(
     `SELECT to_regclass('public.customer_quote_email_events') AS events,
-            to_regclass('public.business_audit_logs') AS audits`,
+            to_regclass('public.business_audit_logs') AS audits,
+            to_regclass('public.unmatched_customer_quote_email_events') AS histories`,
   );
-  if (!migrationTables.rows[0]?.events || !migrationTables.rows[0]?.audits) {
-    t.skip("requires the customer quote delivery event and business audit migrations");
+  if (!migrationTables.rows[0]?.events || !migrationTables.rows[0]?.audits || !migrationTables.rows[0]?.histories) {
+    t.skip("requires the customer quote delivery event, unmatched notice, and audit migrations");
     await pool.end();
     return;
   }
 
   const suffix = randomUUID();
   const webhookSecret = `delivery-event-test-${suffix}-secret-long-enough`;
+  const actorEmail = `delivery-event-test-${suffix}@example.test`;
   process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET = webhookSecret;
   const app = express();
   app.use(express.json());
   const owner: RequestHandler = (_req, res, next) => {
-    res.locals.actor = { clerkUserId: `delivery-event-test-${suffix}`, email: `delivery-event-test-${suffix}@example.test`, role: "owner" };
+    res.locals.actor = { clerkUserId: `delivery-event-test-${suffix}`, email: actorEmail, role: "owner" };
     next();
   };
   registerSalesRoutes(app, owner);
@@ -91,6 +93,7 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const quoteIds: number[] = [];
+  let unmatchedEventId: number | undefined;
   let customerId: number | undefined;
   const postEvent = async (payload: Record<string, unknown>) => {
     const response = await fetch(`${baseUrl}/api/webhooks/customer-quote-email`, {
@@ -202,7 +205,8 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
       occurredAt: new Date(Date.now() - 30_000).toISOString(),
       error: "An earlier send attempt bounced.",
     });
-    assert.equal(earlierAttempt.status, 404);
+    assert.equal(earlierAttempt.status, 200);
+    assert.equal(earlierAttempt.payload.unmatched, true);
     const [savedCurrentAttempt] = await db.select().from(customerQuotes)
       .where(eq(customerQuotes.id, retriedQuote.id));
     assert.equal(savedCurrentAttempt?.emailSendStatus, "sent");
@@ -212,6 +216,19 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
     const oldAttemptEvents = await db.select().from(customerQuoteEmailEvents)
       .where(eq(customerQuoteEmailEvents.customerQuoteId, retriedQuote.id));
     assert.equal(oldAttemptEvents.length, 0);
+    const [savedUnmatchedNotice] = await db.select().from(unmatchedCustomerQuoteEmailEvents)
+      .where(eq(unmatchedCustomerQuoteEmailEvents.providerEventId, `event-${suffix}-old-attempt`));
+    assert.equal(savedUnmatchedNotice?.providerMessageId, `gmail-${suffix}-previous-attempt`);
+    assert.equal(savedUnmatchedNotice?.outcome, "bounced");
+    unmatchedEventId = savedUnmatchedNotice?.id;
+    const reviewResponse = await fetch(`${baseUrl}/api/customer-quote-email-notices/${unmatchedEventId}/reviewed`, {
+      method: "PATCH",
+    });
+    assert.equal(reviewResponse.status, 200);
+    const [reviewedNotice] = await db.select().from(unmatchedCustomerQuoteEmailEvents)
+      .where(eq(unmatchedCustomerQuoteEmailEvents.id, unmatchedEventId!));
+    assert.ok(reviewedNotice?.reviewedAt);
+    assert.equal(reviewedNotice?.reviewedBy, actorEmail);
   } finally {
     delete process.env.CUSTOMER_QUOTE_EMAIL_WEBHOOK_SECRET;
     await new Promise<void>((resolve, reject) => {
@@ -220,6 +237,9 @@ test("customer quote delivery webhook persists replays and orders concurrent eve
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (unmatchedEventId) {
+        await client.query("DELETE FROM unmatched_customer_quote_email_events WHERE id = $1", [unmatchedEventId]);
+      }
       if (quoteIds.length) {
         await client.query(
           "DELETE FROM business_audit_logs WHERE entity_type = 'customer_quote' AND entity_id = ANY($1::int[])",

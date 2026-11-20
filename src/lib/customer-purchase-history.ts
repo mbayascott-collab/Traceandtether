@@ -25,3 +25,7 @@ export function matchesCustomerPurchaseHistory(order: SearchableSalesOrder, quer
   return [order.orderNumber, ...deliveryNumbers, ...searchableDates]
     .some((item) => item.toLowerCase().includes(value));
 }
+
+export function filterCustomerPurchaseHistory<T extends SearchableSalesOrder>(orders: readonly T[], query: string): T[] {
+  return orders.filter((order) => matchesCustomerPurchaseHistory(order, query));
+}

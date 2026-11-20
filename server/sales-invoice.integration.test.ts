@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { customers, products, salesDeliveries, salesDeliveryLines, salesOrderLines, salesOrders } from "../shared/schema";
+import { eq } from "drizzle-orm";
+import { customers, products, salesDeliveries, salesDeliveryInvoiceEmailAttempts, salesDeliveryLines, salesOrderLines, salesOrders } from "../shared/schema";
 import type { SalesDeliveryInvoiceEmailContent } from "./sales-delivery-invoice-email";
 
 function toCents(amount: string): bigint {
@@ -23,6 +24,7 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
   const app = express();
   const emailedInvoices: SalesDeliveryInvoiceEmailContent[] = [];
   let failEmail = false;
+  let ambiguousEmail = false;
   const owner: RequestHandler = (_req, res, next) => {
     res.locals.actor = { clerkUserId: `sales-invoice-${suffix}`, email: `sales-invoice-${suffix}@example.test`, role: "owner" };
     next();
@@ -30,7 +32,8 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
   registerSalesRoutes(app, owner, {
     sendSalesDeliveryInvoiceEmail: async (content) => {
       emailedInvoices.push(content);
-      return failEmail ? { ok: false, error: "Gmail test failure." } : { ok: true };
+      if (ambiguousEmail) return { ok: false, ambiguous: true, error: "Gmail did not confirm the invoice send." };
+      return failEmail ? { ok: false, error: "Gmail test failure." } : { ok: true, messageId: `gmail-invoice-${suffix}` };
     },
   });
   const server = app.listen(0, "127.0.0.1");
@@ -160,18 +163,46 @@ test("sales orders return delivery-specific invoice lines and exact cent totals"
       ],
     });
 
+    ambiguousEmail = true;
+    const ambiguousResponse = await fetch(`${baseUrl}/api/sales-deliveries/${first.id}/send-invoice`, { method: "POST" });
+    assert.equal(ambiguousResponse.status, 502);
+    const unconfirmedRetry = await fetch(`${baseUrl}/api/sales-deliveries/${first.id}/send-invoice`, { method: "POST" });
+    assert.equal(unconfirmedRetry.status, 409);
+    assert.match((await unconfirmedRetry.json() as any).error, /check gmail sent/i);
+    ambiguousEmail = false;
+    const confirmedRetry = await fetch(`${baseUrl}/api/sales-deliveries/${first.id}/send-invoice`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmAmbiguousRetry: true }),
+    });
+    assert.equal(confirmedRetry.status, 200);
+
+    const firstAttemptRows = await db.select().from(salesDeliveryInvoiceEmailAttempts)
+      .where(eq(salesDeliveryInvoiceEmailAttempts.deliveryId, first.id));
+    assert.deepEqual(firstAttemptRows.map((attempt) => attempt.status), ["ambiguous", "sent"]);
+
     failEmail = true;
-    const failureResponse = await fetch(`${baseUrl}/api/sales-deliveries/${first.id}/send-invoice`, { method: "POST" });
+    const failureResponse = await fetch(`${baseUrl}/api/sales-deliveries/${second.id}/send-invoice`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmResend: true }),
+    });
     assert.equal(failureResponse.status, 502);
     assert.deepEqual(await failureResponse.json(), { error: "Gmail test failure." });
     const afterSend = await fetch(`${baseUrl}/api/sales-orders`);
     assert.equal(afterSend.status, 200);
     const afterSendPayload = await afterSend.json() as { orders: any[] };
     const afterSendOrder = afterSendPayload.orders.find((item) => item.id === order.id);
-    assert.deepEqual(afterSendOrder.deliveries, savedOrder.deliveries, "sending an invoice must not alter delivery records");
+    assert.deepEqual(
+      afterSendOrder.deliveries.map(({ invoiceEmailAttempts: _attempts, ...delivery }: any) => delivery),
+      savedOrder.deliveries.map(({ invoiceEmailAttempts: _attempts, ...delivery }: any) => delivery),
+      "sending an invoice must not alter the delivery's date, quantities, or receipt details",
+    );
     assert.equal(afterSendOrder.status, savedOrder.status, "sending an invoice must not alter the order");
     assert.equal(afterSendOrder.totalZmw, savedOrder.totalZmw);
     assert.equal(afterSendOrder.deliveredZmw, savedOrder.deliveredZmw);
+    const failedDelivery = afterSendOrder.deliveries.find((delivery: any) => delivery.id === second.id);
+    assert.deepEqual(failedDelivery.invoiceEmailAttempts.map((attempt: any) => attempt.status), ["failed", "sent"]);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

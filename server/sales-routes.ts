@@ -7,7 +7,7 @@ import {
 } from "./product-validation";
 import { isCustomerQuoteExpired, requiresCustomerQuoteExpiryConfirmation } from "../shared/customer-quote-expiry";
 import {
-  accountingAccounts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, publicShopOrderAttemptDailyCounts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders,
+  accountingAccounts, customerQuoteEmailAttempts, customerQuoteEmailEvents, customerQuoteLines, customerQuotes, customers, inventoryLocations, inventoryMovements, inventoryReservations, journalEntries, journalLines, marketingAttributions, marketingCampaigns, products, publicShopOrderAttemptCounts, publicShopOrderAttemptDailyCounts, salesDeliveryInvoiceEmailAttempts, salesDeliveryLines, salesDeliveries, salesDeliveryReceiptProofs, salesDeliveryReceipts, salesOrderLines, salesOrders, unmatchedCustomerQuoteEmailEvents,
 } from "../shared/schema";
 import { db } from "./db";
 import { accountBalance, cents as accountingCents, formatCents, postJournal } from "./accounting-posting";
@@ -271,9 +271,33 @@ export function registerSalesRoutes(
     if (!isValidCustomerQuoteDeliveryEventTime(event)) return bad(res, "The email delivery event time is invalid or too far in the future.");
 
     const result = await db.transaction(async (tx) => {
-      const [quote] = await tx.select().from(customerQuotes)
+      let [quote] = await tx.select().from(customerQuotes)
         .where(eq(customerQuotes.emailProviderMessageId, event.messageId)).for("update").limit(1);
-      if (!quote) return { error: "No current quote email matches this message reference.", status: 404 };
+      if (!quote) {
+        const [oldAttempt] = await tx.select().from(customerQuoteEmailAttempts)
+          .where(eq(customerQuoteEmailAttempts.providerMessageId, event.messageId)).for("update").limit(1);
+        if (oldAttempt) {
+          const [received] = await tx.insert(customerQuoteEmailEvents).values({
+            provider: event.provider,
+            providerEventId: event.eventId,
+            customerQuoteId: oldAttempt.customerQuoteId,
+            providerMessageId: event.messageId,
+            outcome: event.status,
+            occurredAt: eventAt,
+          }).onConflictDoNothing().returning({ id: customerQuoteEmailEvents.id });
+          if (!received) return { duplicate: true };
+          await tx.update(customerQuoteEmailAttempts).set({
+            status: event.status,
+            error: event.status === "delivered" ? null : event.error || "Email delivery failed.",
+          }).where(eq(customerQuoteEmailAttempts.id, oldAttempt.id));
+          return { stale: true };
+        }
+        await tx.insert(unmatchedCustomerQuoteEmailEvents).values({
+          provider: event.provider, providerEventId: event.eventId, providerMessageId: event.messageId,
+          outcome: event.status, occurredAt: eventAt, error: event.error ?? null,
+        }).onConflictDoNothing();
+        return { unmatched: true };
+      }
 
       const [received] = await tx.insert(customerQuoteEmailEvents).values({
         provider: event.provider,
@@ -301,6 +325,13 @@ export function registerSalesRoutes(
         updatedAt: new Date(),
       }).where(eq(customerQuotes.id, quote.id)).returning();
       if (!updated) throw new Error("The quote delivery result could not be saved.");
+      await tx.update(customerQuoteEmailAttempts).set({
+        status: event.status,
+        error: emailSendError,
+      }).where(and(
+        eq(customerQuoteEmailAttempts.customerQuoteId, quote.id),
+        eq(customerQuoteEmailAttempts.providerMessageId, event.messageId),
+      ));
       await recordBusinessAudit(tx, {
         entityType: "customer_quote", entityId: updated.id, recordLabel: updated.quoteNumber,
         actor: { clerkUserId: null, email: "Email delivery provider" }, action: "updated",
@@ -308,8 +339,22 @@ export function registerSalesRoutes(
       });
       return { applied: true };
     });
-    if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
+  });
+  app.get("/api/customer-quote-email-notices", owner, async (_req, res) => {
+    const events = await db.select().from(unmatchedCustomerQuoteEmailEvents)
+      .orderBy(desc(unmatchedCustomerQuoteEmailEvents.reviewedAt), desc(unmatchedCustomerQuoteEmailEvents.receivedAt));
+    res.json({ events });
+  });
+  app.patch("/api/customer-quote-email-notices/:id/reviewed", owner, async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!id) return bad(res, "Invalid email delivery notice.");
+    const [event] = await db.update(unmatchedCustomerQuoteEmailEvents).set({
+      reviewedAt: new Date(),
+      reviewedBy: res.locals.actor?.email ?? "business owner",
+    }).where(eq(unmatchedCustomerQuoteEmailEvents.id, id)).returning();
+    if (!event) return res.status(404).json({ error: "Email delivery notice not found." });
+    res.json({ event });
   });
   app.get("/api/shop/products", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -517,7 +562,7 @@ export function registerSalesRoutes(
   });
 
   app.get("/api/sales-orders", owner, async (_req, res) => {
-    const [orders, lines, attributions, deliveryRows, receiptRows, receiptProofRows, locations, movementBalances, reservationBalances, orderReservations, fulfillmentRows, returnRows] = await Promise.all([
+    const [orders, lines, attributions, deliveryRows, receiptRows, receiptProofRows, invoiceEmailAttempts, locations, movementBalances, reservationBalances, orderReservations, fulfillmentRows, returnRows] = await Promise.all([
       db.select({ order: salesOrders, customerName: customers.name }).from(salesOrders)
         .innerJoin(customers, eq(salesOrders.customerId, customers.id)).orderBy(desc(salesOrders.createdAt)),
       db.select({ line: salesOrderLines, productName: products.name, sku: products.sku })
@@ -545,6 +590,8 @@ export function registerSalesRoutes(
         fileName: salesDeliveryReceiptProofs.fileName,
         mimeType: salesDeliveryReceiptProofs.mimeType,
       }).from(salesDeliveryReceiptProofs),
+      db.select().from(salesDeliveryInvoiceEmailAttempts)
+        .orderBy(desc(salesDeliveryInvoiceEmailAttempts.attemptedAt)),
       db.select({ id: inventoryLocations.id, name: inventoryLocations.name })
         .from(inventoryLocations).where(eq(inventoryLocations.active, true)).orderBy(asc(inventoryLocations.name)),
       db.select({
@@ -676,6 +723,7 @@ export function registerSalesRoutes(
       const attribution = attributionByOrder.get(order.id);
       const deliveriesById = new Map<number, {
         id: number; deliveryNumber: string; deliveryDate: string;
+        invoiceEmailAttempts: typeof invoiceEmailAttempts;
         receipt: { receivedBy: string; receivedAt: Date; proofFileName: string | null; proofMimeType: string | null; proofs: { id: number | null; fileName: string; mimeType: string }[] } | null;
         lines: { salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string; quantity: number; returnedQuantity: number; returns: { quantity: number; reason: string; createdAt: Date; locationName: string | null }[]; stockLocations: { locationId: number | null; locationName: string | null; quantity: number }[]; unitPriceZmw: string; lineTotalZmw: string }[];
         totalZmw: string;
@@ -684,6 +732,7 @@ export function registerSalesRoutes(
         const receipt = receiptByDelivery.get(row.delivery.id);
         const delivery = deliveriesById.get(row.delivery.id) ?? {
           id: row.delivery.id, deliveryNumber: row.delivery.deliveryNumber, deliveryDate: row.delivery.deliveryDate,
+          invoiceEmailAttempts: invoiceEmailAttempts.filter((attempt) => attempt.deliveryId === row.delivery.id),
           receipt: receipt ? {
             receivedBy: receipt.receivedBy, receivedAt: receipt.receivedAt,
             proofFileName: receipt.proofFileName, proofMimeType: receipt.proofMimeType,
@@ -720,55 +769,97 @@ export function registerSalesRoutes(
   app.post("/api/sales-deliveries/:id/send-invoice", owner, async (req, res) => {
     const deliveryId = idOf(req.params.id);
     if (!deliveryId) return bad(res, "Invalid delivery invoice.");
-    const [delivery] = await db.select({
-      id: salesDeliveries.id,
-      deliveryNumber: salesDeliveries.deliveryNumber,
-      deliveryDate: salesDeliveries.deliveryDate,
-      orderNumber: salesOrders.orderNumber,
-      customerName: customers.name,
-      customerEmail: customers.email,
-    }).from(salesDeliveries)
-      .innerJoin(salesOrders, eq(salesOrders.id, salesDeliveries.salesOrderId))
-      .innerJoin(customers, eq(customers.id, salesOrders.customerId))
-      .where(eq(salesDeliveries.id, deliveryId)).limit(1);
-    if (!delivery) return res.status(404).json({ error: "Delivery note not found." });
-    if (!delivery.customerEmail) {
-      return bad(res, "Add a saved email address to this customer before sending the invoice.");
-    }
-    if (!z.string().email().safeParse(delivery.customerEmail).success) {
-      return bad(res, "The customer's saved email address is invalid. Update it before sending the invoice.");
-    }
-    const lines = await db.select({
-      productName: products.name,
-      sku: products.sku,
-      quantity: salesDeliveryLines.quantity,
-      unitPriceZmw: salesOrderLines.unitPriceZmw,
-    }).from(salesDeliveryLines)
-      .innerJoin(salesOrderLines, eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId))
-      .innerJoin(products, eq(products.id, salesOrderLines.productId))
-      .where(eq(salesDeliveryLines.deliveryId, delivery.id))
-      .orderBy(asc(products.name), asc(salesDeliveryLines.id));
-    if (!lines.length) return res.status(409).json({ error: "This delivery has no items to invoice." });
-    const invoiceNumber = `INV-${delivery.deliveryNumber.replace(/^DN-/, "")}`;
-    const invoiceLines = lines.map((line) => ({
-      ...line,
-      lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
-    }));
-    const totalZmw = money(invoiceLines.reduce(
-      (total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n,
-    ));
-    const outcome = await sendDeliveryInvoiceEmail({
-      invoiceNumber,
-      deliveryNumber: delivery.deliveryNumber,
-      deliveryDate: delivery.deliveryDate,
-      orderNumber: delivery.orderNumber,
-      customerName: delivery.customerName,
-      customerEmail: delivery.customerEmail,
-      totalZmw,
-      lines: invoiceLines,
+    const claim = await db.transaction(async (tx) => {
+      const [deliveryRow] = await tx.select().from(salesDeliveries)
+        .where(eq(salesDeliveries.id, deliveryId)).for("update").limit(1);
+      if (!deliveryRow) return { error: "Delivery note not found.", status: 404 };
+      const [delivery] = await tx.select({
+        id: salesDeliveries.id,
+        deliveryNumber: salesDeliveries.deliveryNumber,
+        deliveryDate: salesDeliveries.deliveryDate,
+        orderNumber: salesOrders.orderNumber,
+        customerName: customers.name,
+        customerEmail: customers.email,
+      }).from(salesDeliveries)
+        .innerJoin(salesOrders, eq(salesOrders.id, salesDeliveries.salesOrderId))
+        .innerJoin(customers, eq(customers.id, salesOrders.customerId))
+        .where(eq(salesDeliveries.id, deliveryId)).limit(1);
+      if (!delivery) return { error: "Delivery note not found.", status: 404 };
+      const [latest] = await tx.select().from(salesDeliveryInvoiceEmailAttempts)
+        .where(eq(salesDeliveryInvoiceEmailAttempts.deliveryId, deliveryId))
+        .orderBy(desc(salesDeliveryInvoiceEmailAttempts.attemptNumber)).limit(1);
+      const confirmAmbiguous = req.body?.confirmAmbiguousRetry === true;
+      if (latest?.status === "sending") {
+        const stale = Date.now() - latest.attemptedAt.getTime() > 5 * 60 * 1000;
+        if (!stale) return { error: "This invoice email is already being sent. Wait before trying again.", status: 409 };
+        if (!confirmAmbiguous) {
+          return {
+            error: "The previous invoice send did not finish. Check Gmail Sent, then confirm before retrying.",
+            status: 409,
+          };
+        }
+        await tx.update(salesDeliveryInvoiceEmailAttempts).set({
+          status: "ambiguous",
+          error: "The previous invoice send did not finish. Check Gmail Sent before retrying.",
+        }).where(eq(salesDeliveryInvoiceEmailAttempts.id, latest.id));
+      }
+      if (latest?.status === "ambiguous" && !confirmAmbiguous) {
+        return {
+          error: "Check Gmail Sent before retrying this invoice. Confirm only if the previous email is not there.",
+          status: 409,
+        };
+      }
+      if (latest?.status === "sent" && req.body?.confirmResend !== true) {
+        return { error: "This delivery invoice was already emailed. Confirm to send it again.", status: 409 };
+      }
+      if (!delivery.customerEmail) {
+        return { error: "Add a saved email address to this customer before sending the invoice.", status: 400 };
+      }
+      if (!z.string().email().safeParse(delivery.customerEmail).success) {
+        return { error: "The customer's saved email address is invalid. Update it before sending the invoice.", status: 400 };
+      }
+      const lines = await tx.select({
+        productName: products.name, sku: products.sku,
+        quantity: salesDeliveryLines.quantity, unitPriceZmw: salesOrderLines.unitPriceZmw,
+      }).from(salesDeliveryLines)
+        .innerJoin(salesOrderLines, eq(salesOrderLines.id, salesDeliveryLines.salesOrderLineId))
+        .innerJoin(products, eq(products.id, salesOrderLines.productId))
+        .where(eq(salesDeliveryLines.deliveryId, delivery.id))
+        .orderBy(asc(products.name), asc(salesDeliveryLines.id));
+      if (!lines.length) return { error: "This delivery has no items to invoice.", status: 409 };
+      const invoiceLines = lines.map((line) => ({
+        ...line, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
+      }));
+      const attemptedAt = new Date();
+      const [previous] = await tx.select({ attemptNumber: salesDeliveryInvoiceEmailAttempts.attemptNumber })
+        .from(salesDeliveryInvoiceEmailAttempts).where(eq(salesDeliveryInvoiceEmailAttempts.deliveryId, deliveryId))
+        .orderBy(desc(salesDeliveryInvoiceEmailAttempts.attemptNumber)).limit(1);
+      const [attempt] = await tx.insert(salesDeliveryInvoiceEmailAttempts).values({
+        deliveryId, attemptNumber: (previous?.attemptNumber ?? 0) + 1,
+        attemptedAt, recipientEmail: delivery.customerEmail,
+      }).returning();
+      return {
+        attemptId: attempt.id,
+        content: {
+          invoiceNumber: `INV-${delivery.deliveryNumber.replace(/^DN-/, "")}`,
+          deliveryNumber: delivery.deliveryNumber, deliveryDate: delivery.deliveryDate,
+          orderNumber: delivery.orderNumber, customerName: delivery.customerName,
+          customerEmail: delivery.customerEmail,
+          totalZmw: money(invoiceLines.reduce((total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)),
+          lines: invoiceLines,
+        },
+      };
     });
+    if ("error" in claim) return res.status(claim.status ?? 400).json({ error: claim.error });
+    const outcome = await sendDeliveryInvoiceEmail(claim.content);
+    await db.update(salesDeliveryInvoiceEmailAttempts).set({
+      status: outcome.ok ? "sent" : outcome.ambiguous ? "ambiguous" : "failed",
+      sentAt: outcome.ok ? new Date() : null,
+      providerMessageId: outcome.ok ? outcome.messageId : null,
+      error: outcome.ok ? null : outcome.error,
+    }).where(eq(salesDeliveryInvoiceEmailAttempts.id, claim.attemptId));
     if (!outcome.ok) return res.status(502).json({ error: outcome.error });
-    res.json({ message: `Invoice sent to ${delivery.customerEmail}.` });
+    res.json({ message: `Invoice sent to ${claim.content.customerEmail}.` });
   });
   app.post("/api/sales-delivery-lines/:id/returns", owner, async (req, res) => {
     const deliveryLineId = idOf(req.params.id);
@@ -901,19 +992,26 @@ export function registerSalesRoutes(
     res.status(result.duplicate ? 200 : 201).json(result);
   });
   app.get("/api/customer-quotes", owner, async (_req, res) => {
-    const [quotes, lines] = await Promise.all([
+    const [quotes, lines, emailAttempts, emailEvents] = await Promise.all([
       db.select({ quote: customerQuotes, customerName: customers.name, customerEmail: customers.email, salesOrderNumber: salesOrders.orderNumber })
         .from(customerQuotes).innerJoin(customers, eq(customerQuotes.customerId, customers.id))
         .leftJoin(salesOrders, eq(customerQuotes.salesOrderId, salesOrders.id)).orderBy(desc(customerQuotes.createdAt)),
       db.select({ line: customerQuoteLines, productName: products.name, sku: products.sku })
         .from(customerQuoteLines).innerJoin(products, eq(customerQuoteLines.productId, products.id)),
+      db.select().from(customerQuoteEmailAttempts).orderBy(desc(customerQuoteEmailAttempts.attemptedAt)),
+      db.select().from(customerQuoteEmailEvents).orderBy(desc(customerQuoteEmailEvents.occurredAt)),
     ]);
     res.json({ quotes: quotes.map(({ quote, customerName, customerEmail, salesOrderNumber }) => {
       const quoteLines = lines.filter(({ line }) => line.customerQuoteId === quote.id).map(({ line, productName, sku }) => ({
         id: line.id, productId: line.productId, productName, sku, quantity: line.quantity,
         unitPriceZmw: line.unitPriceZmw, lineTotalZmw: money(cents(line.unitPriceZmw) * BigInt(line.quantity)),
       }));
-      return { ...quote, customerName, customerEmail, salesOrderNumber, lines: quoteLines, totalZmw: money(quoteLines.reduce((sum, line) => sum + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)) };
+      return {
+        ...quote, customerName, customerEmail, salesOrderNumber, lines: quoteLines,
+        emailAttempts: emailAttempts.filter((attempt) => attempt.customerQuoteId === quote.id),
+        emailDeliveryEvents: emailEvents.filter((event) => event.customerQuoteId === quote.id),
+        totalZmw: money(quoteLines.reduce((sum, line) => sum + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n)),
+      };
     }) });
   });
   app.post("/api/customer-quotes", owner, async (req, res) => {
@@ -972,6 +1070,12 @@ export function registerSalesRoutes(
     const claim = await db.transaction(async (tx) => {
       const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!quote) return { error: "Customer quote not found.", status: 404 };
+      if (quote.emailSendStatus === "ambiguous" && req.body?.confirmAmbiguousRetry !== true) {
+        return {
+          error: "Check Gmail Sent before retrying this quote. Confirm only if the previous email is not there.",
+          status: 409,
+        };
+      }
       if (quote.emailSendStatus === "sending") {
         const attemptedAt = quote.emailAttemptedAt?.getTime() ?? 0;
         const stale = !attemptedAt || Date.now() - attemptedAt > 5 * 60 * 1000;
@@ -982,6 +1086,16 @@ export function registerSalesRoutes(
           };
         }
         if (!stale) return { error: "This quote email is already being sent. Wait for it to finish before trying again.", status: 409 };
+        if (quote.emailAttemptedAt) {
+          await tx.update(customerQuoteEmailAttempts).set({
+            status: "ambiguous",
+            error: "The previous send did not finish. Check Gmail Sent before retrying.",
+          }).where(and(
+            eq(customerQuoteEmailAttempts.customerQuoteId, quote.id),
+            eq(customerQuoteEmailAttempts.attemptedAt, quote.emailAttemptedAt),
+            eq(customerQuoteEmailAttempts.status, "sending"),
+          ));
+        }
       }
 
       const [customer] = await tx.select({ name: customers.name, email: customers.email })
@@ -1005,12 +1119,22 @@ export function registerSalesRoutes(
         (total, line) => total + cents(line.unitPriceZmw) * BigInt(line.quantity), 0n,
       ));
       const attemptedAt = new Date();
+      const [previousAttempt] = await tx.select({ attemptNumber: customerQuoteEmailAttempts.attemptNumber })
+        .from(customerQuoteEmailAttempts).where(eq(customerQuoteEmailAttempts.customerQuoteId, quote.id))
+        .orderBy(desc(customerQuoteEmailAttempts.attemptNumber)).limit(1);
+      const [attempt] = await tx.insert(customerQuoteEmailAttempts).values({
+        customerQuoteId: quote.id,
+        attemptNumber: (previousAttempt?.attemptNumber ?? 0) + 1,
+        attemptedAt,
+        recipientEmail: customer.email,
+      }).returning();
       const [claimed] = await tx.update(customerQuotes).set({
         emailSendStatus: "sending", emailAttemptedAt: attemptedAt, emailSentAt: null,
         emailSendError: null, emailProviderMessageId: null, emailDeliveryEventAt: null, updatedAt: attemptedAt,
       }).where(eq(customerQuotes.id, quote.id)).returning();
       return {
         quote: claimed,
+        attemptId: attempt.id,
         content: {
           quoteNumber: quote.quoteNumber, emailAttemptedAt: attemptedAt.toISOString(),
           customerName: customer.name, customerEmail: customer.email,
@@ -1023,9 +1147,16 @@ export function registerSalesRoutes(
 
     const outcome = await sendQuoteEmail(claim.content);
     const sentAt = outcome.ok ? new Date() : null;
+    const attemptStatus = outcome.ok ? "sent" : outcome.ambiguous ? "ambiguous" : "failed";
     const saved = await db.transaction(async (tx) => {
+      await tx.update(customerQuoteEmailAttempts).set({
+        status: attemptStatus,
+        sentAt,
+        providerMessageId: outcome.ok ? outcome.messageId : null,
+        error: outcome.ok ? null : outcome.error,
+      }).where(eq(customerQuoteEmailAttempts.id, claim.attemptId));
       const [updated] = await tx.update(customerQuotes).set({
-        emailSendStatus: outcome.ok ? "sent" : "failed",
+        emailSendStatus: outcome.ok ? "sent" : outcome.ambiguous ? "ambiguous" : "failed",
         emailSentAt: sentAt,
         emailSendError: outcome.ok ? null : outcome.error,
         emailProviderMessageId: outcome.ok ? outcome.messageId : null,
@@ -1039,7 +1170,7 @@ export function registerSalesRoutes(
       await recordBusinessAudit(tx, {
         entityType: "customer_quote", entityId: updated.id, recordLabel: updated.quoteNumber,
         actor: res.locals.actor, action: "updated",
-        changedFields: ["emailSendStatus", "emailAttemptedAt", "emailSentAt", "emailSendError"],
+        changedFields: ["emailSendStatus", "emailAttemptedAt", "emailSentAt", "emailSendError", "emailProviderMessageId"],
       });
       return updated;
     });

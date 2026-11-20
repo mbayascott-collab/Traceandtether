@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { convertCustomerQuote, deleteCustomerQuote, emailCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product } from "../lib/api";
+import { convertCustomerQuote, deleteCustomerQuote, emailCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, fetchUnmatchedCustomerQuoteEmailEvents, markCustomerQuoteEmailEventReviewed, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product, type UnmatchedCustomerQuoteEmailEvent } from "../lib/api";
 import { isCustomerQuoteExpired } from "../../shared/customer-quote-expiry";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import CustomerQuotePrintDocument from "./CustomerQuotePrintDocument";
@@ -18,6 +18,7 @@ export default function CustomerQuotesWorkspace() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [quotes, setQuotes] = useState<CustomerQuote[]>([]);
+  const [unmatchedEvents, setUnmatchedEvents] = useState<UnmatchedCustomerQuoteEmailEvent[]>([]);
   const [printQuote, setPrintQuote] = useState<CustomerQuote | null>(null);
   const [editing, setEditing] = useState<CustomerQuote | null>(null);
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -28,8 +29,8 @@ export default function CustomerQuotesWorkspace() {
 
   useEffect(() => {
     let alive = true;
-    Promise.all([fetchCustomers(), fetchProducts({ page: 1, pageSize: 100 }), fetchCustomerQuotes()])
-      .then(([c, p, q]) => { if (alive) { setCustomers(c); setProducts(p.products); setQuotes(q); } })
+    Promise.all([fetchCustomers(), fetchProducts({ page: 1, pageSize: 100 }), fetchCustomerQuotes(), fetchUnmatchedCustomerQuoteEmailEvents()])
+      .then(([c, p, q, e]) => { if (alive) { setCustomers(c); setProducts(p.products); setQuotes(q); setUnmatchedEvents(e); } })
       .catch((cause: unknown) => { if (alive) setError(cause instanceof Error ? cause.message : "Could not load customer quotes."); });
     return () => { alive = false; };
   }, [reload]);
@@ -94,7 +95,8 @@ export default function CustomerQuotesWorkspace() {
   async function sendQuote(quote: CustomerQuote) {
     if (!quote.customerEmail) return;
     const staleSending = isStaleEmailAttempt(quote);
-    if (staleSending && !window.confirm(
+    const ambiguous = staleSending || quote.emailSendStatus === "ambiguous";
+    if (ambiguous && !window.confirm(
       `The previous attempt may have reached ${quote.customerEmail}. Check Gmail Sent first. If it is not there, retry ${quote.quoteNumber}?`,
     )) return;
     if (["sent", "delivered", "bounced"].includes(quote.emailSendStatus) && !window.confirm(
@@ -103,7 +105,7 @@ export default function CustomerQuotesWorkspace() {
     setError(""); setNotice("");
     setSendingQuotes((current) => new Set(current).add(quote.id));
     try {
-      await emailCustomerQuote(quote.id, Boolean(staleSending));
+      await emailCustomerQuote(quote.id, ambiguous);
       setNotice(`${quote.quoteNumber} was emailed to ${quote.customerEmail}.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Gmail could not send the quote.");
@@ -119,10 +121,31 @@ export default function CustomerQuotesWorkspace() {
   function isQuoteExpired(quote: CustomerQuote) {
     return isCustomerQuoteExpired(quote.validUntil);
   }
+  async function reviewUnmatchedEvent(event: UnmatchedCustomerQuoteEmailEvent) {
+    try {
+      await markCustomerQuoteEmailEventReviewed(event.id);
+      setUnmatchedEvents((current) => current.map((item) => item.id === event.id
+        ? { ...item, reviewedAt: new Date().toISOString(), reviewedBy: "You" }
+        : item));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not mark the email notice reviewed.");
+    }
+  }
 
   return <section className="supplier-workspace">
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>Customer quotes</h1><p>Prepare a price offer, mark it accepted, then turn it into a draft sales order.</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
+    {!!unmatchedEvents.length && <section className="panel">
+      <h2>Email delivery notices to review</h2>
+      <p className="report-footnote">These Gmail delivery notices could not be matched to a saved quote email. They are kept here and do not change any quote’s status.</p>
+      <div className="data-table-wrap"><table><thead><tr><th>Provider reference</th><th>Result</th><th>Received</th><th>Details</th><th>Review</th></tr></thead><tbody>
+        {unmatchedEvents.map((event) => <tr key={event.id}>
+          <td>{event.providerMessageId}</td><td>{event.outcome}</td>
+          <td>{new Date(event.receivedAt).toLocaleString("en-ZM")}</td><td>{event.error || "No extra details"}</td>
+          <td>{event.reviewedAt ? `Reviewed ${new Date(event.reviewedAt).toLocaleString("en-ZM")}` : <button className="button button-secondary button-small" onClick={() => reviewUnmatchedEvent(event)}>Mark reviewed</button>}</td>
+        </tr>)}
+      </tbody></table></div>
+    </section>}
     <form key={editing?.id ?? "new-quote"} className="panel form-grid" onSubmit={submit}>
       <h2>{editing ? `Edit ${editing.quoteNumber}` : "Prepare a customer quote"}</h2>
       <label>Customer<select name="customerId" required defaultValue={String(editing?.customerId ?? "")}><option value="">Select customer</option>{customers.filter((c) => c.status === "active").map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
@@ -156,11 +179,28 @@ export default function CustomerQuotesWorkspace() {
               ? `Bounced${quote.emailDeliveryEventAt ? ` · ${new Date(quote.emailDeliveryEventAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
               : quote.emailSendStatus === "failed"
                 ? `Failed${quote.emailDeliveryEventAt ? ` · ${new Date(quote.emailDeliveryEventAt).toLocaleString("en-ZM")}` : quote.emailAttemptedAt ? ` · ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
+                 : quote.emailSendStatus === "ambiguous"
+                   ? `Needs Gmail check${quote.emailAttemptedAt ? ` · ${new Date(quote.emailAttemptedAt).toLocaleString("en-ZM")}` : ""}${quote.emailSendError ? `: ${quote.emailSendError}` : ""}`
                 : "Not sent"}
+        {!!quote.emailAttempts?.length && <details className="quote-email-history">
+          <summary>{quote.emailAttempts.length} send attempt{quote.emailAttempts.length === 1 ? "" : "s"}</summary>
+          <ol>{quote.emailAttempts.map((attempt) => <li key={attempt.id}>
+            <strong>Attempt {attempt.attemptNumber} · {attempt.status}</strong>
+            <span>{new Date(attempt.attemptedAt).toLocaleString("en-ZM")} · {attempt.recipientEmail}</span>
+            {attempt.providerMessageId && <span>Gmail reference: {attempt.providerMessageId}</span>}
+            {attempt.error && <span>{attempt.error}</span>}
+          </li>)}</ol>
+          {!!quote.emailDeliveryEvents?.length && <div className="quote-email-events">
+            <strong>Delivery updates</strong>
+            {quote.emailDeliveryEvents.map((event) => <span key={event.id}>
+              {event.outcome} · {new Date(event.occurredAt).toLocaleString("en-ZM")} · {event.providerMessageId}
+            </span>)}
+          </div>}
+        </details>}
       </td><td>
         {(quote.status === "draft" || quote.status === "sent") && <button className="button button-secondary button-small" type="button" disabled={quote.emailSendStatus === "sending"} onClick={() => editQuote(quote)}>Edit</button>}
         <button className="button button-secondary button-small" type="button" disabled={!quote.customerEmail || (quote.emailSendStatus === "sending" && !isStaleEmailAttempt(quote)) || sendingQuotes.has(quote.id)} title={!quote.customerEmail ? "Add a saved customer email before sending." : undefined} onClick={() => sendQuote(quote)}>
-          {sendingQuotes.has(quote.id) ? "Sending…" : quote.emailSendStatus === "sending" ? "Check Gmail & retry" : ["sent", "delivered", "bounced"].includes(quote.emailSendStatus) ? "Email again" : "Email quote"}
+          {sendingQuotes.has(quote.id) ? "Sending…" : quote.emailSendStatus === "sending" || quote.emailSendStatus === "ambiguous" ? "Check Gmail & retry" : ["sent", "delivered", "bounced"].includes(quote.emailSendStatus) ? "Email again" : "Email quote"}
         </button>
         {!quote.customerEmail && <span className="report-footnote">Add a saved customer email first.</span>}
         {quote.status === "accepted" && <button className="button button-primary button-small" onClick={() => convert(quote)}>{isQuoteExpired(quote) ? "Review expiry & convert" : "Convert to order"}</button>}

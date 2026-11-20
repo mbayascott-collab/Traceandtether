@@ -100,8 +100,14 @@ export interface SalesDeliveryReceipt {
   receivedBy: string; receivedAt: string; proofFileName: string | null; proofMimeType: string | null;
   proofs: SalesDeliveryReceiptProof[];
 }
+export interface SalesDeliveryInvoiceEmailAttempt {
+  id: number; attemptNumber: number; attemptedAt: string; recipientEmail: string;
+  status: "sending" | "sent" | "failed" | "ambiguous"; sentAt: string | null;
+  providerMessageId: string | null; error: string | null;
+}
 export interface SalesDelivery {
   id: number; deliveryNumber: string; deliveryDate: string; totalZmw: string; receipt: SalesDeliveryReceipt | null;
+  invoiceEmailAttempts?: SalesDeliveryInvoiceEmailAttempt[];
   lines: {
     salesDeliveryLineId: number; salesOrderLineId: number; productName: string; sku: string;
     quantity: number; returnedQuantity: number;
@@ -113,8 +119,30 @@ export interface SalesDelivery {
 export interface SalesOrder { id: number; orderNumber: string; customerId: number; customerName: string; status: "draft" | "confirmed" | "partially_fulfilled" | "fulfilled" | "cancelled"; orderDate: string; confirmedAt?: string | null; fulfilledAt: string | null; deliveryAddress: string | null; notes: string | null; totalZmw: string; deliveredZmw: string; deliveries: SalesDelivery[]; campaignId: number | null; campaignName: string | null; lines: SalesOrderLine[]; }
 export type CustomerQuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "converted";
 export interface CustomerQuoteLine { id: number; productId: number; productName: string; sku: string; quantity: number; unitPriceZmw: string; lineTotalZmw: string; }
-export type CustomerQuoteEmailStatus = "not_sent" | "sending" | "sent" | "delivered" | "bounced" | "failed";
-export interface CustomerQuote { id: number; quoteNumber: string; customerId: number; customerName: string; customerEmail: string | null; status: CustomerQuoteStatus; emailSendStatus: CustomerQuoteEmailStatus; emailAttemptedAt: string | null; emailSentAt: string | null; emailSendError: string | null; emailDeliveryEventAt: string | null; createdAt: string; validUntil: string | null; deliveryAddress: string | null; notes: string | null; salesOrderId: number | null; salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[]; }
+export type CustomerQuoteEmailStatus = "not_sent" | "sending" | "sent" | "delivered" | "bounced" | "failed" | "ambiguous";
+export interface CustomerQuoteEmailAttempt {
+  id: number; attemptNumber: number; attemptedAt: string; recipientEmail: string;
+  status: "sending" | "sent" | "delivered" | "bounced" | "failed" | "ambiguous";
+  sentAt: string | null; providerMessageId: string | null; error: string | null;
+}
+export interface CustomerQuoteEmailDeliveryEvent {
+  id: number; provider: string; providerEventId: string; providerMessageId: string;
+  outcome: "delivered" | "bounced" | "failed"; occurredAt: string; receivedAt: string;
+}
+export interface UnmatchedCustomerQuoteEmailEvent {
+  id: number; provider: string; providerEventId: string; providerMessageId: string;
+  outcome: "delivered" | "bounced" | "failed"; occurredAt: string; receivedAt: string;
+  error: string | null; reviewedAt: string | null; reviewedBy: string | null;
+}
+export interface CustomerQuote {
+  id: number; quoteNumber: string; customerId: number; customerName: string; customerEmail: string | null;
+  status: CustomerQuoteStatus; emailSendStatus: CustomerQuoteEmailStatus; emailAttemptedAt: string | null;
+  emailSentAt: string | null; emailSendError: string | null; emailProviderMessageId?: string | null;
+  emailDeliveryEventAt: string | null; emailAttempts?: CustomerQuoteEmailAttempt[];
+  emailDeliveryEvents?: CustomerQuoteEmailDeliveryEvent[]; createdAt: string; validUntil: string | null;
+  deliveryAddress: string | null; notes: string | null; salesOrderId: number | null;
+  salesOrderNumber: string | null; totalZmw: string; lines: CustomerQuoteLine[];
+}
 export interface CustomerQuoteInput { customerId: number; validUntil: string | null; deliveryAddress: string | null; notes: string | null; status: "draft" | "sent" | "accepted" | "rejected"; lines: { productId: number; quantity: number; unitPriceZmw: string }[]; }
 export interface MarketingCampaignOption { id: number; name: string; status: string; }
 export type PaymentDirection = "customer_receipt" | "supplier_payment";
@@ -687,6 +715,12 @@ export function publicShopAttemptDaysCsv(days: PublicShopAttemptDay[]): string {
 export async function fetchCustomerQuotes(): Promise<CustomerQuote[]> {
   return (await request<{ quotes: CustomerQuote[] }>("/api/customer-quotes")).quotes;
 }
+export async function fetchUnmatchedCustomerQuoteEmailEvents(): Promise<UnmatchedCustomerQuoteEmailEvent[]> {
+  return (await request<{ events: UnmatchedCustomerQuoteEmailEvent[] }>("/api/customer-quote-email-notices")).events;
+}
+export async function markCustomerQuoteEmailEventReviewed(id: number): Promise<void> {
+  await request(`/api/customer-quote-email-notices/${id}/reviewed`, { method: "PATCH" });
+}
 export async function saveCustomerQuote(input: CustomerQuoteInput, id?: number): Promise<void> {
   await request(id ? `/api/customer-quotes/${id}` : "/api/customer-quotes", { method: id ? "PATCH" : "POST", body: JSON.stringify(input) });
 }
@@ -733,8 +767,12 @@ export async function createSalesDelivery(id: number, input: {
 }): Promise<void> {
   await request(`/api/sales-orders/${id}/deliveries`, { method: "POST", body: JSON.stringify(input) });
 }
-export async function sendSalesDeliveryInvoice(deliveryId: number): Promise<string> {
-  const result = await request<{ message: string }>(`/api/sales-deliveries/${deliveryId}/send-invoice`, { method: "POST" });
+export async function sendSalesDeliveryInvoice(deliveryId: number, options: {
+  confirmAmbiguousRetry?: boolean; confirmResend?: boolean;
+} = {}): Promise<string> {
+  const result = await request<{ message: string }>(`/api/sales-deliveries/${deliveryId}/send-invoice`, {
+    method: "POST", body: JSON.stringify(options),
+  });
   return result.message;
 }
 export async function recordSalesReturn(

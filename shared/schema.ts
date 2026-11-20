@@ -548,7 +548,7 @@ export const customerQuotes = pgTable(
     uniqueIndex("customer_quotes_email_provider_message_unique").on(table.emailProviderMessageId),
     index("customer_quotes_customer_idx").on(table.customerId),
     index("customer_quotes_status_idx").on(table.status),
-    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sending', 'sent', 'delivered', 'bounced', 'failed')`),
+    check("customer_quotes_email_send_status", sql`${table.emailSendStatus} in ('not_sent', 'sending', 'sent', 'delivered', 'bounced', 'failed', 'ambiguous')`),
     check("customer_quotes_conversion_state", sql`(${table.status} = 'converted') = (${table.salesOrderId} is not null)`),
   ],
 );
@@ -569,6 +569,70 @@ export const customerQuoteEmailEvents = pgTable(
     uniqueIndex("customer_quote_email_events_provider_event_unique").on(table.provider, table.providerEventId),
     index("customer_quote_email_events_quote_idx").on(table.customerQuoteId),
     check("customer_quote_email_events_outcome", sql`${table.outcome} in ('delivered', 'bounced', 'failed')`),
+  ],
+);
+
+export const customerQuoteEmailAttempts = pgTable(
+  "customer_quote_email_attempts",
+  {
+    id: serial("id").primaryKey(),
+    customerQuoteId: integer("customer_quote_id").notNull().references(() => customerQuotes.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull(),
+    recipientEmail: varchar("recipient_email", { length: 254 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("sending"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    providerMessageId: varchar("provider_message_id", { length: 255 }),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("customer_quote_email_attempts_number_unique").on(table.customerQuoteId, table.attemptNumber),
+    uniqueIndex("customer_quote_email_attempts_message_unique").on(table.providerMessageId),
+    index("customer_quote_email_attempts_quote_idx").on(table.customerQuoteId, table.attemptedAt),
+    check("customer_quote_email_attempts_status", sql`${table.status} in ('sending', 'sent', 'delivered', 'bounced', 'failed', 'ambiguous')`),
+  ],
+);
+
+export const salesDeliveryInvoiceEmailAttempts = pgTable(
+  "sales_delivery_invoice_email_attempts",
+  {
+    id: serial("id").primaryKey(),
+    deliveryId: integer("delivery_id").notNull().references(() => salesDeliveries.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull(),
+    recipientEmail: varchar("recipient_email", { length: 254 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("sending"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    providerMessageId: varchar("provider_message_id", { length: 255 }),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("sales_delivery_invoice_email_attempts_number_unique").on(table.deliveryId, table.attemptNumber),
+    index("sales_delivery_invoice_email_attempts_delivery_idx").on(table.deliveryId, table.attemptedAt),
+    check("sales_delivery_invoice_email_attempts_status", sql`${table.status} in ('sending', 'sent', 'failed', 'ambiguous')`),
+  ],
+);
+
+export const unmatchedCustomerQuoteEmailEvents = pgTable(
+  "unmatched_customer_quote_email_events",
+  {
+    id: serial("id").primaryKey(),
+    provider: varchar("provider", { length: 32 }).notNull(),
+    providerEventId: varchar("provider_event_id", { length: 255 }).notNull(),
+    providerMessageId: varchar("provider_message_id", { length: 255 }).notNull(),
+    outcome: varchar("outcome", { length: 16 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    error: text("error"),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: varchar("reviewed_by", { length: 255 }),
+  },
+  (table) => [
+    uniqueIndex("unmatched_customer_quote_email_events_provider_event_unique").on(table.provider, table.providerEventId),
+    index("unmatched_customer_quote_email_events_reviewed_idx").on(table.reviewedAt, table.receivedAt),
+    check("unmatched_customer_quote_email_events_outcome", sql`${table.outcome} in ('delivered', 'bounced', 'failed')`),
   ],
 );
 

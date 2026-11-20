@@ -4,7 +4,7 @@ import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
 import { eq } from "drizzle-orm";
-import { customers, customerQuoteLines, customerQuotes, products } from "../shared/schema";
+import { customerQuoteEmailAttempts, customers, customerQuoteLines, customerQuotes, products } from "../shared/schema";
 import { buildCustomerQuoteEmail, buildCustomerQuotePdf, sendCustomerQuoteEmail, type CustomerQuoteEmailContent } from "./customer-quote-email";
 
 const quote: CustomerQuoteEmailContent = {
@@ -55,8 +55,40 @@ test("builds a Gmail-ready customer quote with its saved recipient and full pric
   assert.match(attachmentHeaders, /Content-Disposition: attachment; filename="CQ-2026-ABC123\.pdf"/);
   assert.deepEqual(pdf, buildCustomerQuotePdf(quote));
   const printableText = pdf.toString("latin1");
-  for (const required of ["CQ-2026-ABC123", "Handmade bag", "BAG-1", "ZMW 1,250.50", "Valid until: 2026-12-31", "Delivery address: Lusaka"]) {
+  for (const required of [
+    "CQ-2026-ABC123", "Handmade bag", "BAG-1", "ZMW 1,250.50",
+    "Valid until: 2026-12-31", "Delivery address: Lusaka",
+    "TRACE AND TETHER CRAFT STUDIO LIMITED", "164 Mpundu Street",
+    "traceandtether@gmail.com", "+260-0977-101-967",
+    "CUSTOMER APPROVAL", "Name and signature", "Date:",
+  ]) {
     assert.ok(printableText.includes(required), `Printable PDF is missing ${required}.`);
+  }
+  assert.match(printableText, /\/Logo Do/, "The email PDF should include the same company logo as the preview.");
+});
+
+test("long emailed quotes paginate every item once and keep the total and approval fields", () => {
+  const lineCount = 80;
+  const content = {
+    ...quote,
+    lines: Array.from({ length: lineCount }, (_, index) => {
+      const n = String(index + 1).padStart(3, "0");
+      return {
+        productName: `Long quote item ${n}`, sku: `LONG-${n}`, quantity: 1,
+        unitPriceZmw: "1.00", lineTotalZmw: "1.00",
+      };
+    }),
+    totalZmw: `${lineCount}.00`,
+  };
+  const pdf = buildCustomerQuotePdf(content).toString("latin1");
+  const pages = (pdf.match(/\/Type \/Page \/Parent 2 0 R/g) ?? []).length;
+  assert.ok(pages > 1, "A long emailed quote should span more than one PDF page.");
+  for (let index = 1; index <= lineCount; index += 1) {
+    const name = `Long quote item ${String(index).padStart(3, "0")}`;
+    assert.equal(pdf.split(name).length - 1, 1, `Expected exactly one copy of ${name}.`);
+  }
+  for (const required of ["TOTAL: ZMW 80.00", "CUSTOMER APPROVAL", "Name and signature", "Date:"]) {
+    assert.ok(pdf.includes(required), `The final PDF pages should contain ${required}.`);
   }
 });
 
@@ -120,12 +152,13 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
     import("./db"),
     import("./sales-routes"),
   ]);
-  const auditTable = await pool.query<{ exists: boolean }>(
-    "SELECT to_regclass('public.business_audit_logs') IS NOT NULL AS exists",
+  const requiredTables = await pool.query<{ ready: boolean }>(
+    `SELECT to_regclass('public.business_audit_logs') IS NOT NULL
+      AND to_regclass('public.customer_quote_email_attempts') IS NOT NULL AS ready`,
   );
-  if (!auditTable.rows[0]?.exists) {
+  if (!requiredTables.rows[0]?.ready) {
     await pool.end();
-    t.skip("requires the business audit migration used by sales routes");
+    t.skip("requires business audit and customer quote email history migrations");
     return;
   }
 
@@ -151,6 +184,7 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
   const newerRetryStarted = new Promise<void>((resolve) => { markNewerRetryStarted = resolve; });
   const sendAttempts: string[] = [];
   let staleQuoteSendAttempts = 0;
+  let ambiguousQuoteSendAttempts = 0;
   registerSalesRoutes(app, owner, {
     sendCustomerQuoteEmail: async (content) => {
       sendAttempts.push(content.quoteNumber);
@@ -169,6 +203,13 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
         markNewerRetryStarted();
         await newerRetryGate;
         return { ok: true, messageId: `gmail-${suffix}-latest` };
+      }
+      if (content.quoteNumber.endsWith("-D")) {
+        ambiguousQuoteSendAttempts += 1;
+        if (ambiguousQuoteSendAttempts === 1) {
+          return { ok: false, ambiguous: true, error: "Gmail did not confirm the result." };
+        }
+        return { ok: true, messageId: `gmail-${suffix}-confirmed` };
       }
       return { ok: false, error: "Gmail could not send the quote (HTTP 503)" };
     },
@@ -231,6 +272,17 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
     assert.equal(overlappingRequest.status, 409, JSON.stringify(overlappingRequest.payload));
     assert.match(overlappingRequest.payload.error, /already being sent/i);
     assert.equal(sendAttempts.filter((number) => number === concurrentQuote.quoteNumber).length, 1);
+    const editWhileSending = await fetch(`${baseUrl}/api/customer-quotes/${concurrentQuote.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        customerId: customer.id, validUntil: "2999-12-31", deliveryAddress: null,
+        notes: null, status: "draft", lines: [{ productId: product.id, quantity: 2, unitPriceZmw: "25.00" }],
+      }),
+    });
+    assert.equal(editWhileSending.status, 409, "quote edits must remain blocked while Gmail is sending");
+    const deleteWhileSending = await fetch(`${baseUrl}/api/customer-quotes/${concurrentQuote.id}`, { method: "DELETE" });
+    assert.equal(deleteWhileSending.status, 409, "quote deletion must remain blocked while Gmail is sending");
     releaseFirstSend();
     const firstResponse = await firstRequest;
     assert.equal(firstResponse.status, 200, JSON.stringify(firstResponse.payload));
@@ -270,6 +322,19 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
     assert.equal(savedFailure?.emailSentAt, null);
     assert.equal(savedFailure?.emailSendError, "Gmail could not send the quote (HTTP 503)");
     assert.ok(savedFailure?.emailAttemptedAt);
+
+    const ambiguousQuote = await createQuote("D");
+    const ambiguousResponse = await send(ambiguousQuote.id);
+    assert.equal(ambiguousResponse.status, 502);
+    const unresolvedRetry = await send(ambiguousQuote.id);
+    assert.equal(unresolvedRetry.status, 409);
+    assert.match(unresolvedRetry.payload.error, /check gmail sent/i);
+    const confirmedAmbiguousRetry = await send(ambiguousQuote.id, { confirmAmbiguousRetry: true });
+    assert.equal(confirmedAmbiguousRetry.status, 200, JSON.stringify(confirmedAmbiguousRetry.payload));
+    const quoteAttempts = await db.select().from(customerQuoteEmailAttempts)
+      .where(eq(customerQuoteEmailAttempts.customerQuoteId, ambiguousQuote.id));
+    assert.deepEqual(quoteAttempts.map((attempt) => attempt.status), ["ambiguous", "sent"]);
+    assert.equal(quoteAttempts[0]?.error, "Gmail did not confirm the result.");
 
     const retriedQuote = await createQuote("C");
     const staleStartedAt = new Date(Date.now() - 6 * 60 * 1000);

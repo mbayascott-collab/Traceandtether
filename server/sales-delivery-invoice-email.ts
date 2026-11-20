@@ -171,7 +171,7 @@ function providerMessage(body: unknown): string | null {
 export async function sendSalesDeliveryInvoiceEmail(
   content: SalesDeliveryInvoiceEmailContent,
   gmail: GmailProxy = new ReplitConnectors(),
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; messageId: string } | { ok: false; error: string; ambiguous?: boolean }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   timeout.unref?.();
@@ -190,8 +190,8 @@ export async function sendSalesDeliveryInvoiceEmail(
         id = null;
       }
       return typeof id === "string" && id.trim() && id.trim().length <= 255
-        ? { ok: true }
-        : { ok: false, error: "Gmail accepted the email but did not confirm it. Check Gmail Sent before retrying." };
+        ? { ok: true, messageId: id.trim() }
+        : { ok: false, ambiguous: true, error: "Gmail accepted the email but did not confirm it. Check Gmail Sent before retrying." };
     }
     const responseText = await response.text().catch(() => "");
     let details: string | null = null;
@@ -201,14 +201,19 @@ export async function sendSalesDeliveryInvoiceEmail(
       details = null;
     }
     const suffix = details ? `: ${details.replace(/[\r\n]+/g, " ").slice(0, 300)}` : "";
-    return { ok: false, error: `Gmail could not send the invoice (HTTP ${response.status})${suffix}` };
+    return {
+      ok: false,
+      ...(response.status >= 500 ? { ambiguous: true } : {}),
+      error: `Gmail could not send the invoice (HTTP ${response.status})${suffix}`,
+    };
   } catch (cause) {
     if (cause instanceof Error && cause.name === "AbortError") {
-      return { ok: false, error: "Gmail did not confirm whether the email was sent. Check Gmail Sent before retrying." };
+      return { ok: false, ambiguous: true, error: "Gmail did not confirm whether the email was sent. Check Gmail Sent before retrying." };
     }
     const detail = cause instanceof Error ? cause.message.replace(/[\r\n]+/g, " ").slice(0, 300) : "";
     return {
       ok: false,
+      ambiguous: true,
       error: detail ? `Gmail could not send the invoice: ${detail}` : "Gmail could not send the invoice. Check the Gmail connection and try again.",
     };
   } finally {
