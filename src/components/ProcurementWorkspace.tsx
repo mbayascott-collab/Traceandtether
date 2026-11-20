@@ -186,7 +186,7 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
           {o.adjustmentPreview.receipts.length > 0
             ? <div className="data-table-wrap"><table><thead><tr><th>Receipt journal</th><th>Date</th><th>Shipment</th><th>Product</th><th>Qty received</th><th>Cleared (ZMW)</th></tr></thead><tbody>
               {o.adjustmentPreview.receipts.map((receipt) => <tr key={receipt.journalEntryId}>
-                <td>{receipt.entryNumber}<br /><span className="report-footnote">{receipt.memo}</span></td>
+                <td><a href={`/accounting?journalEntryId=${receipt.journalEntryId}`}>{receipt.entryNumber}</a><br /><span className="report-footnote">{receipt.memo}</span></td>
                 <td>{receipt.entryDate}</td><td>{receipt.shipmentReference || "—"}</td>
                 <td>{receipt.productName} · {receipt.sku}</td><td>{receipt.quantity}</td>
                 <td className="money-cell">{money(receipt.clearedAmountZmw)}</td>

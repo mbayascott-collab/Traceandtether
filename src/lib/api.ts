@@ -50,6 +50,20 @@ export interface LandedCostOrder extends PurchaseOrder {
     }[];
   } | null;
 }
+export interface AccountingJournalEntry {
+  id: number;
+  entryNumber: string;
+  memo: string;
+  entryDate: string;
+  sourceType: string;
+  lines: Array<{
+    accountCode: string;
+    accountName: string;
+    debitZmw: string;
+    creditZmw: string;
+    description: string | null;
+  }>;
+}
 export interface InventoryItem {
   id: number; name: string; sku: string; unit: string; status: ProductStatus; onHand: number; reserved: number; available: number;
   stockValueZmw: string; averageUnitCostZmw: string;
@@ -415,6 +429,9 @@ export async function createImportExpense(input: {
 }
 export async function fetchLandedCosts(): Promise<LandedCostOrder[]> {
   return (await request<{ orders: LandedCostOrder[] }>("/api/landed-costs")).orders;
+}
+export async function fetchAccountingJournalEntry(id: number): Promise<AccountingJournalEntry> {
+  return (await request<{ entry: AccountingJournalEntry }>(`/api/accounting/journal-entries/${id}`)).entry;
 }
 export async function postLandedCostAdjustment(
   purchaseOrderId: number,

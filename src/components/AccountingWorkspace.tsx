@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { accountingReportExportRows } from "../../shared/accounting-reports";
+import { fetchAccountingJournalEntry, type AccountingJournalEntry } from "../lib/api";
 
 type ReportRow = { code: string; name: string; type: string; amountZmw: string };
 type TrialRow = ReportRow & { accountId: number; debitZmw: string; creditZmw: string; balanceZmw: string };
@@ -9,10 +10,7 @@ type BalanceSheetReconciliation = {
   differenceZmw: string;
   isBalanced: boolean;
 };
-type JournalEntry = {
-  id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string;
-  lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
-};
+type JournalEntry = AccountingJournalEntry;
 type ExpenseEntry = {
   id: number; category: string; description: string; amountZmw: string; expenseDate: string;
   method: string; reference: string | null; notes: string | null;
@@ -99,6 +97,15 @@ export default function AccountingWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [selectedJournalId] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = new URLSearchParams(window.location.search).get("journalEntryId");
+    const id = raw ? Number(raw) : NaN;
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  });
+  const [selectedJournal, setSelectedJournal] = useState<JournalEntry | null>(null);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [journalError, setJournalError] = useState("");
   const [editingCorrection, setEditingCorrection] = useState<{ type: "expense" | "fund"; id: number } | null>(null);
   const pendingOwnerFundAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const pendingCorrectionAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -116,6 +123,20 @@ export default function AccountingWorkspace() {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [range]);
+
+  useEffect(() => {
+    if (selectedJournalId === null) return;
+    let alive = true;
+    setJournalLoading(true);
+    setJournalError("");
+    fetchAccountingJournalEntry(selectedJournalId)
+      .then((entry) => { if (alive) setSelectedJournal(entry); })
+      .catch((reason: unknown) => {
+        if (alive) setJournalError(reason instanceof Error ? reason.message : "The journal entry could not be loaded.");
+      })
+      .finally(() => { if (alive) setJournalLoading(false); });
+    return () => { alive = false; };
+  }, [selectedJournalId]);
 
   async function recordCashIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(""); setNotice("");
@@ -469,6 +490,23 @@ export default function AccountingWorkspace() {
     <div className="notice-strip" style={{ marginBottom: 16 }}>
       These reports include entries already recorded in the app. Compare bank and mobile money statements on the <a href="/payments">Payments page</a>; statement matching does not change journals. Opening stock, tax treatment, and accountant review still need to be completed before relying on this as a full year-end filing.
     </div>
+    {selectedJournalId !== null && <section className="panel" style={{ marginBottom: 16 }} aria-labelledby="selected-journal-title">
+      <div className="panel-heading">
+        <div><h2 id="selected-journal-title">Receipt journal entry</h2>
+          {selectedJournal && <span>{selectedJournal.entryNumber} · {selectedJournal.entryDate} · {selectedJournal.memo}</span>}
+        </div>
+        <a className="button button-secondary" href="/accounting">Back to accounting</a>
+      </div>
+      {journalLoading ? <div className="panel-body">Loading journal entry…</div>
+        : journalError ? <div className="alert alert-error" role="alert">{journalError}</div>
+          : selectedJournal && <div className="table-wrap"><table><thead><tr><th>Account</th><th>Line details</th><th>Debit</th><th>Credit</th></tr></thead><tbody>
+            {selectedJournal.lines.map((line, index) => <tr key={`${selectedJournal.id}-${index}`}>
+              <td>{line.accountCode} · {line.accountName}</td><td>{line.description || selectedJournal.memo}</td>
+              <td>{line.debitZmw !== "0.00" ? money(line.debitZmw) : "—"}</td>
+              <td>{line.creditZmw !== "0.00" ? money(line.creditZmw) : "—"}</td>
+            </tr>)}
+          </tbody></table></div>}
+    </section>}
     {loading ? <div className="panel panel-body">Loading reports…</div> : data && <>
       <section className="metric-grid" style={{ marginBottom: 16 }}>
         <div className="metric-card"><span>Sales and other income</span><strong className="metric-value">{money(data.totals.incomeZmw)}</strong></div>

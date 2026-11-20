@@ -10,7 +10,7 @@ import {
 } from "../shared/schema";
 import { cashAccountKeyForMethod, operatingExpenseAccountKey } from "./accounting-posting";
 
-test("managers are forbidden from both accounting correction endpoints", {
+test("managers are forbidden from accounting corrections and journal details", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const { registerAccountingRoutes } = await import("./accounting-routes");
@@ -33,7 +33,7 @@ test("managers are forbidden from both accounting correction endpoints", {
   });
 
   try {
-    const [expenseResponse, fundResponse] = await Promise.all([
+    const [expenseResponse, fundResponse, journalResponse] = await Promise.all([
       request("/api/accounting/expenses/2147483647/correct", {
         category: "rent",
         description: "Unauthorized expense correction",
@@ -49,9 +49,11 @@ test("managers are forbidden from both accounting correction endpoints", {
         method: "cash",
         reason: "Managers cannot correct owner funds",
       }),
+      fetch(`${baseUrl}/api/accounting/journal-entries/1`),
     ]);
     assert.equal(expenseResponse.status, 403);
     assert.equal(fundResponse.status, 403);
+    assert.equal(journalResponse.status, 403);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

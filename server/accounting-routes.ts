@@ -927,4 +927,43 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     });
     res.json(result);
   });
+
+  app.get("/api/accounting/journal-entries/:id", owner, ownerOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Choose a valid journal entry." });
+      return;
+    }
+    const rows = await db.select({
+      entry: journalEntries,
+      line: journalLines,
+      accountName: accountingAccounts.name,
+      accountCode: accountingAccounts.code,
+    }).from(journalEntries)
+      .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalEntries.id, id))
+      .orderBy(journalLines.id);
+    if (!rows.length) {
+      res.status(404).json({ error: "That journal entry could not be found." });
+      return;
+    }
+    const entry = rows[0].entry;
+    res.json({
+      entry: {
+        id: entry.id,
+        entryNumber: entry.entryNumber,
+        memo: entry.memo,
+        entryDate: entry.entryDate,
+        sourceType: entry.sourceType,
+        lines: rows.map(({ line, accountCode, accountName }) => ({
+          accountCode,
+          accountName,
+          debitZmw: line.debitZmw,
+          creditZmw: line.creditZmw,
+          description: line.description,
+        })),
+      },
+    });
+  });
 }
