@@ -1178,6 +1178,158 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       throw error;
     } finally {
       client.release();
+    }
+  }
+});
+
+test("clearing a manual campaign assignment moves its totals to unattributed without changing link counts", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerMarketingRoutes }, { registerSalesRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+    import("./sales-routes"),
+  ]);
+  const requiredColumns = new Set([
+    "marketing_attributions.source",
+    "business_audit_logs.actor_email",
+  ]);
+  const availableColumns = await pool.query<{ table_name: string; column_name: string }>(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND (table_name, column_name) IN (
+         ('marketing_attributions', 'source'),
+         ('business_audit_logs', 'actor_email')
+       )`,
+  );
+  for (const column of availableColumns.rows) requiredColumns.delete(`${column.table_name}.${column.column_name}`);
+  if (requiredColumns.size > 0) {
+    t.skip("requires the campaign attribution and business audit migrations");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const prefix = `cleared-campaign-assignment-${suffix}`;
+  const actorEmail = `${prefix}@example.test`;
+  const reportDate = "9999-12-31";
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerSalesRoutes(app, owner);
+  registerMarketingRoutes(app, owner);
+  app.use(((error: unknown, _req, res, _next) => {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
+  }) as ErrorRequestHandler);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = async (path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { response, payload: await response.json() as any };
+  };
+
+  let campaignId: number | undefined;
+  let customerId: number | undefined;
+  let productId: number | undefined;
+  const orderIds: number[] = [];
+  try {
+    const baseline = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(baseline.response.status, 200, JSON.stringify(baseline.payload));
+
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} campaign`, status: "active",
+    }).returning();
+    campaignId = campaign.id;
+    const [product] = await db.insert(products).values({
+      sku: `CLR-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [customer] = await db.insert(customers).values({ name: `${prefix} customer` }).returning();
+    customerId = customer.id;
+
+    const [manualOrder] = await db.insert(salesOrders).values({
+      orderNumber: `CLR-M-${suffix.slice(0, 24)}`,
+      customerId: customer.id,
+      status: "fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    const [linkOrder] = await db.insert(salesOrders).values({
+      orderNumber: `CLR-L-${suffix.slice(0, 24)}`,
+      customerId: customer.id,
+      status: "fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    orderIds.push(manualOrder.id, linkOrder.id);
+    await db.insert(salesOrderLines).values([
+      { salesOrderId: manualOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
+      { salesOrderId: linkOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "50.00" },
+    ]);
+    await db.insert(marketingAttributions).values([
+      { salesOrderId: manualOrder.id, campaignId: campaign.id, source: "manual" },
+      { salesOrderId: linkOrder.id, campaignId: campaign.id, source: "campaign_link" },
+    ]);
+
+    const beforeClear = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(beforeClear.response.status, 200, JSON.stringify(beforeClear.payload));
+    const campaignBefore = beforeClear.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    assert.ok(campaignBefore);
+    assert.equal(campaignBefore.orderCount, 2);
+    assert.equal(campaignBefore.attributedRevenueZmw, "150.00");
+    assert.equal(beforeClear.payload.totals.campaignLinkOrders, baseline.payload.totals.campaignLinkOrders + 1);
+    assert.equal(beforeClear.payload.totals.ordersWithoutCampaignLinks, baseline.payload.totals.ordersWithoutCampaignLinks + 1);
+
+    const cleared = await request(`/api/sales-orders/${manualOrder.id}/attribution`, "PATCH", { campaignId: null });
+    assert.equal(cleared.response.status, 200, JSON.stringify(cleared.payload));
+    assert.equal(cleared.payload.campaignId, null);
+
+    const afterClear = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(afterClear.response.status, 200, JSON.stringify(afterClear.payload));
+    const campaignAfter = afterClear.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    assert.ok(campaignAfter);
+    assert.equal(campaignAfter.orderCount, 1);
+    assert.equal(campaignAfter.attributedRevenueZmw, "50.00");
+    assert.equal(afterClear.payload.totals.attributedOrders, baseline.payload.totals.attributedOrders + 1);
+    assert.equal(afterClear.payload.totals.unattributedOrders, baseline.payload.totals.unattributedOrders + 1);
+    assert.equal(
+      BigInt(afterClear.payload.totals.unattributedRevenueZmw.replace(".", "")) -
+        BigInt(baseline.payload.totals.unattributedRevenueZmw.replace(".", "")),
+      10000n,
+    );
+    assert.equal(afterClear.payload.totals.campaignLinkOrders, baseline.payload.totals.campaignLinkOrders + 1);
+    assert.equal(afterClear.payload.totals.ordersWithoutCampaignLinks, baseline.payload.totals.ordersWithoutCampaignLinks + 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (orderIds.length) {
+        await client.query("DELETE FROM marketing_attributions WHERE sales_order_id = ANY($1)", [orderIds]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1)", [orderIds]);
+        await client.query("DELETE FROM sales_orders WHERE id = ANY($1)", [orderIds]);
+      }
+      if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
+      if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
       await pool.end();
     }
   }
