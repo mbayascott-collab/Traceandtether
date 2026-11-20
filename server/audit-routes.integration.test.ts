@@ -270,6 +270,41 @@ test("route mutations across business areas keep their audit history and actor",
     assert.match(exported.payload.raw, /"'\=SUM\(A1:A2\)"/);
     assert.doesNotMatch(exported.payload.raw, /sales order|other-[^,\r\n]+@example\.test/);
 
+    const streamDate = new Date("2026-11-05T12:00:00.000Z");
+    const streamedEntries = await db.insert(businessAuditLogs).values(Array.from({ length: 505 }, (_, index) => ({
+      entityType: "customer",
+      entityId: 10_000 + index,
+      recordLabel: `Streamed audit ${suffix} ${String(index).padStart(3, "0")}`,
+      actorClerkUserId: actorId,
+      actorEmail,
+      action: "updated",
+      changedFields: [],
+      createdAt: streamDate,
+    }))).returning({ id: businessAuditLogs.id });
+    await pool.query(
+      "UPDATE business_audit_logs SET created_at = '2026-11-05 12:00:00.123456+00' WHERE actor_clerk_user_id = $1 AND record_label LIKE $2",
+      [actorId, `Streamed audit ${suffix} %`],
+    );
+    const streamQuery = new URLSearchParams({
+      actor: actorEmail,
+      entityType: "customer",
+      from: "2026-11-05",
+      to: "2026-11-05",
+      page: "2",
+      pageSize: "1",
+    });
+    const streamedExport = await request(`/api/audit-logs/export.csv?${streamQuery}`);
+    assert.equal(streamedExport.response.status, 200, JSON.stringify(streamedExport.payload));
+    const streamedLines = streamedExport.payload.raw.split("\r\n");
+    assert.equal(streamedLines.length, 506, "a multi-page export includes every matching row and one header");
+    const streamedIds = streamedLines.slice(1).map((line: string) => Number(line.split(",")[3]?.replaceAll('"', "")));
+    assert.deepEqual(
+      streamedIds,
+      Array.from({ length: streamedEntries.length }, (_, index) => 10_000 + index).reverse(),
+      "streamed rows preserve the date-and-ID order across page boundaries",
+    );
+    assert.match(streamedLines[1] ?? "", /Streamed audit/);
+
     const invalidFilters: Record<string, string>[] = [
       { entityType: "not-a-record" },
       { actor: "not-an-email" },

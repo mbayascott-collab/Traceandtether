@@ -18,19 +18,24 @@ function humanize(value: string): string {
   return value.replaceAll("_", " ");
 }
 
-export function auditLogCsv(entries: AuditCsvEntry[]): string {
-  const rows: unknown[][] = [
-    ["Date and time", "Record", "Record type", "Record ID", "Change", "Account", "Fields"],
-    ...entries.map((entry) => [
-      entry.createdAt.toISOString(),
-      entry.recordLabel,
-      humanize(entry.entityType),
-      entry.entityId,
-      humanize(entry.action),
-      entry.actorEmail,
-      entry.changedFields.map(humanize).join(", "),
-    ]),
-  ];
+export function auditLogCsvHeader(): string {
+  return ["Date and time", "Record", "Record type", "Record ID", "Change", "Account", "Fields"]
+    .map(csvCell)
+    .join(",");
+}
 
-  return `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+export function auditLogCsvRow(entry: AuditCsvEntry): string {
+  return [
+    entry.createdAt.toISOString(),
+    entry.recordLabel,
+    humanize(entry.entityType),
+    entry.entityId,
+    humanize(entry.action),
+    entry.actorEmail,
+    entry.changedFields.map(humanize).join(", "),
+  ].map(csvCell).join(",");
+}
+
+export function auditLogCsv(entries: AuditCsvEntry[]): string {
+  return `\uFEFF${[auditLogCsvHeader(), ...entries.map(auditLogCsvRow)].join("\r\n")}`;
 }

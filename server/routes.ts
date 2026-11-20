@@ -1,9 +1,11 @@
 import { clerkClient, getAuth } from "@clerk/express";
 import type { RequestHandler } from "express";
-import { and, asc, count, desc, eq, gte, ilike, lt, or, type SQL } from "drizzle-orm";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { and, asc, count, desc, eq, gte, ilike, lt, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { calculateProductProfitability } from "../shared/money";
-import { auditLogCsv } from "../shared/audit-csv";
+import { auditLogCsvHeader, auditLogCsvRow } from "../shared/audit-csv";
 import {
   appUserAccess, appUsers, auditLogQuerySchema, businessAuditLogs, productCategories, products, supplierQuotes, suppliers,
 } from "../shared/schema";
@@ -92,6 +94,7 @@ function validationMessage(error: z.ZodError): string {
 }
 
 type AuditLogFilters = Pick<z.infer<typeof auditLogQuerySchema>, "entityType" | "actor" | "from" | "to">;
+const AUDIT_EXPORT_PAGE_SIZE = 250;
 
 function auditLogWhere({ entityType, actor, from, to }: AuditLogFilters): SQL | undefined {
   const conditions: SQL[] = [];
@@ -107,6 +110,33 @@ function auditLogWhere({ entityType, actor, from, to }: AuditLogFilters): SQL | 
     conditions.push(lt(businessAuditLogs.createdAt, through));
   }
   return conditions.length ? and(...conditions) : undefined;
+}
+
+async function* auditLogCsvStream(filters: AuditLogFilters) {
+  yield `\uFEFF${auditLogCsvHeader()}`;
+  const filtersWhere = auditLogWhere(filters);
+  let cursor: { createdAt: string; id: number } | undefined;
+
+  while (true) {
+    const cursorWhere = cursor
+      ? sql`(${businessAuditLogs.createdAt}, ${businessAuditLogs.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id})`
+      : undefined;
+    const where = cursorWhere ? and(filtersWhere, cursorWhere) : filtersWhere;
+    const rows = await db.select({
+      entry: businessAuditLogs,
+      createdAtCursor: sql<string>`${businessAuditLogs.createdAt}::text`,
+    }).from(businessAuditLogs)
+      .where(where)
+      .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id))
+      .limit(AUDIT_EXPORT_PAGE_SIZE);
+    if (!rows.length) return;
+
+    yield `\r\n${rows.map(({ entry }) => auditLogCsvRow(entry)).join("\r\n")}`;
+    if (rows.length < AUDIT_EXPORT_PAGE_SIZE) return;
+    const last = rows[rows.length - 1]!;
+    // Keep PostgreSQL's timestamp precision when paging past rows created in the same millisecond.
+    cursor = { createdAt: last.createdAtCursor, id: last.entry.id };
+  }
 }
 
 export function registerApiRoutes(
@@ -186,17 +216,13 @@ export function registerApiRoutes(
       return;
     }
 
-    const entries = await db.select().from(businessAuditLogs)
-      .where(auditLogWhere(parsed.data))
-      .orderBy(desc(businessAuditLogs.createdAt), desc(businessAuditLogs.id));
-
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": 'attachment; filename="change-history.csv"',
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
     });
-    res.send(auditLogCsv(entries));
+    await pipeline(Readable.from(auditLogCsvStream(parsed.data)), res);
   });
 
   app.post("/api/user-access", businessAccess, requireAccessManager(), async (req, res) => {

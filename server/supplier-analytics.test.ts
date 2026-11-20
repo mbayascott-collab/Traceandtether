@@ -168,8 +168,8 @@ test("supplier CSV protects formula-like supplier names", () => {
     period: { from: null, to: null },
     monthlySpend: [],
     shipments: [{
-      supplierId: 9, supplierName: "@HIDDEN", orderNumber: "=PO-1", shipmentId: 2,
-      shipmentReference: "+SUM(1,1)", status: "received", expectedAt: null, receivedAt: null,
+      supplierId: 9, supplierName: "=HYPERLINK(\"https://example.invalid\",\"Vendor\")", orderNumber: "+PO,1", shipmentId: 2,
+      shipmentReference: "-CMD(\"open\")", status: "@ACTIVE", expectedAt: "=TODAY()", receivedAt: " +SUM(1,1)",
     }],
     totals: {
       orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
@@ -184,7 +184,7 @@ test("supplier CSV protects formula-like supplier names", () => {
   });
 
   assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
-  assert.match(csv, /"'@HIDDEN","'=PO-1","2","'\+SUM\(1,1\)"/);
+  assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid"",""Vendor""\)","'\+PO,1","2","'-CMD\(""open""\)","'@ACTIVE","'=TODAY\(\)","' \+SUM\(1,1\)"/);
 });
 
 test("single-supplier reports keep only that supplier's values and preserve unallocated costs", () => {

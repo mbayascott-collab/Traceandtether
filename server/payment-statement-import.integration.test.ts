@@ -212,8 +212,11 @@ test("statement import removal preserves unrelated records and concurrent repeat
     }, 201);
     const partialBatchId = Number(partialBatch.batch.id);
     importBatchIds.push(partialBatchId);
+    assert.equal(partialBatch.added, 2, "the response count must include only selected rows");
+    assert.equal(partialBatch.batch.lineCount, 2, "the saved batch count must include only selected rows");
     const partialRows = await db.select().from(paymentStatementLines)
       .where(eq(paymentStatementLines.importBatchId, partialBatchId));
+    assert.equal(partialRows.length, 2, "the saved batch must contain only selected rows");
     statementLineIds.push(...partialRows.map((line) => line.id));
     assert.deepEqual(
       partialRows.map((line) => line.reference).sort(),
@@ -357,6 +360,15 @@ test("statement import removal preserves unrelated records and concurrent repeat
       removalAuditRows.filter((row) => row.entityType === "payment_statement_import_batch").map((row) => row.entityId),
       [selectedBatchId],
     );
+    assert.ok(
+      removalAuditRows.every((row) => row.actorClerkUserId === `test-${suffix}` && row.actorEmail === email),
+      "the deletion audit trail must identify the owner who removed the import",
+    );
+    const deletedLineIds = removalAuditRows
+      .filter((row) => row.entityType === "payment_statement_line")
+      .map((row) => row.entityId);
+    assert.ok(!deletedLineIds.includes(preservedMatchedLine.id), "the preserved import must not have a deletion audit record");
+    assert.ok(!deletedLineIds.includes(manualLine.id), "the manual statement row must not have a deletion audit record");
 
     const survivingPayments = await db.select().from(businessPayments)
       .where(inArray(businessPayments.id, paymentIds))
