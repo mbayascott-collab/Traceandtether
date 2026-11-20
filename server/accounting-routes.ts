@@ -961,8 +961,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         const key = `owner_fund_transaction:${transaction.id}`;
         const correction = latestCorrections.get(key);
         const effectiveDate = correction?.effectiveDate ?? transaction.transactionDate;
-        if ((transaction.transactionDate < from || transaction.transactionDate > to) &&
-            (effectiveDate < from || effectiveDate > to)) return [];
+        if (effectiveDate < from || effectiveDate > to) return [];
         const effectiveKind = correction?.kind ?? transaction.kind;
         const effectiveAccountName = accountNameForOwnerKind(effectiveKind, accounts);
         return [{

@@ -407,6 +407,13 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     );
     assert.equal(januaryReport.payload.correctionHistory.filter((row: any) =>
       row.recordType === "business_expense" && row.recordId === createdExpenseId).length, 0);
+    assert.ok(
+      !januaryReport.payload.ownerTransactions.some((row: any) => row.id === createdFundId),
+      "the corrected owner-fund transaction must be excluded from its original reporting period",
+    );
+    assert.equal(januaryReport.payload.correctionHistory.filter((row: any) =>
+      row.recordType === "owner_fund_transaction" && row.recordId === createdFundId).length, 0,
+    "owner-fund correction history must not remain in the original period");
     const januaryBefore = new Map(januaryBeforeCorrection.payload.trialBalance.map((row: any) => [row.code, row]));
     const januaryAfter = new Map(januaryReport.payload.trialBalance.map((row: any) => [row.code, row]));
     assert.equal(
@@ -487,6 +494,34 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(marchExpense?.effective.amountZmw, latestExpenseCorrection.amountZmw);
     assert.equal(marchReport.payload.correctionHistory.filter((row: any) =>
       row.recordType === "business_expense" && row.recordId === createdExpenseId).length, expenseCorrections.length);
+    assert.equal(marchReport.payload.ownerTransactions.some((row: any) => row.id === createdFundId), false,
+      "a fund corrected on another date must not appear in the expense correction date report");
+
+    const februaryReport = await request("/api/accounting?from=2002-02-01&to=2002-02-28");
+    assert.equal(februaryReport.response.status, 200, JSON.stringify(februaryReport.payload));
+    assert.ok(
+      !februaryReport.payload.ownerTransactions.some((row: any) => row.id === createdFundId),
+      "the owner-fund transaction must not appear in an unrelated reporting period",
+    );
+    assert.equal(februaryReport.payload.correctionHistory.filter((row: any) =>
+      row.recordType === "owner_fund_transaction" && row.recordId === createdFundId).length, 0,
+    "owner-fund correction history must not appear in an unrelated reporting period");
+
+    const fundCorrectionDate = latestFundCorrection.effectiveDate;
+    const fundCorrectionPeriod = await request(
+      `/api/accounting?from=${fundCorrectionDate}&to=${fundCorrectionDate}`,
+    );
+    assert.equal(fundCorrectionPeriod.response.status, 200, JSON.stringify(fundCorrectionPeriod.payload));
+    const correctedFundInPeriod = fundCorrectionPeriod.payload.ownerTransactions.find((row: any) => row.id === createdFundId);
+    assert.ok(correctedFundInPeriod, "the corrected owner-fund transaction must appear in its effective period");
+    assert.equal(correctedFundInPeriod.effective.transactionDate, fundCorrectionDate);
+    assert.equal(correctedFundInPeriod.effective.kind, latestFundCorrection.kind);
+    assert.equal(correctedFundInPeriod.effective.amountZmw, latestFundCorrection.amountZmw);
+    const fundHistoryInPeriod = fundCorrectionPeriod.payload.correctionHistory.filter((row: any) =>
+      row.recordType === "owner_fund_transaction" && row.recordId === createdFundId);
+    assert.equal(fundHistoryInPeriod.length, fundCorrections.length);
+    assert.ok(fundHistoryInPeriod.every((row: any) => row.effectiveDate === fundCorrectionDate),
+      "owner-fund correction history must follow the effective correction date");
     const expenseAccount = reportResult.payload.accounts.find((account: any) =>
       account.systemKey === operatingExpenseAccountKey(latestExpenseCorrection.category ?? "other"));
     assert.equal(

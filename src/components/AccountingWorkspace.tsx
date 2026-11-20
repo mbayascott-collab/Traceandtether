@@ -36,7 +36,7 @@ type ReportData = {
   expenseJournalWarnings: { expenseId: number; journalEntryId: number | null; reason: string }[];
   ownerTransactions?: OwnerFundTransaction[];
   canCorrectRecords: boolean;
-  correctionHistory: Array<{
+  correctionHistory?: Array<{
     id: number; recordType: string; recordId: number; previousCorrectionId: number | null;
     effectiveDate: string; amountZmw: string; reason: string; reversalEntryId: number | null;
     reversalEntryNumber: string | null; replacementEntryId: number | null; replacementEntryNumber: string | null;
@@ -72,6 +72,12 @@ type ReportData = {
   }[];
   totals: { trialDebitsZmw: string; trialCreditsZmw: string; incomeZmw: string; expensesZmw: string; netIncomeZmw: string };
 };
+
+export function safeAccountingCorrectionHistory(
+  history: ReportData["correctionHistory"] | null | undefined,
+) {
+  return history ?? [];
+}
 
 type AccountingListRowsProps<T> = {
   rows?: T[];
@@ -307,7 +313,7 @@ export default function AccountingWorkspace() {
   const exportBalanceSheet = () => exportRows && downloadCsv("balance-sheet.csv", exportRows.balanceSheet);
   const expenses = data?.expenses;
   const ownerTransactions = data?.ownerTransactions;
-  const correctionHistory = data?.correctionHistory ?? [];
+  const correctionHistory = safeAccountingCorrectionHistory(data?.correctionHistory);
   const openingBalanceHistory = data?.openingBalances?.history ?? [];
   const expenseJournalWarnings = data?.expenseJournalWarnings ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
