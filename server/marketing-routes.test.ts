@@ -682,6 +682,169 @@ test("customer-group CSV exports reflect updated rules and delivered customer hi
   }
 });
 
+test("customer-group membership changes do not rewrite past campaign attribution or reports", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const availableColumns = await pool.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'marketing_attributions'
+       AND column_name = 'source'`,
+  );
+  if (availableColumns.rows.length === 0) {
+    t.skip("requires the campaign attribution source migration");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const prefix = `audience-history-${suffix}`;
+  const reportDate = "9999-12-31";
+  const actorEmail = `${prefix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerMarketingRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = async (path: string) => {
+    const response = await fetch(`${baseUrl}${path}`);
+    return { response, payload: await response.json() as any };
+  };
+  let customerId: number | undefined;
+  let productId: number | undefined;
+  let groupId: number | undefined;
+  let campaignId: number | undefined;
+  const orderIds: number[] = [];
+  const orderLineIds: number[] = [];
+  let deliveryId: number | undefined;
+  let deliveryLineId: number | undefined;
+
+  try {
+    const [customer] = await db.insert(customers).values({
+      name: `${prefix} customer`,
+      email: `${prefix}@example.test`,
+      phone: `+260-${suffix.slice(0, 8)}`,
+    }).returning();
+    customerId = customer.id;
+    const [product] = await db.insert(products).values({
+      sku: `AH-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: `${prefix} group`,
+      rules: { minimumFulfilledOrders: 2 },
+    }).returning();
+    groupId = group.id;
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} campaign`,
+      status: "active",
+      customerGroupId: group.id,
+    }).returning();
+    campaignId = campaign.id;
+    const [campaignOrder] = await db.insert(salesOrders).values({
+      orderNumber: `AH-C-${suffix.slice(0, 20)}`,
+      customerId: customer.id,
+      status: "fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    const [historyOrder] = await db.insert(salesOrders).values({
+      orderNumber: `AH-H-${suffix.slice(0, 20)}`,
+      customerId: customer.id,
+      status: "confirmed",
+      orderDate: "2000-01-01",
+    }).returning();
+    orderIds.push(campaignOrder.id, historyOrder.id);
+    const [campaignLine, historyLine] = await db.insert(salesOrderLines).values([
+      { salesOrderId: campaignOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
+      { salesOrderId: historyOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "80.00" },
+    ]).returning();
+    orderLineIds.push(campaignLine.id, historyLine.id);
+    const [delivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `AH-D-${suffix.slice(0, 16)}`,
+      salesOrderId: campaignOrder.id,
+      deliveryDate: reportDate,
+    }).returning();
+    deliveryId = delivery.id;
+    const [deliveryLine] = await db.insert(salesDeliveryLines).values({
+      deliveryId: delivery.id,
+      salesOrderLineId: campaignLine.id,
+      quantity: 1,
+    }).returning();
+    deliveryLineId = deliveryLine.id;
+    await db.insert(marketingAttributions).values({
+      salesOrderId: campaignOrder.id,
+      campaignId: campaign.id,
+      source: "manual",
+    });
+
+    const getAudienceCount = async () => {
+      const result = await request("/api/marketing/customer-groups");
+      assert.equal(result.response.status, 200, JSON.stringify(result.payload));
+      return result.payload.groups.find((item: { id: number }) => item.id === group.id)?.memberCount;
+    };
+    const getCampaignReport = async () => {
+      const result = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+      assert.equal(result.response.status, 200, JSON.stringify(result.payload));
+      const row = result.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+      assert.ok(row, JSON.stringify(result.payload));
+      return row;
+    };
+
+    const audienceCountBefore = await getAudienceCount();
+    const membersBefore = await request(`/api/marketing/customer-groups/${group.id}/members`);
+    assert.equal(membersBefore.response.status, 200, JSON.stringify(membersBefore.payload));
+    assert.equal(membersBefore.payload.members.some((member: { id: number }) => member.id === customer.id), false);
+    const memberCountBefore = membersBefore.payload.members.length;
+    const reportBeforeHistoryChange = await getCampaignReport();
+    assert.equal(reportBeforeHistoryChange.orderCount, 1);
+    assert.equal(reportBeforeHistoryChange.attributedRevenueZmw, "100.00");
+    const [attributionBefore] = await db.select({
+      campaignId: marketingAttributions.campaignId,
+      source: marketingAttributions.source,
+    }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, campaignOrder.id));
+    assert.deepEqual(attributionBefore, { campaignId: campaign.id, source: "manual" });
+
+    await db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, historyOrder.id));
+
+    assert.equal(await getAudienceCount(), audienceCountBefore + 1);
+    const members = await request(`/api/marketing/customer-groups/${group.id}/members`);
+    assert.equal(members.response.status, 200, JSON.stringify(members.payload));
+    assert.equal(members.payload.members.length, memberCountBefore + 1);
+    assert.ok(members.payload.members.some((member: { id: number }) => member.id === customer.id));
+    assert.deepEqual(await getCampaignReport(), reportBeforeHistoryChange);
+    const [attributionAfter] = await db.select({
+      campaignId: marketingAttributions.campaignId,
+      source: marketingAttributions.source,
+    }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, campaignOrder.id));
+    assert.deepEqual(attributionAfter, attributionBefore);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (orderIds.length) await db.delete(marketingAttributions).where(inArray(marketingAttributions.salesOrderId, orderIds));
+    if (deliveryLineId) await db.delete(salesDeliveryLines).where(eq(salesDeliveryLines.id, deliveryLineId));
+    if (deliveryId) await db.delete(salesDeliveries).where(eq(salesDeliveries.id, deliveryId));
+    if (orderLineIds.length) await db.delete(salesOrderLines).where(inArray(salesOrderLines.id, orderLineIds));
+    if (orderIds.length) await db.delete(salesOrders).where(inArray(salesOrders.id, orderIds));
+    if (campaignId) await db.delete(marketingCampaigns).where(eq(marketingCampaigns.id, campaignId));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    await db.delete(businessAuditLogs).where(eq(businessAuditLogs.actorEmail, actorEmail));
+    if (productId) await db.delete(products).where(eq(products.id, productId));
+    if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
+  }
+});
+
 test("marketing report counts partial campaign deliveries once and matches posted costs and expenses", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
