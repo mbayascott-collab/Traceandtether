@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Download, Pencil, Plus, RefreshCw, X } from "lucide-react";
-import { emptyCustomerGroupAccess } from "../lib/customer-group-access";
+import { customerGroupAccessAfterPermissionLoss, emptyCustomerGroupAccess } from "../lib/customer-group-access";
 
 type Campaign = { id: number; name: string; objective: string | null; channel: string | null; status: string; startsOn: string | null; endsOn: string | null; budgetZmw: string | null; notes: string | null; trackingCode: string; customerGroupId: number | null; audienceSnapshotCapturedAt?: string | null; audienceSnapshotEnabledAt?: string | null };
 type ContentItem = { id: number; campaignId: number | null; campaignName: string | null; title: string; platform: string; contentType: string; status: string; scheduledAt: string | null; caption: string | null; publishedUrl: string | null; notes: string | null };
@@ -202,6 +202,21 @@ export default function MarketingWorkspace() {
     setCampaignAudienceSnapshot(null);
   }
 
+  function applyCustomerGroupAccess(access: {
+    groups: CustomerGroup[];
+    canManage: boolean;
+    canViewMembers: boolean;
+  }) {
+    if (customerGroupAccessAfterPermissionLoss<CustomerGroup, CustomerGroupMember>(access)) {
+      clearCustomerGroupAccess();
+      return false;
+    }
+    setCustomerGroups(access.groups);
+    setCanManageCustomerGroups(access.canManage);
+    setCanViewCustomerGroupMembers(access.canViewMembers);
+    return true;
+  }
+
   async function load() {
     setLoading(true);
     try {
@@ -210,7 +225,8 @@ export default function MarketingWorkspace() {
         request("/api/marketing/customer-groups"),
       ]);
       setCampaigns(c.campaigns); setContent(p.content); setExpenses(e.expenses);
-      setCustomerGroups(g.groups); setCanManageCustomerGroups(g.canManage); setCanViewCustomerGroupMembers(g.canViewMembers); setError("");
+      applyCustomerGroupAccess(g);
+      setError("");
     } catch (reason) { clearCustomerGroupAccess(); setError(displayError(reason)); }
     finally { setLoading(false); }
   }
@@ -222,9 +238,10 @@ export default function MarketingWorkspace() {
       refreshing = true;
       try {
         const groups = await request("/api/marketing/customer-groups");
-        setCustomerGroups(groups.groups);
-        setCanManageCustomerGroups(groups.canManage);
-        setCanViewCustomerGroupMembers(groups.canViewMembers);
+        if (!applyCustomerGroupAccess(groups)) {
+          setError("");
+          return;
+        }
         if (selectedCustomerGroup !== null && groups.canViewMembers) {
           const members = await request(`/api/marketing/customer-groups/${selectedCustomerGroup}/members`);
           setCustomerGroupMembers(members.members);
