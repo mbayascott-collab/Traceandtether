@@ -178,6 +178,7 @@ test("public shop campaign links attribute orders and reports count them without
   const scheduledClientIp = `198.20.${Number.parseInt(safeSuffix.slice(4, 6), 16)}.${Number.parseInt(safeSuffix.slice(6, 8), 16)}`;
   const scheduledClientIpHash = createHash("sha256").update(scheduledClientIp).digest("hex");
   const oldReportDate = "2001-01-01";
+  const secondCampaignTrackingCode = randomUUID();
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json());
@@ -217,7 +218,7 @@ test("public shop campaign links attribute orders and reports count them without
     }).returning();
     campaignId = campaign.id;
     const [secondCampaign] = await db.insert(marketingCampaigns).values({
-      name: `Moved attribution destination ${suffix}`, trackingCode: randomUUID(), status: "active",
+      name: `Moved attribution destination ${suffix}`, trackingCode: secondCampaignTrackingCode, status: "active",
     }).returning();
     secondCampaignId = secondCampaign.id;
     const [product] = await db.insert(products).values({
@@ -278,6 +279,11 @@ test("public shop campaign links attribute orders and reports count them without
     const replacementCode = replaced.payload.campaign.trackingCode as string;
     assert.ok(replacementCode);
     assert.notEqual(replacementCode, trackingCode);
+    const [otherCampaignAfterReplacement] = await db.select({
+      trackingCode: marketingCampaigns.trackingCode,
+    }).from(marketingCampaigns).where(eq(marketingCampaigns.id, secondCampaign.id));
+    assert.equal(otherCampaignAfterReplacement?.trackingCode, secondCampaignTrackingCode);
+    assert.notEqual(replacementCode, otherCampaignAfterReplacement?.trackingCode);
     await submitOrder(1, trackingCode, challenges[1]);
     await submitOrder(2, replacementCode, challenges[2]);
     await submitOrder(3, undefined, challenges[3]);
