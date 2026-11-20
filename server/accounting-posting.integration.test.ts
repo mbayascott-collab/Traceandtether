@@ -7,7 +7,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   accountingAccounts, businessAuditLogs, businessPayments, customers, importExpenses, inventoryLocations, inventoryMovements,
   inventoryReservations,
-  journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, purchaseOrders, salesOrders, shipmentLines,
+  journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, purchaseOrders, salesOrders, salesDeliveries, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
 import { cents, journalLinesAreBalanced } from "./accounting-posting";
@@ -1921,7 +1921,7 @@ test("opening-stock corrections cannot reduce stock below active reservations", 
   }
 });
 
-test("customer receipts wait for an in-flight reminder send to finish", {
+test("customer receipts and returns wait for an in-flight reminder send to finish", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
   const [
@@ -1954,15 +1954,26 @@ test("customer receipts wait for an in-flight reminder send to finish", {
   const senderEnteredPromise = new Promise<void>((resolve) => { senderEntered = resolve; });
   let releaseSender!: () => void;
   const senderPause = new Promise<void>((resolve) => { releaseSender = resolve; });
+  let returnSenderEntered!: () => void;
+  const returnSenderEnteredPromise = new Promise<void>((resolve) => { returnSenderEntered = resolve; });
+  let releaseReturnSender!: () => void;
+  const returnSenderPause = new Promise<void>((resolve) => { releaseReturnSender = resolve; });
   let receiptRequestSeen!: () => void;
   const receiptRequestSeenPromise = new Promise<void>((resolve) => { receiptRequestSeen = resolve; });
+  let returnRequestSeen!: () => void;
+  const returnRequestSeenPromise = new Promise<void>((resolve) => { returnRequestSeen = resolve; });
   let sentContent: import("./payment-reminder-email").PaymentReminderEmailContent | undefined;
+  let returnSendContent: import("./payment-reminder-email").PaymentReminderEmailContent | undefined;
+  let sendAttempt = 0;
   let receiptRequests = 0;
 
   app.use((req, _res, next) => {
     if (req.method === "POST" && req.path === "/api/payments") {
       receiptRequests += 1;
       receiptRequestSeen();
+    }
+    if (req.method === "POST" && /^\/api\/sales-delivery-lines\/\d+\/returns$/.test(req.path)) {
+      returnRequestSeen();
     }
     next();
   });
@@ -1971,11 +1982,19 @@ test("customer receipts wait for an in-flight reminder send to finish", {
     next();
   };
   registerPaymentRoutes(app, owner, async (content) => {
-    sentContent = content;
-    senderEntered();
-    await senderPause;
-    return { ok: true, messageId: `gmail-test-${suffix}` };
+    if (sendAttempt++ === 0) {
+      sentContent = content;
+      senderEntered();
+      await senderPause;
+    } else {
+      returnSendContent = content;
+      returnSenderEntered();
+      await returnSenderPause;
+    }
+    return { ok: true, messageId: `gmail-test-${suffix}-${sendAttempt}` };
   });
+  const { registerSalesRoutes } = await import("./sales-routes");
+  registerSalesRoutes(app, owner);
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
   });
@@ -1988,8 +2007,13 @@ test("customer receipts wait for an in-flight reminder send to finish", {
   let customerId: number | undefined;
   let productId: number | undefined;
   let salesOrderId: number | undefined;
+  let deliveryId: number | undefined;
+  let deliveryLineId: number | undefined;
+  let returnLocationId: number | undefined;
   let reminderRequest: Promise<Response> | undefined;
   let receiptRequest: Promise<Response> | undefined;
+  let reminderDuringReturnRequest: Promise<Response> | undefined;
+  let returnRequest: Promise<Response> | undefined;
 
   try {
     const [customer] = await db.insert(customers).values({
@@ -2011,12 +2035,28 @@ test("customer receipts wait for an in-flight reminder send to finish", {
       dueDate: "2020-01-01",
     }).returning();
     salesOrderId = order.id;
-    await db.insert(salesOrderLines).values({
+    const [orderLine] = await db.insert(salesOrderLines).values({
       salesOrderId,
       productId,
       quantity: 2,
       unitPriceZmw: "100.00",
-    });
+    }).returning();
+    const [returnLocation] = await db.insert(inventoryLocations).values({
+      name: `Reminder return location ${suffix}`,
+    }).returning();
+    returnLocationId = returnLocation.id;
+    const [delivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `DN-REM-${suffix.slice(0, 12)}`,
+      salesOrderId,
+      deliveryDate: "2026-11-18",
+    }).returning();
+    deliveryId = delivery.id;
+    const [deliveryLine] = await db.insert(salesDeliveryLines).values({
+      deliveryId,
+      salesOrderLineId: orderLine.id,
+      quantity: 2,
+    }).returning();
+    deliveryLineId = deliveryLine.id;
 
     reminderRequest = fetch(`${baseUrl}/api/payments/${salesOrderId}/reminder`, {
       method: "POST",
@@ -2070,6 +2110,56 @@ test("customer receipts wait for an in-flight reminder send to finish", {
     assert.equal(savedReminder.status, "sent");
     assert.ok(savedReminder.sentAt);
 
+    reminderDuringReturnRequest = fetch(`${baseUrl}/api/payments/${salesOrderId}/reminder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "" }),
+    });
+    await returnSenderEnteredPromise;
+    assert.equal(returnSendContent?.outstandingZmw, "125.00");
+
+    returnRequest = fetch(`${baseUrl}/api/sales-delivery-lines/${deliveryLineId}/returns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        idempotencyKey: randomUUID(),
+        locationId: returnLocationId,
+        quantity: 1,
+        returnDate: "2026-11-20",
+        reason: "One delivered item returned during reminder send",
+      }),
+    });
+    await returnRequestSeenPromise;
+    const returnBeforeSendFinished = await Promise.race([
+      returnRequest.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(returnBeforeSendFinished, false, "the return must wait while the reminder is being sent");
+    const [returnBeforeSend] = await db.select().from(inventoryMovements).where(and(
+      eq(inventoryMovements.salesDeliveryLineId, deliveryLineId),
+      eq(inventoryMovements.kind, "stock_return"),
+    ));
+    assert.equal(returnBeforeSend, undefined, "the return must not commit during the in-flight send");
+
+    releaseReturnSender();
+    const [returnReminderResponse, returnResponse] = await Promise.all([
+      reminderDuringReturnRequest,
+      returnRequest,
+    ]);
+    const returnReminderPayload = await returnReminderResponse.json() as any;
+    const returnPayload = await returnResponse.json() as any;
+    assert.equal(returnReminderResponse.status, 200, JSON.stringify(returnReminderPayload));
+    assert.equal(returnResponse.status, 201, JSON.stringify(returnPayload));
+    assert.equal(returnReminderPayload.reminder.outstandingZmw, "125.00");
+    assert.equal(returnReminderPayload.reminder.status, "sent");
+    assert.equal(returnPayload.movement.quantityDelta, 1);
+
+    assert.ok(returnSendContent);
+    const returnRaw = Buffer.from(buildPaymentReminderEmail(returnSendContent), "base64url").toString("utf8");
+    const returnEncodedBody = returnRaw.slice(returnRaw.indexOf("\r\n\r\n") + 4).replace(/\r\n/g, "");
+    const returnEmailBody = Buffer.from(returnEncodedBody, "base64").toString("utf8");
+    assert.match(returnEmailBody, /Amount still owed: ZMW 125\.00/);
+
     const [failedReminder] = await db.insert(paymentReminders).values({
       salesOrderId,
       recipientEmail: `failed-${suffix}@example.test`,
@@ -2083,16 +2173,20 @@ test("customer receipts wait for an in-flight reminder send to finish", {
     assert.equal(overviewResponse.status, 200, JSON.stringify(overview));
     const invoice = overview.invoices.find((item: any) => item.orderId === salesOrderId);
     assert.ok(invoice, "the unpaid order remains in the outstanding-balance list");
-    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.id), [failedReminder.id, savedReminder.id]);
-    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.status), ["failed", "sent"]);
+    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.id), [
+      failedReminder.id, returnReminderPayload.reminder.id, savedReminder.id,
+    ]);
+    assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.status), ["failed", "sent", "sent"]);
     assert.equal(invoice.reminderHistory[0].recipientEmail, failedReminder.recipientEmail);
     assert.equal(invoice.reminderHistory[0].outstandingZmw, "175.00");
     assert.equal(invoice.reminderHistory[0].error, "Mailbox unavailable");
-    assert.equal(invoice.reminderHistory[1].outstandingZmw, "200.00");
+    assert.equal(invoice.reminderHistory[1].outstandingZmw, "125.00");
+    assert.equal(invoice.reminderHistory[2].outstandingZmw, "200.00");
     assert.equal(overview.payments.filter((payment: any) => payment.orderNumber === order.orderNumber).length, 1,
       "viewing reminder history does not create or alter payment records");
   } finally {
     releaseSender();
+    releaseReturnSender();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
     try {
@@ -2114,10 +2208,29 @@ test("customer receipts wait for an in-flight reminder send to finish", {
           [salesOrderId],
         );
         await client.query("DELETE FROM business_payments WHERE sales_order_id = $1", [salesOrderId]);
+        if (deliveryLineId) {
+          await client.query(`
+            DELETE FROM journal_lines
+            WHERE journal_entry_id IN (
+              SELECT id FROM journal_entries
+              WHERE source_type IN ('sales_return', 'sales_return_cogs')
+                AND source_id IN (SELECT id FROM inventory_movements WHERE sales_delivery_line_id = $1)
+            )
+          `, [deliveryLineId]);
+          await client.query(`
+            DELETE FROM journal_entries
+            WHERE source_type IN ('sales_return', 'sales_return_cogs')
+              AND source_id IN (SELECT id FROM inventory_movements WHERE sales_delivery_line_id = $1)
+          `, [deliveryLineId]);
+          await client.query("DELETE FROM inventory_movements WHERE sales_delivery_line_id = $1", [deliveryLineId]);
+          await client.query("DELETE FROM sales_delivery_lines WHERE id = $1", [deliveryLineId]);
+        }
+        if (deliveryId) await client.query("DELETE FROM sales_deliveries WHERE id = $1", [deliveryId]);
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
       }
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (returnLocationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [returnLocationId]);
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       await client.query("COMMIT");
