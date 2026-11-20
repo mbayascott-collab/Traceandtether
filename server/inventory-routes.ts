@@ -14,6 +14,7 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
+import { requireBusinessOwner } from "./access-control";
 import {
   inspectOpeningStockEvidence, MAX_OPENING_STOCK_EVIDENCE_FILES, parseOpeningStockEvidenceMultipart,
   safeOpeningStockEvidenceFilename,
@@ -51,6 +52,7 @@ function getId(value: unknown) {
 }
 
 export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
+  const ownerOnlyReceiptRepair = requireBusinessOwner("Only the business owner can repair historical receipt links.");
   app.get("/api/inventory", owner, async (_req, res) => {
     const accounts = await ensureAccountingAccounts(db);
     const inventoryAccount = accounts.get("inventory");
@@ -313,7 +315,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     })) });
   });
 
-  app.get("/api/inventory/unlinked-receipt-journals", owner, async (_req, res) => {
+  app.get("/api/inventory/unlinked-receipt-journals", owner, ownerOnlyReceiptRepair, async (_req, res) => {
     const unresolved = await db.select({
       id: journalEntries.id,
       entryNumber: journalEntries.entryNumber,
@@ -377,7 +379,7 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     });
   });
 
-  app.post("/api/inventory/receipt-journals/:id/link", owner, async (req, res) => {
+  app.post("/api/inventory/receipt-journals/:id/link", owner, ownerOnlyReceiptRepair, async (req, res) => {
     const journalId = getId(req.params.id);
     if (!journalId) return bad(res, "Invalid receipt journal.");
     const body = z.object({ shipmentLineId: z.number().int().positive() }).strict().safeParse(req.body);

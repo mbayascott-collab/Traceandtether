@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
   journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
-  purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders,
+  purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
 
 test("route mutations across business areas keep their audit history and actor", {
@@ -77,7 +77,6 @@ test("route mutations across business areas keep their audit history and actor",
   const rollbackNote = `audit-rollback-${safeSuffix}`;
   const triggerName = `audit_rollback_${safeSuffix}`;
   const functionName = `${triggerName}_fn`;
-
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json());
@@ -762,6 +761,197 @@ test("route mutations across business areas keep their audit history and actor",
           WHERE id = 1
         `);
       }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  }
+});
+
+test("historical receipt repair routes are owner-only", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerApiRoutes }] = await Promise.all([
+    import("./db"),
+    import("./routes"),
+  ]);
+  const suffix = randomUUID();
+  const actorId = `receipt-repair-access-${suffix}`;
+  const actorEmail = `${actorId}@example.test`;
+  let actorRole: "owner" | "manager" = "owner";
+
+  const app = express();
+  app.use(express.json());
+  const businessAccess: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: actorId, email: actorEmail, role: actorRole };
+    next();
+  };
+  registerApiRoutes(app, businessAccess);
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
+  });
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = async (path: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    let payload: any = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { raw: text };
+    }
+    return { response, payload };
+  };
+
+  let productId: number | undefined;
+  let supplierId: number | undefined;
+  let locationId: number | undefined;
+  let purchaseOrderId: number | undefined;
+  let shipmentId: number | undefined;
+  let shipmentLineId: number | undefined;
+  let movementId: number | undefined;
+  let journalId: number | undefined;
+  try {
+    const productResponse = await request("/api/products", {
+      sku: `RPA-${suffix.replaceAll("-", "").slice(0, 20)}`,
+      name: `Receipt repair access ${suffix}`,
+      description: null,
+      imageUrl: null,
+      brand: "Test",
+      categoryId: null,
+      supplierName: null,
+      supplierProductCode: null,
+      purchaseCurrency: "CNY",
+      purchasePrice: "10.00",
+      estimatedLandedCostZmw: "20.00",
+      sellingPriceZmw: "30.00",
+      reorderThreshold: 0,
+      unit: "piece",
+      status: "active",
+    });
+    assert.equal(productResponse.response.status, 201, JSON.stringify(productResponse.payload));
+    productId = productResponse.payload.product.id;
+
+    const supplierResponse = await request("/api/suppliers", {
+      name: `Receipt repair supplier ${suffix}`,
+      country: "China",
+      contactName: `Contact ${suffix}`,
+      email: null,
+      phone: null,
+      website: null,
+      paymentTerms: null,
+      paymentTermDays: null,
+      defaultLeadTimeDays: 0,
+      notes: null,
+      status: "active",
+    });
+    assert.equal(supplierResponse.response.status, 201, JSON.stringify(supplierResponse.payload));
+    supplierId = supplierResponse.payload.supplier.id;
+
+    const locationResponse = await request("/api/inventory/locations", {
+      name: `Receipt repair location ${suffix}`,
+    });
+    assert.equal(locationResponse.response.status, 201, JSON.stringify(locationResponse.payload));
+    locationId = locationResponse.payload.location.id;
+
+    const orderResponse = await request("/api/purchase-orders", {
+      supplierId,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [{ productId, quantityOrdered: 1, unitPrice: "10.00" }],
+    });
+    assert.equal(orderResponse.response.status, 201, JSON.stringify(orderResponse.payload));
+    purchaseOrderId = orderResponse.payload.order.id;
+    const [orderLine] = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId!));
+    const shipmentResponse = await request("/api/shipments", {
+      purchaseOrderIds: [purchaseOrderId],
+      shipmentReference: `RPA-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: [{ purchaseOrderLineId: orderLine.id, quantityShipped: 1 }],
+    });
+    assert.equal(shipmentResponse.response.status, 201, JSON.stringify(shipmentResponse.payload));
+    shipmentId = shipmentResponse.payload.shipment.id;
+    const [shipmentLine] = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, shipmentId!));
+    shipmentLineId = shipmentLine.id;
+
+    const received = await request(`/api/shipments/${shipmentId}/receive`, {
+      lines: [{ shipmentLineId, quantityReceived: 1 }],
+    }, "PATCH");
+    assert.equal(received.response.status, 200, JSON.stringify(received.payload));
+    const posted = await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId });
+    assert.equal(posted.response.status, 201, JSON.stringify(posted.payload));
+    const [movement] = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${shipmentLineId}-to-1`));
+    movementId = movement.id;
+    const [journal] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, movementId),
+    ));
+    journalId = journal.id;
+    await db.update(journalEntries).set({ shipmentLineId: null }).where(eq(journalEntries.id, journalId));
+    await db.update(inventoryMovements).set({ sourceKey: `legacy-receipt-${suffix}` })
+      .where(eq(inventoryMovements.id, movementId));
+
+    actorRole = "manager";
+    const deniedList = await request("/api/inventory/unlinked-receipt-journals");
+    assert.equal(deniedList.response.status, 403, JSON.stringify(deniedList.payload));
+    const deniedLink = await request(`/api/inventory/receipt-journals/${journalId}/link`, { shipmentLineId });
+    assert.equal(deniedLink.response.status, 403, JSON.stringify(deniedLink.payload));
+    const [stillUnlinked] = await db.select({ shipmentLineId: journalEntries.shipmentLineId })
+      .from(journalEntries).where(eq(journalEntries.id, journalId));
+    assert.equal(stillUnlinked.shipmentLineId, null);
+
+    actorRole = "owner";
+    const allowedList = await request("/api/inventory/unlinked-receipt-journals");
+    assert.equal(allowedList.response.status, 200, JSON.stringify(allowedList.payload));
+    assert.ok(allowedList.payload.journals.some((entry: { id: number }) => entry.id === journalId));
+    const allowedLink = await request(`/api/inventory/receipt-journals/${journalId}/link`, { shipmentLineId });
+    assert.equal(allowedLink.response.status, 200, JSON.stringify(allowedLink.payload));
+    assert.equal(allowedLink.payload.journalEntry.journalEntryId, journalId);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_clerk_user_id = $1", [actorId]);
+      if (journalId) {
+        await client.query("DELETE FROM journal_lines WHERE journal_entry_id = $1", [journalId]);
+        await client.query("DELETE FROM journal_entries WHERE id = $1", [journalId]);
+      }
+      if (movementId) await client.query("DELETE FROM inventory_movements WHERE id = $1", [movementId]);
+      if (shipmentLineId) await client.query("DELETE FROM shipment_lines WHERE id = $1", [shipmentLineId]);
+      if (shipmentId) {
+        await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [shipmentId]);
+        await client.query("DELETE FROM shipments WHERE id = $1", [shipmentId]);
+      }
+      if (purchaseOrderId) {
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+      if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
