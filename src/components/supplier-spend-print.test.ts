@@ -8,7 +8,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import SupplierSpendPrintDocument from "./SupplierSpendPrintDocument";
-import type { SupplierReportCsvData } from "../../shared/supplier-report-csv";
+import { supplierReportForSupplier, type SupplierReportCsvData } from "../../shared/supplier-report-csv";
 
 const rowCount = 58;
 
@@ -65,6 +65,23 @@ function fixtureReport(): SupplierReportCsvData {
     suppliers,
   };
 }
+
+test("a supplier-specific PDF keeps the period and unallocated-cost context", () => {
+  const report = supplierReportForSupplier(fixtureReport(), 1);
+  const markup = renderToStaticMarkup(
+    React.createElement(SupplierSpendPrintDocument, { report }),
+  );
+
+  assert.deepEqual(report.period, { from: "2025-01-01", to: "2025-03-31" });
+  assert.deepEqual(report.suppliers.map((supplier) => supplier.name), ["Fixture Supplier 001"]);
+  assert.equal(report.totals.orderedGoodsZmw, "240.00");
+  assert.equal(report.totals.unallocatedImportCostsZmw, "585.00");
+  assert.deepEqual(report.shipments.map((shipment) => shipment.shipmentId), [51]);
+  assert.match(markup, /2025-01-01 to 2025-03-31/);
+  assert.match(markup, /ZMW 585\.00 in import costs could not be assigned to a supplier/);
+  assert.match(markup, /Fixture Supplier 001/);
+  assert.doesNotMatch(markup, /Fixture Supplier 002/);
+});
 
 test("supplier spend PDF includes report totals and keeps long supplier tables readable", () => {
   const directory = mkdtempSync(join(tmpdir(), "supplier-spend-print-"));
