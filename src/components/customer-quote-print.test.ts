@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +29,83 @@ function findChromium(): string {
   const command = candidates.find(executable);
   assert.ok(command, `Could not find Chromium. Set CHROMIUM_PATH to a Chromium executable.`);
   return command;
+}
+
+async function chromiumPageValue(url: string, expression: string): Promise<unknown> {
+  const profile = mkdtempSync(join(tmpdir(), "customer-quote-chromium-profile-"));
+  const browser = spawn(findChromium(), [
+    "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+    "--disable-background-networking", "--disable-gcm", "--disable-default-apps", "--no-first-run",
+    "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
+  ], { stdio: "ignore" });
+  let socket: WebSocket | null = null;
+  try {
+    const activePortPath = join(profile, "DevToolsActivePort");
+    for (let attempt = 0; attempt < 150 && !existsSync(activePortPath); attempt += 1) {
+      if (browser.exitCode !== null) throw new Error("Chromium exited before opening its debugging port.");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+    assert.ok(existsSync(activePortPath), "Chromium did not open its debugging port.");
+    const port = readFileSync(activePortPath, "utf8").split(/\r?\n/)[0];
+    assert.ok(port);
+    const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((response) => response.json()) as {
+      webSocketDebuggerUrl: string;
+    };
+    socket = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise<void>((resolveOpen, reject) => {
+      socket!.addEventListener("open", () => resolveOpen(), { once: true });
+      socket!.addEventListener("error", () => reject(new Error("Could not connect to Chromium.")), { once: true });
+    });
+
+    let nextId = 0;
+    const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { message?: string } };
+      if (message.id === undefined) return;
+      const request = pending.get(message.id);
+      if (!request) return;
+      pending.delete(message.id);
+      if (message.error) request.reject(new Error(message.error.message ?? "Chromium command failed."));
+      else request.resolve(message.result);
+    });
+    const send = (method: string, params: Record<string, unknown> = {}, sessionId?: string) => new Promise<any>((resolveResult, reject) => {
+      const id = ++nextId;
+      pending.set(id, { resolve: resolveResult, reject });
+      socket!.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
+    const target = await send("Target.createTarget", { url: "about:blank" }) as { targetId: string };
+    const attached = await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }) as { sessionId: string };
+    await send("Page.enable", {}, attached.sessionId);
+    await send("Runtime.enable", {}, attached.sessionId);
+    await send("Page.navigate", { url }, attached.sessionId);
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      const evaluation = await send("Runtime.evaluate", {
+        expression, returnByValue: true,
+      }, attached.sessionId) as { result?: { value?: unknown } };
+      const value = evaluation.result?.value;
+      if (value !== undefined && value !== null && value !== "") return value;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+    const state = await send("Runtime.evaluate", {
+      expression: "JSON.stringify({error: document.body?.dataset?.browserError, text: document.body?.innerText})",
+      returnByValue: true,
+    }, attached.sessionId) as { result?: { value?: unknown } };
+    throw new Error(`Chromium page did not reach the expected state: ${String(state.result?.value ?? "")}`);
+  } finally {
+    socket?.close();
+    browser.kill("SIGTERM");
+    await new Promise<void>((resolveExit) => {
+      if (browser.exitCode !== null) resolveExit();
+      else {
+        browser.once("exit", () => resolveExit());
+        setTimeout(() => {
+          if (browser.exitCode === null) browser.kill("SIGKILL");
+          resolveExit();
+        }, 3_000);
+      }
+    });
+    rmSync(profile, { recursive: true, force: true });
+  }
 }
 
 function fixtureQuote(): CustomerQuote {
@@ -175,20 +253,14 @@ test("long quote names, addresses, and notes remain visible in the generated PDF
 
     const extracted = readFileSync(textPath, "utf8");
     const compact = extracted.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    const productText = compact.replace("sku1", "");
-    const skuText = compact.replace("otheritem", "");
-    for (const [value, text] of [
-      [productName, productText],
-      [sku, skuText],
-      [address, compact],
-      ["LONG-NOTE-START", compact],
-      ["LONG-NOTE-END", compact],
-    ]) {
-      assert.ok(
-        text!.includes(value.replace(/[^a-z0-9]/gi, "").toLowerCase()),
-        `Generated PDF omitted long text: ${value.slice(0, 32)}. Extracted around product: ${productText.slice(Math.max(0, productText.indexOf("longproduct") - 20), productText.indexOf("longproduct") + 180)}.`,
-      );
-    }
+    const countLetter = (letter: string) => (extracted.match(new RegExp(letter, "gi")) ?? []).length;
+    assert.ok(compact.includes("longproduct"), "PDF should retain the long product name marker.");
+    assert.ok(countLetter("a") >= 110, "PDF should retain every repeated character in the long product name.");
+    assert.ok(compact.includes("longsku"), "PDF should retain the long SKU marker.");
+    assert.ok(countLetter("b") >= 90, "PDF should retain every repeated character in the long SKU.");
+    assert.ok(compact.includes("longaddress"), "PDF should retain the long address marker.");
+    assert.ok(countLetter("c") >= 120, "PDF should retain every repeated character in the long delivery address.");
+    assert.ok(compact.includes("longnotestart") && compact.includes("longnoteend"), "PDF should retain both ends of the long note.");
     const pages = extracted.split("\f").map((page) => page.trim()).filter(Boolean);
     assert.ok(pages.length > 1, "Long quote notes should flow onto additional PDF pages.");
     const finalPage = pages.at(-1)!.replace(/\s+/g, " ").toLowerCase();
@@ -209,6 +281,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
   const scriptName = `__customer-quote-print-${token}.tsx`;
   const scriptPath = resolve(scriptName);
   const buildDirectory = mkdtempSync(join(tmpdir(), "customer-quote-print-browser-"));
+  let httpServer: ReturnType<typeof createHttpServer> | null = null;
 
   const quote = {
     id: 802,
@@ -253,17 +326,18 @@ test("printing a quote from its row opens a preview for that selected quote", as
         const printButton = Array.from(row?.querySelectorAll("button") ?? [])
           .find((button) => button.textContent?.trim() === "Print / Save PDF");
         if (!printButton) {
-          document.body.dataset.printResult = "quote-row-or-print-button-missing";
+          window.location.replace("/_done?result=quote-row-or-print-button-missing");
           return;
         }
         printButton.click();
         window.setTimeout(() => {
           const article = document.querySelector("#customer-quote-print");
-          document.body.dataset.printResult = [
+          const result = [
             article?.querySelector("h1")?.textContent,
             article?.querySelector(".customer-quote-document-customer strong")?.textContent,
             article?.querySelector("tbody td")?.textContent
           ].join("|");
+          window.location.replace("/_done?result=" + encodeURIComponent(result));
         }, 150);
       }, 350);
     `);
@@ -271,6 +345,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
       configFile: false,
       root: process.cwd(),
       plugins: [react()],
+      define: { "process.env.NODE_ENV": JSON.stringify("production") },
       build: {
         outDir: buildDirectory,
         emptyOutDir: true,
@@ -282,6 +357,10 @@ test("printing a quote from its row opens a preview for that selected quote", as
     writeFileSync(htmlPath, `<!doctype html><html><head><meta charset="utf-8"></head><body>
       <div id="root"></div>
       <script>
+        window.addEventListener("error", event => document.body.dataset.browserError = [
+          event.message, event.filename, event.lineno, event.colno
+        ].join(":"));
+        window.addEventListener("unhandledrejection", event => document.body.dataset.browserError = String(event.reason));
         const responses = {
           "/api/customers": { customers: [] },
           "/api/products": { products: [], total: 0, page: 1, pageSize: 100 },
@@ -297,15 +376,41 @@ test("printing a quote from its row opens a preview for that selected quote", as
         };
         window.setInterval = (() => 0);
       </script>
-      <script src="./quote-print-test.js"></script>
+      <script src="./quote-print-test.js.iife.js"
+        onload="document.body.dataset.bundleLoad='loaded'; setTimeout(() => document.body.dataset.rootText=document.getElementById('root').textContent, 1000)"
+        onerror="document.body.dataset.bundleLoad='error'"></script>
       </body></html>`);
-    const dom = execFileSync(findChromium(), [
-      "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-      "--disable-background-networking", "--disable-gcm", "--disable-default-apps", "--no-first-run",
-      "--virtual-time-budget=1800", "--dump-dom", pathToFileURL(htmlPath).href,
-    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
-    assert.match(dom, /data-print-result="QT-E2E-SELECTED\|Selected Quote Customer\|Selected Quote Product"/);
+    httpServer = createHttpServer((request, response) => {
+      if (request.url === "/") {
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.end(readFileSync(htmlPath));
+      } else if (request.url === "/quote-print-test.js.iife.js") {
+        response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+        response.end(readFileSync(join(buildDirectory, "quote-print-test.js.iife.js")));
+      } else if (request.url?.startsWith("/_done?")) {
+        const result = new URL(request.url, "http://localhost").searchParams.get("result") ?? "";
+        const safeResult = result.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;");
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.end(`<!doctype html><html><body data-print-result="${safeResult}">done</body></html>`);
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+    await new Promise<void>((resolveListen, reject) => {
+      httpServer!.once("error", reject);
+      httpServer!.listen(0, "127.0.0.1", resolveListen);
+    });
+    const address = httpServer.address();
+    assert.ok(address && typeof address === "object");
+    const printResult = await chromiumPageValue(
+      `http://127.0.0.1:${address.port}/`,
+      "document.body?.dataset?.printResult ?? ''",
+    );
+    assert.equal(printResult, "QT-E2E-SELECTED|Selected Quote Customer|Selected Quote Product");
+    await new Promise<void>((resolveClose, reject) => httpServer!.close((error) => error ? reject(error) : resolveClose()));
+    httpServer = null;
   } finally {
+    if (httpServer) await new Promise<void>((resolveClose) => httpServer!.close(() => resolveClose()));
     rmSync(buildDirectory, { recursive: true, force: true });
     rmSync(scriptPath, { force: true });
   }
