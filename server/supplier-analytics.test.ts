@@ -167,10 +167,16 @@ test("supplier CSV protects formula-like supplier names", () => {
   const csv = supplierReportCsv({
     period: { from: null, to: null },
     monthlySpend: [],
-    shipments: [{
-      supplierId: 9, supplierName: "=HYPERLINK(\"https://example.invalid\",\"Vendor\")", orderNumber: "+PO,1", shipmentId: 2,
-      shipmentReference: "-CMD(\"open\")", status: "@ACTIVE", expectedAt: "=TODAY()", receivedAt: " +SUM(1,1)",
-    }],
+    shipments: [
+      {
+        supplierId: 9, supplierName: "=HYPERLINK(\"https://example.invalid\",\"Vendor\")", orderNumber: "+PO,1", shipmentId: 2,
+        shipmentReference: "-CMD(\"open\")", status: "@ACTIVE", expectedAt: "=TODAY()", receivedAt: " +SUM(1,1)",
+      },
+      {
+        supplierId: 9, supplierName: "North", orderNumber: "-1+2", shipmentId: 3,
+        shipmentReference: "-1+2", status: "received", expectedAt: null, receivedAt: null,
+      },
+    ],
     totals: {
       orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
       orders: 0, onTimeOrders: 0, lateOrders: 0, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
@@ -185,6 +191,10 @@ test("supplier CSV protects formula-like supplier names", () => {
 
   assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
   assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid"",""Vendor""\)","'\+PO,1","2","'-CMD\(""open""\)","'@ACTIVE","'=TODAY\(\)","' \+SUM\(1,1\)"/);
+  assert.ok(
+    csv.includes(`"North","'-1+2","3","'-1+2","received","",""`),
+    "negative-looking formulas in shipment text must be treated as text while numeric cells stay numeric",
+  );
 });
 
 test("single-supplier reports keep only that supplier's values and preserve unallocated costs", () => {

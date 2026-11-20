@@ -107,7 +107,7 @@ export function formatSupplierDeliveryVariance(value: string | null) {
 
 function csvCell(value: unknown) {
   const text = String(value ?? "");
-  const safe = /^[\s]*[=+@]/.test(text) || /^\s*-\D/.test(text) ? `'${text}` : text;
+  const safe = typeof value === "string" && /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
   return `"${safe.replaceAll('"', '""')}"`;
 }
 
