@@ -328,7 +328,7 @@ test("CSV statement imports save review rows without changing journals", {
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let importBatchId: number | undefined;
-  const csvReferences = [`CSV-${suffix}`, `CSV-OUT-${suffix}`];
+  const csvReferences = [`CSV-${suffix}`, `CSV-UNSELECTED-${suffix}`, `CSV-OUT-${suffix}`];
 
   const request = async (path: string, body: unknown) => {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -364,27 +364,31 @@ test("CSV statement imports save review rows without changing journals", {
     const paymentsBefore = await paymentSnapshot();
     const csvLines = [
       { transactionDate: "2026-11-10", flow: "in", amountZmw: "72.50", description: "CSV review row", reference: `CSV-${suffix}` },
-      { transactionDate: "2026-11-11", flow: "out", amountZmw: "8.25", description: "CSV review row two", reference: `CSV-OUT-${suffix}` },
+      { transactionDate: "2026-11-11", flow: "in", amountZmw: "14.00", description: "CSV row not selected", reference: `CSV-UNSELECTED-${suffix}` },
+      { transactionDate: "2026-11-12", flow: "out", amountZmw: "8.25", description: "CSV review row two", reference: `CSV-OUT-${suffix}` },
     ] as const;
+    const selectedLines = [csvLines[0], csvLines[2]];
     const imported = await request("/api/payments/reconciliation/imports", {
       accountId: bankAccount.id,
       fileName: `reconciliation-${label}.csv`,
       from: "2026-11-10",
-      to: "2026-11-11",
+      to: "2026-11-12",
       lines: csvLines,
-      includedIndexes: [0, 1],
+      includedIndexes: [0, 2],
       allowDuplicateBatch: false,
     });
     importBatchId = Number(imported.batch.id);
-    assert.equal(imported.added, csvLines.length);
-    assert.equal(imported.batch.lineCount, csvLines.length);
+    assert.equal(imported.added, selectedLines.length);
+    assert.equal(imported.batch.lineCount, selectedLines.length);
     assert.deepEqual(await journalSnapshot(), before, "CSV import must not create journal entries or journal lines");
     assert.deepEqual(await paymentSnapshot(), paymentsBefore, "CSV import must save review rows, not payment records");
 
     const importedRows = await db.select().from(paymentStatementLines)
       .where(inArray(paymentStatementLines.reference, csvLines.map((line) => line.reference)))
       .orderBy(asc(paymentStatementLines.id));
-    assert.equal(importedRows.length, csvLines.length);
+    assert.equal(importedRows.length, selectedLines.length);
+    assert.equal(importedRows.some((line) => line.reference === csvLines[1].reference), false,
+      "unselected references must not appear among saved statement rows");
     assert.deepEqual(importedRows.map((line) => ({
       transactionDate: line.transactionDate,
       flow: line.flow,
@@ -393,7 +397,7 @@ test("CSV statement imports save review rows without changing journals", {
       reference: line.reference,
       importBatchId: line.importBatchId,
       matchedPaymentId: line.matchedPaymentId,
-    })), csvLines.map((line) => ({
+    })), selectedLines.map((line) => ({
       ...line,
       importBatchId,
       matchedPaymentId: null,
