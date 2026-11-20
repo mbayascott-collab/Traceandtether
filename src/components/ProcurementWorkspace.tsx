@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   createImportExpense, createPurchaseOrder, createShipment, fetchImportExpenses, fetchLandedCosts,
-  postLandedCostAdjustment,
+  landedCostReceiptClearingCsv, postLandedCostAdjustment,
   fetchProducts, fetchPurchaseOrders, fetchShipments, fetchSuppliers, receiveShipment,
   type ImportExpense, type LandedCostOrder, type PurchaseOrder, type Product, type Shipment, type Supplier,
 } from "../lib/api";
@@ -11,6 +11,16 @@ type LineDraft = { productId: string; quantityOrdered: string; unitPrice: string
 type ShipmentLineDraft = { purchaseOrderLineId: string; quantityShipped: string };
 const today = () => new Date().toISOString().slice(0, 10);
 const money = (value: string, currency = "ZMW") => `${currency} ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function downloadReceiptClearing(order: LandedCostOrder) {
+  const csv = landedCostReceiptClearingCsv(order);
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  const safeOrderNumber = order.orderNumber.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-|-$/g, "") || String(order.id);
+  link.href = url;
+  link.download = `receipt-clearing-${safeOrderNumber}-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
@@ -164,7 +174,12 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
         {o.adjustmentPreview && <>
           <h3>Outstanding clearing and reviewed adjustment</h3>
           <p>Clearing balance: <strong>{money(o.adjustmentPreview.clearingBalanceZmw)}</strong> · Ready for posted stock: <strong>{money(o.adjustmentPreview.adjustmentAvailableZmw)}</strong> · Still awaiting stock posting: <strong>{money(o.adjustmentPreview.unpostedClearingZmw)}</strong></p>
-          <h3>Receipt clearing detail</h3>
+          <div className="toolbar">
+            <h3>Receipt clearing detail</h3>
+            <button type="button" className="button button-secondary" onClick={() => downloadReceiptClearing(o)}>
+              Download audit CSV
+            </button>
+          </div>
           <p className="report-footnote">
             Allocated expenses {money(o.adjustmentPreview.allocatedExpensesZmw)} − receipt clearings {money(o.adjustmentPreview.receiptClearedTotalZmw)} − earlier adjustments {money(o.adjustmentPreview.priorAdjustmentsClearedZmw)} = clearing balance {money(o.adjustmentPreview.clearingBalanceZmw)}.
           </p>
