@@ -68,6 +68,7 @@ import AuditWorkspace from "./AuditWorkspace";
 
 interface BusinessAppProps {
   userEmail: string;
+  userRole: "owner" | "manager";
   onSignOut: () => void;
 }
 
@@ -247,7 +248,7 @@ function AlertMessage({ notice }: { notice: Notice }) {
   );
 }
 
-export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) {
+export default function BusinessApp({ userEmail, userRole, onSignOut }: BusinessAppProps) {
   const [location, setLocation] = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -887,9 +888,9 @@ export default function BusinessApp({ userEmail, onSignOut }: BusinessAppProps) 
           {isStockReceipts && <InventoryWorkspace mode="receipts" />}
           {isReservations && <InventoryWorkspace mode="reservations" />}
           {isStockAdjustments && <InventoryWorkspace mode="adjustments" />}
-          {isCustomers && <SalesWorkspace mode="customers" />}
+          {isCustomers && <SalesWorkspace mode="customers" canEditCampaignAttribution={userRole === "owner"} />}
           {isCustomerQuotes && <CustomerQuotesWorkspace />}
-          {isSalesOrders && <SalesWorkspace mode="orders" />}
+          {isSalesOrders && <SalesWorkspace mode="orders" canEditCampaignAttribution={userRole === "owner"} />}
           {isPayments && <PaymentsWorkspace />}
           {isAccounting && <AccountingWorkspace />}
           {isMarketing && <MarketingWorkspace />}

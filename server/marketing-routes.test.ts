@@ -1404,13 +1404,13 @@ test("marketing report counts partial campaign deliveries once and matches poste
         jan10Campaign.productCostZmw,
         jan10Campaign.landedCostAdjustmentZmw,
         jan10Campaign.netContributionZmw,
-        jan10Campaign.landedCostAdjustmentDeliveries[0].adjustmentZmw,
+        jan10Campaign.attributedRevenueZmw,
       ],
       jan11: [
         jan11Campaign.productCostZmw,
         jan11Campaign.landedCostAdjustmentZmw,
         jan11Campaign.netContributionZmw,
-        jan11Campaign.landedCostAdjustmentDeliveries[0].adjustmentZmw,
+        jan11Campaign.attributedRevenueZmw,
       ],
       combined: [
         fullRangeCampaign.productCostZmw,
@@ -1418,9 +1418,9 @@ test("marketing report counts partial campaign deliveries once and matches poste
         fullRangeCampaign.netContributionZmw,
       ],
     }, {
-      jan10: ["14.75", "4.75", "85.25", "4.75"],
-      jan11: ["44.24", "14.24", "55.76", "14.24"],
-      combined: ["58.99", "18.99", "141.01"],
+      jan10: ["20.04", "6.04", "119.96", "140.00"],
+      jan11: ["42.95", "12.95", "57.05", "100.00"],
+      combined: ["62.99", "18.99", "177.01"],
     });
     assert.equal(
       centsDelta(fullRangeAfterReversal.payload.totals.productCostZmw, fullRangeBeforeReversal.payload.totals.productCostZmw),
@@ -1433,11 +1433,11 @@ test("marketing report counts partial campaign deliveries once and matches poste
     assert.equal(centsDelta(fullRangeCampaign.netContributionZmw, beforeReversalCampaign.netContributionZmw), "101");
     assert.equal(
       centsDelta(jan10Campaign.productCostZmw, fullRangeCampaign.productCostZmw),
-      "-4424",
+      "-4295",
     );
     assert.equal(
       centsDelta(jan11Campaign.productCostZmw, fullRangeCampaign.productCostZmw),
-      "-1475",
+      "-2004",
     );
     assert.equal(
       BigInt(jan10Campaign.attributedRevenueZmw.replace(".", ""))

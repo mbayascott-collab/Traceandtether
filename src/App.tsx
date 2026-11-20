@@ -276,6 +276,7 @@ function ProtectedWorkspace() {
   return (
     <BusinessApp
       userEmail={account.email ?? ""}
+      userRole={account.role === "owner" ? "owner" : "manager"}
       onSignOut={() => signOut({ redirectUrl: basePath || "/" })}
     />
   );

@@ -44,7 +44,13 @@ function reservedDeliveryLocations(line: SalesOrder["lines"][number]) {
   }
   return [...byLocation.values()].sort((left, right) => left.locationName.localeCompare(right.locationName));
 }
-export default function SalesWorkspace({ mode }: { mode: Mode }) {
+export default function SalesWorkspace({
+  mode,
+  canEditCampaignAttribution = false,
+}: {
+  mode: Mode;
+  canEditCampaignAttribution?: boolean;
+}) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -558,7 +564,9 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                 )) : <span>{line.stockLocationName || "Not reserved"}</span>}
               </div>}
             </div>;
-          })}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td><select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></td><td>{o.status.replace("_", " ")}</td><td>
+          })}</td><td>{zmw(o.deliveredZmw)} / {zmw(o.totalZmw)}</td><td>{canEditCampaignAttribution
+            ? <select aria-label={`Campaign for ${o.orderNumber}`} value={o.campaignId ?? ""} onChange={(e) => run(() => setSalesOrderAttribution(o.id, e.target.value ? Number(e.target.value) : null))}><option value="">Unattributed</option>{campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+            : o.campaignName || "—"}</td><td>{o.status.replace("_", " ")}</td><td>
           {o.status === "draft" && <><button disabled={busyOrderId === o.id} onClick={() => confirmOrder(o)}>{busyOrderId === o.id ? "Confirming…" : "Confirm & reserve"}</button> <button disabled={busyOrderId === o.id} onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Order cancelled.", o.id)}>Cancel</button> <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button></>}
           {o.status === "cancelled" && !o.confirmedAt && <button className="button button-danger button-small" onClick={() => removeOrder(o)}>Delete</button>}
           {(o.status === "confirmed" || o.status === "partially_fulfilled") && <><button className="button button-secondary button-small" onClick={() => { setDeliveryRequestKey(window.crypto.randomUUID()); setDeliveryFormOrder(o); }}>Record delivery</button> <button onClick={() => run(() => updateSalesOrderStatus(o.id, "cancel"), "Remaining order quantities cancelled.", o.id)}>Cancel remaining</button></>}
