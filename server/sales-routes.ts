@@ -1137,7 +1137,7 @@ export function registerSalesRoutes(
     if (!campaign) return bad(res, "Choose an existing campaign.");
     await db.transaction(async (tx) => {
       await tx.insert(marketingAttributions).values({ salesOrderId: id, campaignId, source: "manual" })
-        .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, source: "manual", attributedAt: new Date() } });
+        .onConflictDoUpdate({ target: marketingAttributions.salesOrderId, set: { campaignId, attributedAt: new Date() } });
       await recordBusinessAudit(tx, {
         entityType: "sales_order", entityId: order.id, recordLabel: `Sales order #${id}`,
         actor: res.locals.actor, action: "updated", changedFields: ["campaignAttribution"],

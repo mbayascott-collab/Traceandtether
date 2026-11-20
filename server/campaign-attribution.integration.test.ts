@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import { eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
-  inventoryMovements, marketingAttributions, marketingCampaigns, products, salesOrders,
+  inventoryLocations, inventoryMovements, marketingAttributions, marketingCampaigns, products, salesOrders,
 } from "../shared/schema";
 
 test("only owners can replace campaign links", {
@@ -153,6 +153,7 @@ test("public shop campaign links attribute orders and reports count them without
 
   let productId: number | undefined;
   let campaignId: number | undefined;
+  let secondCampaignId: number | undefined;
   const orderNumbers: string[] = [];
 
   try {
@@ -160,6 +161,10 @@ test("public shop campaign links attribute orders and reports count them without
       name: campaignName, trackingCode, status: "active",
     }).returning();
     campaignId = campaign.id;
+    const [secondCampaign] = await db.insert(marketingCampaigns).values({
+      name: `Moved attribution destination ${suffix}`, trackingCode: randomUUID(), status: "active",
+    }).returning();
+    secondCampaignId = secondCampaign.id;
     const [product] = await db.insert(products).values({
       sku: `ATTR-${suffix}`,
       name: `Attribution route product ${suffix}`,
@@ -167,8 +172,10 @@ test("public shop campaign links attribute orders and reports count them without
       status: "active",
     }).returning();
     productId = product.id;
+    const [mainLocation] = await db.select({ id: inventoryLocations.id }).from(inventoryLocations)
+      .where(eq(inventoryLocations.name, "Main")).limit(1);
     await db.insert(inventoryMovements).values({
-      productId, kind: "opening_stock", quantityDelta: 5,
+      productId, locationId: mainLocation?.id ?? null, kind: "opening_stock", quantityDelta: 5,
       reason: `Campaign attribution route test ${suffix}`,
       sourceKey: `campaign-attribution-test-${suffix}`,
     });
@@ -184,7 +191,7 @@ test("public shop campaign links attribute orders and reports count them without
       assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
       challenges.push(shop.payload.challenge);
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
 
     const submitOrder = async (index: number, code: string | undefined, challenge: string) => {
       const { response, payload } = await request("/api/shop/orders", {
@@ -193,6 +200,7 @@ test("public shop campaign links attribute orders and reports count them without
         email: "",
         address: "",
         notes: "",
+        website: "",
         lines: [{ productId, quantity: 1 }],
         trackingCode: code,
         challenge,
@@ -218,15 +226,23 @@ test("public shop campaign links attribute orders and reports count them without
 
     const testOrders = await db.select({ id: salesOrders.id, orderNumber: salesOrders.orderNumber })
       .from(salesOrders).where(inArray(salesOrders.orderNumber, orderNumbers));
-    assert.equal(testOrders.length, 4);
+    assert.equal(testOrders.length, 5);
 
-    const manuallyAttributedOrder = testOrders.find((order) => order.orderNumber === orderNumbers[1])!;
+    const manuallyAttributedOrder = testOrders.find((order) => order.orderNumber === orderNumbers[3])!;
     const manualAttribution = await request(
       `/api/sales-orders/${manuallyAttributedOrder.id}/attribution`,
       { campaignId },
       "PATCH",
     );
     assert.equal(manualAttribution.response.status, 200, JSON.stringify(manualAttribution.payload));
+
+    const linkAttributedOrder = testOrders.find((order) => order.orderNumber === orderNumbers[0])!;
+    const movedAttribution = await request(
+      `/api/sales-orders/${linkAttributedOrder.id}/attribution`,
+      { campaignId: secondCampaignId },
+      "PATCH",
+    );
+    assert.equal(movedAttribution.response.status, 200, JSON.stringify(movedAttribution.payload));
 
     const attributions = await db.select().from(marketingAttributions);
     const testAttributions = attributions.filter((row) => testOrders.some((order) => order.id === row.salesOrderId));
@@ -239,8 +255,8 @@ test("public shop campaign links attribute orders and reports count them without
         source: "manual",
       },
       {
-        salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[0])!.id,
-        campaignId,
+        salesOrderId: linkAttributedOrder.id,
+        campaignId: secondCampaignId,
         source: "campaign_link",
       },
       {
@@ -256,11 +272,15 @@ test("public shop campaign links attribute orders and reports count them without
     const report = await request(`/api/marketing/reports?from=${oldReportDate}&to=${oldReportDate}`);
     assert.equal(report.response.status, 200);
     const testCampaign = report.payload.campaigns.find((item: { id: number }) => item.id === campaignId);
+    const destinationCampaign = report.payload.campaigns.find((item: { id: number }) => item.id === secondCampaignId);
     assert.ok(testCampaign);
-    assert.equal(testCampaign.orderCount, 3);
-    assert.equal(testCampaign.attributedRevenueZmw, "300.00");
+    assert.ok(destinationCampaign);
+    assert.equal(testCampaign.orderCount, 2);
+    assert.equal(testCampaign.attributedRevenueZmw, "200.00");
+    assert.equal(destinationCampaign.orderCount, 1);
+    assert.equal(destinationCampaign.attributedRevenueZmw, "100.00");
     assert.equal(report.payload.totals.campaignLinkOrders - baseline.campaignLinkOrders, 2);
-    assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 2);
+    assert.equal(report.payload.totals.ordersWithoutCampaignLinks - baseline.ordersWithoutCampaignLinks, 3);
     assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 3);
     assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
   } finally {
@@ -291,6 +311,7 @@ test("public shop campaign links attribute orders and reports count them without
         await client.query("DELETE FROM products WHERE id = $1", [productId]);
       }
       if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
+      if (secondCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [secondCampaignId]);
       await client.query("DELETE FROM public_shop_order_limits WHERE ip_hash = $1", [clientIpHash]);
       await client.query("COMMIT");
     } catch (error) {
