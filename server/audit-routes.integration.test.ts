@@ -75,7 +75,7 @@ test("route mutations across business areas keep their audit history and actor",
   const safeSuffix = suffix.replaceAll("-", "");
   const actorId = `audit-route-test-${suffix}`;
   const actorEmail = `audit-route-test-${suffix}@example.test`;
-  const clientIp = `198.51.100.${Number.parseInt(safeSuffix.slice(0, 2), 16) % 254 + 1}`;
+  const clientIp = `198.18.${Number.parseInt(safeSuffix.slice(0, 2), 16)}.${Number.parseInt(safeSuffix.slice(2, 4), 16)}`;
   const clientIpHash = createHash("sha256").update(clientIp).digest("hex");
   const publicCustomerName = `Public audit customer ${suffix}`;
   const rollbackDescription = `Audit rollback ${suffix}`;

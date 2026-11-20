@@ -169,12 +169,13 @@ test("public shop campaign links attribute orders and reports count them without
   }
 
   const suffix = randomUUID();
+  const safeSuffix = suffix.replaceAll("-", "");
   const campaignName = `Attribution route test ${suffix}`;
   const trackingCode = randomUUID();
   const actorEmail = `campaign-attribution-${suffix}@example.test`;
-  const clientIp = `198.51.100.${Number.parseInt(suffix.slice(0, 2), 16) % 254 + 1}`;
+  const clientIp = `198.19.${Number.parseInt(safeSuffix.slice(0, 2), 16)}.${Number.parseInt(safeSuffix.slice(2, 4), 16)}`;
   const clientIpHash = createHash("sha256").update(clientIp).digest("hex");
-  const scheduledClientIp = `203.0.113.${Number.parseInt(suffix.slice(2, 4), 16) % 254 + 1}`;
+  const scheduledClientIp = `198.20.${Number.parseInt(safeSuffix.slice(4, 6), 16)}.${Number.parseInt(safeSuffix.slice(6, 8), 16)}`;
   const scheduledClientIpHash = createHash("sha256").update(scheduledClientIp).digest("hex");
   const oldReportDate = "2001-01-01";
   const app = express();
