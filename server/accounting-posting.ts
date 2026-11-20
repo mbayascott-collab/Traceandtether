@@ -329,7 +329,8 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
   const orderLines = await tx.select({ line: purchaseOrderLines, productName: products.name })
     .from(purchaseOrderLines)
     .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
-    .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+    .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
+    .orderBy(asc(purchaseOrderLines.id));
   const expenses = await importExpensesForPurchaseOrder(tx, purchaseOrderId);
   const rows = orderLines.map((row: any) => ({ ...row.line, productName: row.productName }));
   const allocation = allocateLandedCosts(
@@ -481,22 +482,45 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
     const expectedPosted = line.quantityOrdered > 0
       ? roundedDivide((allocationByLine.get(line.id) ?? 0n) * BigInt(stockedQuantity), BigInt(line.quantityOrdered))
       : 0n;
-    const adjustmentCents = expectedPosted
-      - (actualClearingByLine.get(line.id) ?? 0n)
-      - (priorAdjustmentByProduct.get(line.productId) ?? 0n);
+    const adjustmentCents = expectedPosted - (actualClearingByLine.get(line.id) ?? 0n);
     const onHand = onHandByProduct.get(line.productId) ?? 0;
     const inventoryValue = inventoryValueByProduct.get(line.productId) ?? 0n;
-    const split = splitLandedCostCorrection({
-      amountCents: adjustmentCents > 0n ? adjustmentCents : 0n,
-      inventoryValueCents: inventoryValue,
-      onHand,
-      totalReceiptQuantity: receiptQuantityByProduct.get(line.productId) ?? 0,
-    });
     return {
       lineId: line.id, productId: line.productId, productName: line.productName,
-      stockedQuantity, onHand, averageUnitCostZmw: formatCents(split.averageUnitCostCents),
-      adjustmentCents, inventoryCents: split.inventoryCents, cogsCents: split.cogsCents,
+      stockedQuantity, onHand, inventoryValueCents: inventoryValue, adjustmentCents,
+      inventoryCents: 0n, cogsCents: 0n, averageUnitCostCents: 0n,
     };
+  });
+  const correctionsByProduct = new Map<number, typeof corrections>();
+  corrections.forEach((line: any) => {
+    const productCorrections = correctionsByProduct.get(line.productId) ?? [];
+    productCorrections.push(line);
+    correctionsByProduct.set(line.productId, productCorrections);
+  });
+  for (const [productId, productCorrections] of correctionsByProduct) {
+    let priorAdjustmentRemaining = priorAdjustmentByProduct.get(productId) ?? 0n;
+    for (const correction of productCorrections) {
+      if (priorAdjustmentRemaining <= 0n) break;
+      if (correction.adjustmentCents <= 0n) continue;
+      const applied = correction.adjustmentCents < priorAdjustmentRemaining
+        ? correction.adjustmentCents : priorAdjustmentRemaining;
+      correction.adjustmentCents -= applied;
+      priorAdjustmentRemaining -= applied;
+    }
+    if (priorAdjustmentRemaining > 0n && productCorrections.length) {
+      productCorrections[0].adjustmentCents -= priorAdjustmentRemaining;
+    }
+  }
+  corrections.forEach((line: any) => {
+    const split = splitLandedCostCorrection({
+      amountCents: line.adjustmentCents > 0n ? line.adjustmentCents : 0n,
+      inventoryValueCents: line.inventoryValueCents,
+      onHand: line.onHand,
+      totalReceiptQuantity: receiptQuantityByProduct.get(line.productId) ?? 0,
+    });
+    line.averageUnitCostZmw = formatCents(split.averageUnitCostCents);
+    line.inventoryCents = split.inventoryCents;
+    line.cogsCents = split.cogsCents;
   });
   const hasNegativeLine = corrections.some((line: any) => line.adjustmentCents < 0n);
   const adjustmentCents = corrections.reduce((total: bigint, line: any) =>

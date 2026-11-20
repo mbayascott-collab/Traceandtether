@@ -56,6 +56,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
   let purchaseOrderId: number | undefined;
   let shipmentId: number | undefined;
   let shipmentLineId: number | undefined;
+  let repeatedProductOrderId: number | undefined;
+  let repeatedProductShipmentId: number | undefined;
   let mismatchPurchaseOrderId: number | undefined;
   let mismatchShipmentId: number | undefined;
   let mismatchShipmentLineId: number | undefined;
@@ -509,6 +511,153 @@ test("database flow adjusts late import costs across partial receipts and sales"
       assert.equal(journalLinesAreBalanced(lines.map((line) => ({ ...line, accountKey: "return-test" }))), true);
     }
 
+    const { order: repeatedProductOrder } = await request("/api/purchase-orders", {
+      supplierId,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [
+        { productId, quantityOrdered: 5, unitPrice: "100.00" },
+        { productId, quantityOrdered: 5, unitPrice: "100.00" },
+      ],
+    }, 201);
+    repeatedProductOrderId = repeatedProductOrder.id;
+    const repeatedProductOrderLines = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, repeatedProductOrderId!))
+      .orderBy(purchaseOrderLines.id);
+    assert.equal(repeatedProductOrderLines.length, 2);
+    const { shipment: repeatedProductShipment } = await request("/api/shipments", {
+      purchaseOrderIds: [repeatedProductOrderId],
+      shipmentReference: `ACC-REPEATED-PRODUCT-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: repeatedProductOrderLines.map((line: any) => ({
+        purchaseOrderLineId: line.id, quantityShipped: 5,
+      })),
+    }, 201);
+    repeatedProductShipmentId = repeatedProductShipment.id;
+    const repeatedProductShipmentLines = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, repeatedProductShipmentId!))
+      .orderBy(shipmentLines.id);
+    assert.equal(repeatedProductShipmentLines.length, 2);
+    await patch(`/api/shipments/${repeatedProductShipmentId}/receive`, {
+      lines: repeatedProductShipmentLines.map((line: any) => ({
+        shipmentLineId: line.id, quantityReceived: 2,
+      })),
+    }, 200);
+    for (const line of repeatedProductShipmentLines) {
+      await request(`/api/inventory/receipts/${line.id}/post`, { locationId }, 201);
+    }
+    await request("/api/import-expenses", {
+      purchaseOrderId: repeatedProductOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `First repeated-product freight ${suffix}`,
+      amount: "100.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    const { orders: [firstRepeatedProductPreviewOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${repeatedProductOrderId}`, undefined, 200,
+    );
+    const firstRepeatedProductPreview = firstRepeatedProductPreviewOrder.adjustmentPreview;
+    assert.equal(firstRepeatedProductPreview.adjustmentAvailableZmw, "400.00");
+    const { journalEntry: firstRepeatedProductAdjustment } = await request(
+      `/api/landed-costs/${repeatedProductOrderId}/adjust`,
+      {
+        reviewedAmountZmw: firstRepeatedProductPreview.adjustmentAvailableZmw,
+        reviewedLines: firstRepeatedProductPreview.lines.map((line: any) => ({
+          lineId: line.lineId,
+          adjustmentZmw: line.adjustmentZmw,
+          inventoryZmw: line.inventoryZmw,
+          cogsZmw: line.cogsZmw,
+        })),
+        note: "Adjust first freight bill for repeated product",
+      },
+      201,
+    );
+    assert.equal(firstRepeatedProductAdjustment.sourceId, repeatedProductOrderId);
+
+    await request("/api/import-expenses", {
+      purchaseOrderId: repeatedProductOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Second repeated-product freight ${suffix}`,
+      amount: "50.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    await patch(`/api/shipments/${repeatedProductShipmentId}/receive`, {
+      lines: repeatedProductShipmentLines.map((line: any) => ({
+        shipmentLineId: line.id, quantityReceived: 3,
+      })),
+    }, 200);
+    for (const line of repeatedProductShipmentLines) {
+      await request(`/api/inventory/receipts/${line.id}/post`, { locationId }, 201);
+    }
+    const { orders: [incrementalRepeatedProductPreviewOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${repeatedProductOrderId}`, undefined, 200,
+    );
+    const incrementalRepeatedProductPreview = incrementalRepeatedProductPreviewOrder.adjustmentPreview;
+    assert.equal(incrementalRepeatedProductPreview.adjustmentAvailableZmw, "200.00");
+    assert.equal(incrementalRepeatedProductPreview.canPost, true);
+    assert.equal(incrementalRepeatedProductPreview.hasNegativeLine, false);
+    assert.equal(
+      incrementalRepeatedProductPreview.lines.reduce(
+        (total: number, line: any) => total + Number(line.adjustmentZmw), 0,
+      ),
+      200,
+    );
+    const { journalEntry: incrementalRepeatedProductAdjustment } = await request(
+      `/api/landed-costs/${repeatedProductOrderId}/adjust`,
+      {
+        reviewedAmountZmw: incrementalRepeatedProductPreview.adjustmentAvailableZmw,
+        reviewedLines: incrementalRepeatedProductPreview.lines.map((line: any) => ({
+          lineId: line.lineId,
+          adjustmentZmw: line.adjustmentZmw,
+          inventoryZmw: line.inventoryZmw,
+          cogsZmw: line.cogsZmw,
+        })),
+        note: "Adjust incremental freight for repeated product",
+      },
+      201,
+    );
+    const repeatedProductAdjustmentLines = await db.select({
+      journalEntryId: journalLines.journalEntryId,
+      accountKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(inArray(journalLines.journalEntryId, [
+        firstRepeatedProductAdjustment.id, incrementalRepeatedProductAdjustment.id,
+      ]));
+    for (const [entryId, expectedAmount] of [
+      [firstRepeatedProductAdjustment.id, 400],
+      [incrementalRepeatedProductAdjustment.id, 200],
+    ]) {
+      const lines = repeatedProductAdjustmentLines.filter((line) => line.journalEntryId === entryId);
+      assert.equal(journalLinesAreBalanced(lines.map((line) => ({
+        accountKey: line.accountKey ?? "",
+        debitZmw: line.debitZmw,
+        creditZmw: line.creditZmw,
+      }))), true);
+      assert.equal(lines.reduce((total, line) => total + Number(line.debitZmw), 0), expectedAmount);
+      assert.equal(lines.reduce((total, line) => total + Number(line.creditZmw), 0), expectedAmount);
+    }
+
     const { order: mismatchOrder } = await request("/api/purchase-orders", {
       supplierId,
       currency: "CNY",
@@ -635,12 +784,12 @@ test("database flow adjusts late import costs across partial receipts and sales"
           WHERE journal_entry_id IN (
             SELECT id FROM journal_entries
             WHERE (source_type = 'import_expense' AND source_id IN (
-              SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4)
+              SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4, $5)
             ))
             OR (source_type = 'stock_receipt' AND source_id IN (
               SELECT id FROM inventory_movements WHERE product_id = $2
             ))
-            OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4))
+            OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4, $5))
             OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
               SELECT id FROM sales_deliveries WHERE sales_order_id = $3
             ))
@@ -652,16 +801,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
               )
             ))
           )
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0]);
+        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0, repeatedProductOrderId ?? 0]);
         await client.query(`
           DELETE FROM journal_entries
           WHERE (source_type = 'import_expense' AND source_id IN (
-            SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4)
+            SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4, $5)
           ))
           OR (source_type = 'stock_receipt' AND source_id IN (
             SELECT id FROM inventory_movements WHERE product_id = $2
           ))
-          OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4))
+          OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4, $5))
           OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
             SELECT id FROM sales_deliveries WHERE sales_order_id = $3
           ))
@@ -672,7 +821,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
               )
             )
           ))
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0]);
+        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0, repeatedProductOrderId ?? 0]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
       }
       if (deliveryId) await client.query(
@@ -704,6 +853,16 @@ test("database flow adjusts late import costs across partial receipts and sales"
         }
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [mismatchPurchaseOrderId]);
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [mismatchPurchaseOrderId]);
+      }
+      if (repeatedProductOrderId) {
+        await client.query("DELETE FROM import_expenses WHERE purchase_order_id = $1", [repeatedProductOrderId]);
+        if (repeatedProductShipmentId) {
+          await client.query("DELETE FROM shipment_lines WHERE shipment_id = $1", [repeatedProductShipmentId]);
+          await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [repeatedProductShipmentId]);
+          await client.query("DELETE FROM shipments WHERE id = $1", [repeatedProductShipmentId]);
+        }
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [repeatedProductOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [repeatedProductOrderId]);
       }
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);

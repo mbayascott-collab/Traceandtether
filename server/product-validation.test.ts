@@ -136,14 +136,14 @@ test("validates quotation currency, amounts, quantities, and calendar dates", ()
   assert.equal(supplierQuoteInputSchema.safeParse({ ...quote, validUntil: "2026-02-30" }).success, false);
 });
 
-test("validates purchase order rates, lines, and duplicate products", () => {
+test("validates purchase order rates and repeated product lines", () => {
   const order = {
     supplierId: 1, currency: "cny", exchangeRateToZmw: "3.25000000", expectedAt: null, notes: null,
     lines: [{ productId: 2, quantityOrdered: 4, unitPrice: "12.50" }],
   };
   assert.equal(purchaseOrderInputSchema.parse(order).currency, "CNY");
   assert.equal(purchaseOrderInputSchema.safeParse({ ...order, exchangeRateToZmw: "0" }).success, false);
-  assert.equal(purchaseOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, false);
+  assert.equal(purchaseOrderInputSchema.safeParse({ ...order, lines: [...order.lines, ...order.lines] }).success, true);
   assert.equal(purchaseOrderInputSchema.safeParse({ ...order, lines: [{ ...order.lines[0], unitPrice: "-1" }] }).success, false);
 });
 

@@ -163,12 +163,7 @@ export const purchaseOrderInputSchema = z.object({
   expectedAt: validDate,
   notes: nullableText(5_000),
   lines: z.array(purchaseOrderLineSchema).min(1).max(100),
-}).strict().superRefine((order, context) => {
-  const productIds = order.lines.map((line) => line.productId);
-  if (new Set(productIds).size !== productIds.length) {
-    context.addIssue({ code: "custom", path: ["lines"], message: "Each product can appear only once per order." });
-  }
-});
+}).strict();
 
 export const purchaseOrderUpdateSchema = z.object({
   status: z.enum(["ordered", "cancelled"]),

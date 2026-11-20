@@ -1,0 +1,1 @@
+DROP INDEX "purchase_order_lines_product_unique";

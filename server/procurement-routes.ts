@@ -41,7 +41,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     const [supplier] = await db.select({ status: suppliers.status }).from(suppliers)
       .where(eq(suppliers.id, input.supplierId)).limit(1);
     if (!supplier || supplier.status !== "active") return invalid(res, "Choose an active supplier.");
-    const productIds = lines.map((line) => line.productId);
+    const productIds = [...new Set(lines.map((line) => line.productId))];
     const existingProducts = await db.select({ id: products.id }).from(products).where(inArray(products.id, productIds));
     if (existingProducts.length !== productIds.length) return invalid(res, "One or more products could not be found.");
     try {
@@ -62,7 +62,7 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
       });
       res.status(201).json({ order });
     } catch (error) {
-      if (apiError(error) === "23505") return res.status(409).json({ error: "The order number or product line is duplicated." });
+      if (apiError(error) === "23505") return res.status(409).json({ error: "The order number is already in use." });
       throw error;
     }
   });

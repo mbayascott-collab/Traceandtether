@@ -322,7 +322,6 @@ export const purchaseOrderLines = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("purchase_order_lines_product_unique").on(table.purchaseOrderId, table.productId),
     index("purchase_order_lines_order_idx").on(table.purchaseOrderId),
     check("purchase_order_lines_quantity_positive", sql`${table.quantityOrdered} > 0`),
     check("purchase_order_lines_price_nonnegative", sql`${table.unitPrice} >= 0`),
