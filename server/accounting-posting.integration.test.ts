@@ -1022,12 +1022,19 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(businessAuditLogs.action, "updated"),
     ));
     assert.ok(rejectedLinkAudits.every((audit) => !audit.changedFields.includes("shipmentLineId")));
+    // Simulate a receipt movement larger than the matching shipment line's
+    // stocked quantity, so this request reaches the capacity conflict branch
+    // instead of failing the earlier product-identity validation.
+    await db.update(inventoryMovements).set({ quantityDelta: 5 })
+      .where(eq(inventoryMovements.id, mismatchMovement.id));
     const overCapacityLink = await fetch(`${baseUrl}/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ shipmentLineId }),
+      body: JSON.stringify({ shipmentLineId: mismatchShipmentLineId }),
     });
     assert.equal(overCapacityLink.status, 409);
+    await db.update(inventoryMovements).set({ quantityDelta: 4 })
+      .where(eq(inventoryMovements.id, mismatchMovement.id));
     await request(`/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
       shipmentLineId: mismatchShipmentLineId,
     }, 200);

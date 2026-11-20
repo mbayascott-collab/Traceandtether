@@ -3,12 +3,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import { and, eq, isNull, like } from "drizzle-orm";
-import test from "node:test";
+import { after, test } from "node:test";
 import {
   businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
   journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
   purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
+
+if (process.env.DATABASE_URL) {
+  after(async () => {
+    const { pool } = await import("./db");
+    await pool.end();
+  });
+}
 
 test("route mutations across business areas keep their audit history and actor", {
   skip: !process.env.DATABASE_URL,
@@ -28,7 +35,6 @@ test("route mutations across business areas keep their audit history and actor",
   );
   if (!auditTable.rows[0]?.exists) {
     t.skip("requires the business audit database migration");
-    await pool.end();
     return;
   }
   const publicShopTables = await pool.query(
@@ -62,7 +68,6 @@ test("route mutations across business areas keep their audit history and actor",
   }
   if (requiredColumns.size > 0) {
     t.skip("requires the current audit, accounting, and public shop database migrations");
-    await pool.end();
     return;
   }
 
@@ -151,6 +156,7 @@ test("route mutations across business areas keep their audit history and actor",
   let marketingCampaignId: number | undefined;
   let statementLineId: number | undefined;
   let paymentTestSalesOrderId: number | undefined;
+  let paymentTestReceiptId: number | undefined;
   let paymentTestPurchaseOrderId: number | undefined;
   let paymentTestPayableJournalKey: string | undefined;
   let publicOrderNumber: string | undefined;
@@ -430,10 +436,25 @@ test("route mutations across business areas keep their audit history and actor",
     assert.ok(statementLine);
     statementLineId = statementLine.id;
     await expectAudit("payment_statement_line", statementLineId, "created");
+    const [statementMatchPayment] = await db.insert(businessPayments).values({
+      paymentNumber: `AUD-STATEMENT-MATCH-${safeSuffix.slice(0, 12)}`,
+      direction: "customer_receipt",
+      salesOrderId: paymentTestSalesOrderId!,
+      amountZmw: "1.00",
+      paymentDate: "2026-11-18",
+      method: "cash",
+      reference: `Audit statement match ${suffix}`,
+    }).returning();
+    paymentTestReceiptId = statementMatchPayment.id;
     await expectStatus("/api/payments/reconciliation/match", {
-      lineId: statementLineId, paymentId: null,
+      lineId: statementLineId, paymentId: statementMatchPayment.id,
     }, "PUT", 200);
-    await expectAudit("payment_statement_line", statementLineId, "updated");
+    const [matchedStatementLine] = await db.select().from(paymentStatementLines)
+      .where(eq(paymentStatementLines.id, statementLineId));
+    assert.equal(matchedStatementLine.matchedPaymentId, statementMatchPayment.id);
+    await expectAudit(
+      "payment_statement_line", statementLineId, "updated", actorId, actorEmail, ["matchedPaymentId"],
+    );
 
     // Marketing: create, update, and delete a customer group via HTTP.
     const groupBody = {
@@ -728,6 +749,9 @@ test("route mutations across business areas keep their audit history and actor",
       if (statementLineId) await client.query(
         "DELETE FROM payment_statement_lines WHERE id = $1", [statementLineId],
       );
+      if (paymentTestReceiptId) await client.query(
+        "DELETE FROM business_payments WHERE id = $1", [paymentTestReceiptId],
+      );
       if (paymentTestSalesOrderId) {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [paymentTestSalesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [paymentTestSalesOrderId]);
@@ -793,7 +817,6 @@ test("route mutations across business areas keep their audit history and actor",
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
 });
@@ -984,7 +1007,6 @@ test("historical receipt repair routes are owner-only", {
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
 });
