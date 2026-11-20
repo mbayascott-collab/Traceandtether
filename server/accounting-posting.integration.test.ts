@@ -58,6 +58,12 @@ test("database flow adjusts late import costs across partial receipts and sales"
   let shipmentLineId: number | undefined;
   let repeatedProductOrderId: number | undefined;
   let repeatedProductShipmentId: number | undefined;
+  let multiProductAId: number | undefined;
+  let multiProductBId: number | undefined;
+  let multiProductOrderId: number | undefined;
+  let multiProductShipmentId: number | undefined;
+  let multiProductSalesOrderId: number | undefined;
+  let multiProductDeliveryId: number | undefined;
   let mismatchPurchaseOrderId: number | undefined;
   let mismatchShipmentId: number | undefined;
   let mismatchShipmentLineId: number | undefined;
@@ -658,6 +664,253 @@ test("database flow adjusts late import costs across partial receipts and sales"
       assert.equal(lines.reduce((total, line) => total + Number(line.creditZmw), 0), expectedAmount);
     }
 
+    const [multiProductA] = await db.insert(products).values({
+      sku: `ACC-MULTI-A-${suffix}`,
+      name: `Accounting multi-product A ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    multiProductAId = multiProductA.id;
+    const [multiProductB] = await db.insert(products).values({
+      sku: `ACC-MULTI-B-${suffix}`,
+      name: `Accounting multi-product B ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    multiProductBId = multiProductB.id;
+    const { order: multiProductOrder } = await request("/api/purchase-orders", {
+      supplierId,
+      currency: "CNY",
+      exchangeRateToZmw: "2",
+      expectedAt: null,
+      notes: null,
+      lines: [
+        { productId: multiProductAId, quantityOrdered: 10, unitPrice: "100.00" },
+        { productId: multiProductBId, quantityOrdered: 10, unitPrice: "300.00" },
+      ],
+    }, 201);
+    multiProductOrderId = multiProductOrder.id;
+    const multiProductOrderLines = await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, multiProductOrderId!))
+      .orderBy(purchaseOrderLines.id);
+    assert.equal(multiProductOrderLines.length, 2);
+    const { shipment: multiProductShipment } = await request("/api/shipments", {
+      purchaseOrderIds: [multiProductOrderId],
+      shipmentReference: `ACC-MULTI-PRODUCT-${suffix}`,
+      carrier: null,
+      trackingNumber: null,
+      shippedAt: null,
+      expectedAt: null,
+      notes: null,
+      lines: multiProductOrderLines.map((line: any) => ({
+        purchaseOrderLineId: line.id, quantityShipped: 10,
+      })),
+    }, 201);
+    multiProductShipmentId = multiProductShipment.id;
+    const multiProductShipmentLines = await db.select().from(shipmentLines)
+      .where(eq(shipmentLines.shipmentId, multiProductShipmentId!))
+      .orderBy(shipmentLines.id);
+    await request("/api/import-expenses", {
+      purchaseOrderId: multiProductOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Initial multi-product freight ${suffix}`,
+      amount: "40.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    await patch(`/api/shipments/${multiProductShipmentId}/receive`, {
+      lines: multiProductShipmentLines.map((line: any) => ({
+        shipmentLineId: line.id, quantityReceived: 4,
+      })),
+    }, 200);
+    for (const line of multiProductShipmentLines) {
+      await request(`/api/inventory/receipts/${line.id}/post`, { locationId }, 201);
+    }
+
+    await request("/api/import-expenses", {
+      purchaseOrderId: multiProductOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Second multi-product freight ${suffix}`,
+      amount: "20.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-19",
+      reference: null,
+      notes: null,
+    }, 201);
+    const { order: multiProductSalesOrder } = await request("/api/sales-orders", {
+      customerId,
+      deliveryAddress: null,
+      notes: null,
+      lines: [{ productId: multiProductAId, quantity: 2, unitPriceZmw: "500.00" }],
+    }, 201);
+    multiProductSalesOrderId = multiProductSalesOrder.id;
+    await request(`/api/sales-orders/${multiProductSalesOrderId}/confirm`, {}, 200);
+    const [multiProductSalesLine] = await db.select().from(salesOrderLines)
+      .where(eq(salesOrderLines.salesOrderId, multiProductSalesOrderId!));
+    const { delivery: multiProductDelivery } = await request(
+      `/api/sales-orders/${multiProductSalesOrderId}/deliveries`,
+      {
+        idempotencyKey: randomUUID(),
+        deliveryDate: "2026-11-19",
+        lines: [{ salesOrderLineId: multiProductSalesLine.id, quantity: 2 }],
+      },
+      201,
+    );
+    multiProductDeliveryId = multiProductDelivery.id;
+
+    const { orders: [initialMultiProductOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${multiProductOrderId}`, undefined, 200,
+    );
+    const initialMultiProductPreview = initialMultiProductOrder.adjustmentPreview;
+    assert.equal(initialMultiProductPreview.allocatedExpensesZmw, "600.00");
+    assert.equal(initialMultiProductPreview.receiptClearedTotalZmw, "160.00");
+    assert.equal(initialMultiProductPreview.clearingBalanceZmw, "440.00");
+    assert.equal(initialMultiProductPreview.adjustmentAvailableZmw, "80.00");
+    assert.equal(initialMultiProductPreview.unpostedClearingZmw, "360.00");
+    assert.deepEqual(initialMultiProductPreview.lines.map((line: any) => [
+      line.productId, line.stockedQuantity, line.onHand, line.adjustmentZmw,
+      line.inventoryZmw, line.cogsZmw,
+    ]), [
+      [multiProductAId, 4, 2, "20.00", "10.00", "10.00"],
+      [multiProductBId, 4, 4, "60.00", "60.00", "0.00"],
+    ]);
+    const { journalEntry: initialMultiProductAdjustment } = await request(
+      `/api/landed-costs/${multiProductOrderId}/adjust`,
+      {
+        reviewedAmountZmw: initialMultiProductPreview.adjustmentAvailableZmw,
+        reviewedLines: initialMultiProductPreview.lines.map((line: any) => ({
+          lineId: line.lineId,
+          adjustmentZmw: line.adjustmentZmw,
+          inventoryZmw: line.inventoryZmw,
+          cogsZmw: line.cogsZmw,
+        })),
+        note: "Review initial freight split across products",
+      },
+      201,
+    );
+    assert.equal(initialMultiProductAdjustment.sourceId, multiProductOrderId);
+
+    await request("/api/import-expenses", {
+      purchaseOrderId: multiProductOrderId,
+      shipmentId: null,
+      category: "Freight",
+      description: `Later multi-product freight ${suffix}`,
+      amount: "10.00",
+      currency: "USD",
+      exchangeRateToZmw: "10",
+      basis: "value",
+      incurredAt: "2026-11-20",
+      reference: null,
+      notes: null,
+    }, 201);
+    await patch(`/api/shipments/${multiProductShipmentId}/receive`, {
+      lines: multiProductShipmentLines.map((line: any) => ({
+        shipmentLineId: line.id, quantityReceived: 7,
+      })),
+    }, 200);
+    for (const line of multiProductShipmentLines) {
+      await request(`/api/inventory/receipts/${line.id}/post`, { locationId }, 201);
+    }
+    const { orders: [incrementalMultiProductOrder] } = await request(
+      `/api/landed-costs?purchaseOrderId=${multiProductOrderId}`, undefined, 200,
+    );
+    const incrementalMultiProductPreview = incrementalMultiProductOrder.adjustmentPreview;
+    assert.equal(incrementalMultiProductPreview.allocatedExpensesZmw, "700.00");
+    assert.equal(incrementalMultiProductPreview.receiptClearedTotalZmw, "370.00");
+    assert.equal(incrementalMultiProductPreview.priorAdjustmentsClearedZmw, "80.00");
+    assert.equal(incrementalMultiProductPreview.clearingBalanceZmw, "250.00");
+    assert.equal(incrementalMultiProductPreview.adjustmentAvailableZmw, "40.00");
+    assert.equal(incrementalMultiProductPreview.unpostedClearingZmw, "210.00");
+    assert.deepEqual(incrementalMultiProductPreview.receipts.map((receipt: any) => [
+      receipt.productName, receipt.quantity, receipt.clearedAmountZmw,
+    ]), [
+      [multiProductA.name, 4, "40.00"],
+      [multiProductB.name, 4, "120.00"],
+      [multiProductA.name, 3, "52.50"],
+      [multiProductB.name, 3, "157.50"],
+    ]);
+    assert.deepEqual(incrementalMultiProductPreview.lines.map((line: any) => [
+      line.productId, line.stockedQuantity, line.onHand, line.adjustmentZmw,
+      line.inventoryZmw, line.cogsZmw,
+    ]), [
+      [multiProductAId, 7, 5, "10.00", "7.14", "2.86"],
+      [multiProductBId, 7, 7, "30.00", "30.00", "0.00"],
+    ]);
+    const { journalEntry: incrementalMultiProductAdjustment } = await request(
+      `/api/landed-costs/${multiProductOrderId}/adjust`,
+      {
+        reviewedAmountZmw: incrementalMultiProductPreview.adjustmentAvailableZmw,
+        reviewedLines: incrementalMultiProductPreview.lines.map((line: any) => ({
+          lineId: line.lineId,
+          adjustmentZmw: line.adjustmentZmw,
+          inventoryZmw: line.inventoryZmw,
+          cogsZmw: line.cogsZmw,
+        })),
+        note: "Review incremental freight split across products",
+      },
+      201,
+    );
+    assert.equal(incrementalMultiProductAdjustment.sourceId, multiProductOrderId);
+
+    const multiProductAdjustmentEntries = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "landed_cost_adjustment"),
+      eq(journalEntries.sourceId, multiProductOrderId!),
+    ));
+    assert.deepEqual(
+      multiProductAdjustmentEntries.map((entry) => entry.id).sort(),
+      [initialMultiProductAdjustment.id, incrementalMultiProductAdjustment.id].sort(),
+    );
+    const multiProductJournalLines = await db.select({
+      journalEntryId: journalLines.journalEntryId,
+      accountKey: accountingAccounts.systemKey,
+      productId: journalLines.productId,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(inArray(journalLines.journalEntryId, [
+        initialMultiProductAdjustment.id, incrementalMultiProductAdjustment.id,
+      ]));
+    for (const [entryId, expectedLines] of [
+      [initialMultiProductAdjustment.id, [
+        ["inventory", multiProductAId, "10.00", "0.00"],
+        ["cost_of_goods_sold", multiProductAId, "10.00", "0.00"],
+        ["inventory", multiProductBId, "60.00", "0.00"],
+        ["landed_cost_clearing", null, "0.00", "80.00"],
+      ]],
+      [incrementalMultiProductAdjustment.id, [
+        ["inventory", multiProductAId, "7.14", "0.00"],
+        ["cost_of_goods_sold", multiProductAId, "2.86", "0.00"],
+        ["inventory", multiProductBId, "30.00", "0.00"],
+        ["landed_cost_clearing", null, "0.00", "40.00"],
+      ]],
+    ] as [number, (string | number | null)[][]][]) {
+      const lines = multiProductJournalLines.filter((line) => line.journalEntryId === entryId);
+      assert.deepEqual(lines.map((line) => [
+        line.accountKey, line.productId, line.debitZmw, line.creditZmw,
+      ]).sort((left, right) => String(left[0]).localeCompare(String(right[0])) || Number(left[1] ?? 0) - Number(right[1] ?? 0)),
+      expectedLines.sort((left, right) => String(left[0]).localeCompare(String(right[0])) || Number(left[1] ?? 0) - Number(right[1] ?? 0)));
+      assert.equal(journalLinesAreBalanced(lines.map((line) => ({
+        accountKey: line.accountKey ?? "",
+        debitZmw: line.debitZmw,
+        creditZmw: line.creditZmw,
+      }))), true, `Multi-product adjustment journal ${entryId} is unbalanced`);
+    }
+    const { orders: [afterIncrementalMultiProductAdjustment] } = await request(
+      `/api/landed-costs?purchaseOrderId=${multiProductOrderId}`, undefined, 200,
+    );
+    assert.equal(afterIncrementalMultiProductAdjustment.adjustmentPreview.clearingBalanceZmw, "210.00");
+    assert.equal(afterIncrementalMultiProductAdjustment.adjustmentPreview.adjustmentAvailableZmw, "0.00");
+    assert.equal(afterIncrementalMultiProductAdjustment.adjustmentPreview.unpostedClearingZmw, "210.00");
+
     const { order: mismatchOrder } = await request("/api/purchase-orders", {
       supplierId,
       currency: "CNY",
@@ -778,60 +1031,81 @@ test("database flow adjusts late import costs across partial receipts and sales"
       if (auditTable.rows[0]?.exists) {
         await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [testEmail]);
       }
-      if (productId) {
+      if (productId || multiProductAId || multiProductBId) {
         await client.query(`
           DELETE FROM journal_lines
           WHERE journal_entry_id IN (
             SELECT id FROM journal_entries
             WHERE (source_type = 'import_expense' AND source_id IN (
-              SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4, $5)
+              SELECT id FROM import_expenses WHERE purchase_order_id = ANY($1::int[])
             ))
             OR (source_type = 'stock_receipt' AND source_id IN (
-              SELECT id FROM inventory_movements WHERE product_id = $2
+              SELECT id FROM inventory_movements WHERE product_id = ANY($2::int[])
             ))
-            OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4, $5))
+            OR (source_type = 'landed_cost_adjustment' AND source_id = ANY($1::int[]))
             OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
-              SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+              SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($3::int[])
             ))
             OR (source_type IN ('sales_return', 'sales_return_cogs') AND source_id IN (
               SELECT id FROM inventory_movements WHERE sales_delivery_line_id IN (
                 SELECT id FROM sales_delivery_lines WHERE delivery_id IN (
-                  SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+                  SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($3::int[])
                 )
               )
             ))
           )
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0, repeatedProductOrderId ?? 0]);
+        `, [
+          [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
+          [productId, multiProductAId, multiProductBId].filter(Boolean),
+          [salesOrderId, multiProductSalesOrderId].filter(Boolean),
+        ]);
         await client.query(`
           DELETE FROM journal_entries
           WHERE (source_type = 'import_expense' AND source_id IN (
-            SELECT id FROM import_expenses WHERE purchase_order_id IN ($1, $4, $5)
+            SELECT id FROM import_expenses WHERE purchase_order_id = ANY($1::int[])
           ))
           OR (source_type = 'stock_receipt' AND source_id IN (
-            SELECT id FROM inventory_movements WHERE product_id = $2
+            SELECT id FROM inventory_movements WHERE product_id = ANY($2::int[])
           ))
-          OR (source_type = 'landed_cost_adjustment' AND source_id IN ($1, $4, $5))
+          OR (source_type = 'landed_cost_adjustment' AND source_id = ANY($1::int[]))
           OR (source_type IN ('sales_delivery', 'sales_delivery_cogs') AND source_id IN (
-            SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+            SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($3::int[])
           ))
           OR (source_type IN ('sales_return', 'sales_return_cogs') AND source_id IN (
             SELECT id FROM inventory_movements WHERE sales_delivery_line_id IN (
               SELECT id FROM sales_delivery_lines WHERE delivery_id IN (
-                SELECT id FROM sales_deliveries WHERE sales_order_id = $3
+                SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($3::int[])
               )
             )
           ))
-        `, [purchaseOrderId ?? 0, productId, salesOrderId ?? 0, mismatchPurchaseOrderId ?? 0, repeatedProductOrderId ?? 0]);
-        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        `, [
+          [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
+          [productId, multiProductAId, multiProductBId].filter(Boolean),
+          [salesOrderId, multiProductSalesOrderId].filter(Boolean),
+        ]);
+        await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [
+          [productId, multiProductAId, multiProductBId].filter(Boolean),
+        ]);
       }
       if (deliveryId) await client.query(
         "DELETE FROM sales_delivery_lines WHERE delivery_id = $1", [deliveryId],
       );
       if (deliveryId) await client.query("DELETE FROM sales_deliveries WHERE id = $1", [deliveryId]);
+      if (multiProductDeliveryId) await client.query(
+        "DELETE FROM sales_delivery_lines WHERE delivery_id = $1", [multiProductDeliveryId],
+      );
+      if (multiProductDeliveryId) await client.query(
+        "DELETE FROM sales_deliveries WHERE id = $1", [multiProductDeliveryId],
+      );
       if (salesOrderId) {
         await client.query("DELETE FROM inventory_reservations WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
+      }
+      if (multiProductSalesOrderId) {
+        await client.query("DELETE FROM inventory_reservations WHERE sales_order_id = $1", [multiProductSalesOrderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [multiProductSalesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [multiProductSalesOrderId]);
       }
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       if (purchaseOrderId) {
@@ -864,7 +1138,19 @@ test("database flow adjusts late import costs across partial receipts and sales"
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [repeatedProductOrderId]);
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [repeatedProductOrderId]);
       }
+      if (multiProductOrderId) {
+        await client.query("DELETE FROM import_expenses WHERE purchase_order_id = $1", [multiProductOrderId]);
+        if (multiProductShipmentId) {
+          await client.query("DELETE FROM shipment_lines WHERE shipment_id = $1", [multiProductShipmentId]);
+          await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [multiProductShipmentId]);
+          await client.query("DELETE FROM shipments WHERE id = $1", [multiProductShipmentId]);
+        }
+        await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [multiProductOrderId]);
+        await client.query("DELETE FROM purchase_orders WHERE id = $1", [multiProductOrderId]);
+      }
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (multiProductAId) await client.query("DELETE FROM products WHERE id = $1", [multiProductAId]);
+      if (multiProductBId) await client.query("DELETE FROM products WHERE id = $1", [multiProductBId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
       if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
       await client.query("COMMIT");
