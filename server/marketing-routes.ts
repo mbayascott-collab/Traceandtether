@@ -5,7 +5,7 @@ import type { Express, RequestHandler } from "express";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
 import { requireBusinessOwner } from "./access-control";
-import { accountingAccounts, customers, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
+import { accountingAccounts, customers, inventoryMovements, journalEntries, journalLines, marketingAttributions, marketingCampaigns, marketingContentItems, marketingCustomerGroups, marketingExpenses, products, salesDeliveryLines, salesDeliveries, salesOrderLines, salesOrders } from "../shared/schema";
 import { customerGroupContactsCsv, matchesCustomerGroup } from "../shared/marketing-customer-groups";
 import { campaignSchema, contentSchema, customerGroupSchema, marketingExpenseSchema } from "../shared/marketing-validation";
 import {
@@ -371,7 +371,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
     };
     if (!validDay(from) || !validDay(to) || (from && to && from > to)) return res.status(400).json({ error: "Choose a valid report date range." });
-    const [campaigns, expenses, attributions, orders, lines, allCustomers, deliveryRows, costLines, landedCostAdjustmentLines] = await Promise.all([
+    const [campaigns, expenses, attributions, orders, lines, allCustomers, deliveryRows, costLines, landedCostAdjustmentLines, returnLines] = await Promise.all([
       db.select().from(marketingCampaigns),
       db.select().from(marketingExpenses),
       db.select().from(marketingAttributions),
@@ -407,10 +407,23 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
           eq(journalEntries.sourceType, "landed_cost_adjustment"),
           eq(accountingAccounts.systemKey, "cost_of_goods_sold"),
         )),
+      db.select({
+        orderId: salesDeliveries.salesOrderId, returnDate: journalEntries.entryDate,
+        sourceType: journalEntries.sourceType, systemKey: accountingAccounts.systemKey,
+        debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+      }).from(journalEntries)
+        .innerJoin(journalLines, eq(journalLines.journalEntryId, journalEntries.id))
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .innerJoin(inventoryMovements, eq(inventoryMovements.id, journalEntries.sourceId))
+        .innerJoin(salesDeliveryLines, eq(salesDeliveryLines.id, inventoryMovements.salesDeliveryLineId))
+        .innerJoin(salesDeliveries, eq(salesDeliveries.id, salesDeliveryLines.deliveryId))
+        .where(inArray(journalEntries.sourceType, ["sales_return", "sales_return_cogs"])),
     ]);
     const revenueByOrder = new Map<number, bigint>();
     const revenueByOrderInRange = new Map<number, bigint>();
+    const returnCostByOrderInRange = new Map<number, bigint>();
     const deliveredInRange = new Set<number>();
+    const returnedInRange = new Set<number>();
     const ordersWithDeliveries = new Set(deliveryRows.map((row) => row.orderId));
     const inRange = (date: string) => (!from || date >= from) && (!to || date <= to);
     const { productCostByOrder, ordersMissingCost } = buildDeliveryCostTotals(
@@ -442,6 +455,22 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
         revenueByOrderInRange.set(row.orderId, (revenueByOrderInRange.get(row.orderId) ?? 0n) + value);
       }
     }
+    for (const row of returnLines) {
+      if (!inRange(row.returnDate)) continue;
+      if (row.sourceType === "sales_return" && row.systemKey === "sales_revenue") {
+        returnedInRange.add(row.orderId);
+        revenueByOrderInRange.set(
+          row.orderId,
+          (revenueByOrderInRange.get(row.orderId) ?? 0n) - cents(row.debitZmw),
+        );
+      } else if (row.sourceType === "sales_return_cogs" && row.systemKey === "cost_of_goods_sold") {
+        returnedInRange.add(row.orderId);
+        returnCostByOrderInRange.set(
+          row.orderId,
+          (returnCostByOrderInRange.get(row.orderId) ?? 0n) + cents(row.creditZmw),
+        );
+      }
+    }
     for (const line of lines) {
       const order = orders.find((item) => item.id === line.salesOrderId);
       if (order?.status !== "fulfilled" || ordersWithDeliveries.has(order.id)) continue;
@@ -471,7 +500,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     let unattributedRevenue = 0n, unattributedOrders = 0, generalSpend = 0n;
     let campaignLinkOrders = 0, ordersWithoutCampaignLinks = 0;
     for (const order of orders) {
-      if (deliveredInRange.has(order.id)) {
+      if (deliveredInRange.has(order.id) || returnedInRange.has(order.id)) {
         const revenue = revenueByOrderInRange.get(order.id) ?? 0n;
         const attribution = attributedCampaign.get(order.id);
         if (attribution?.source === "campaign_link") campaignLinkOrders += 1;
@@ -485,7 +514,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
             stat.revenue += revenue;
             const deliveryCost = productCostByOrder.get(order.id) ?? 0n;
             const landedCostAdjustment = landedCostAdjustmentByOrder.get(order.id) ?? 0n;
-            stat.productCost += deliveryCost + landedCostAdjustment;
+            stat.productCost += deliveryCost + landedCostAdjustment - (returnCostByOrderInRange.get(order.id) ?? 0n);
             stat.landedCostAdjustment += landedCostAdjustment;
             if (ordersMissingCost.has(order.id)) stat.missingCostOrderNumbers.add(order.orderNumber);
             for (const productId of unallocatedProductsByOrder.get(order.id) ?? []) stat.unallocatedCostProducts.add(productId);

@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
-  accountingAccounts, businessAuditLogs, customers, journalEntries, journalLines, marketingAttributions,
+  accountingAccounts, businessAuditLogs, customers, inventoryMovements, journalEntries, journalLines, marketingAttributions,
   marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
@@ -406,20 +406,20 @@ test("marketing report counts partial campaign deliveries once and matches poste
       salesOrderId: missingCostOrder.id, productId: product.id, quantity: 2, unitPriceZmw: "50.00",
     }).returning();
 
-    const deliveries = await Promise.all([
-      db.insert(salesDeliveries).values({
+    const deliveries = [
+      await db.insert(salesDeliveries).values({
         deliveryNumber: `MR-${suffix.slice(0, 12)}-F1`, salesOrderId: fullyCostedOrder.id, deliveryDate: reportDate,
       }).returning(),
-      db.insert(salesDeliveries).values({
+      await db.insert(salesDeliveries).values({
         deliveryNumber: `MR-${suffix.slice(0, 12)}-F2`, salesOrderId: fullyCostedOrder.id, deliveryDate: reportDate,
       }).returning(),
-      db.insert(salesDeliveries).values({
+      await db.insert(salesDeliveries).values({
         deliveryNumber: `MR-${suffix.slice(0, 12)}-M1`, salesOrderId: missingCostOrder.id, deliveryDate: reportDate,
       }).returning(),
-      db.insert(salesDeliveries).values({
+      await db.insert(salesDeliveries).values({
         deliveryNumber: `MR-${suffix.slice(0, 12)}-M2`, salesOrderId: missingCostOrder.id, deliveryDate: reportDate,
       }).returning(),
-    ]);
+    ];
     const [fullDeliveryOne, fullDeliveryTwo, missingDeliveryOne, missingDeliveryTwo] =
       deliveries.map(([delivery]) => delivery);
     await db.insert(salesDeliveryLines).values([
@@ -818,6 +818,43 @@ test("marketing report counts partial campaign deliveries once and matches poste
       })),
     ]);
 
+    const [returnedMovement] = await db.insert(inventoryMovements).values({
+      productId: crossPeriodProduct.id,
+      kind: "stock_return",
+      quantityDelta: 1,
+      reason: `${prefix} campaign report test return`,
+      reference: inRangeDelivery.deliveryNumber,
+      sourceKey: `${prefix}-return-movement`,
+      salesDeliveryLineId: (await db.select({ id: salesDeliveryLines.id })
+        .from(salesDeliveryLines)
+        .where(eq(salesDeliveryLines.deliveryId, inRangeDelivery.id))
+        .limit(1))[0].id,
+    }).returning();
+    await Promise.all([
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-return-revenue`,
+        sourceType: "sales_return",
+        sourceId: returnedMovement.id,
+        memo: `${prefix} campaign report return revenue reversal`,
+        entryDate: "2025-01-13",
+        lines: [
+          { accountKey: "sales_revenue", debitZmw: "100.00" },
+          { accountKey: "accounts_receivable", creditZmw: "100.00" },
+        ],
+      })),
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-return-cogs`,
+        sourceType: "sales_return_cogs",
+        sourceId: returnedMovement.id,
+        memo: `${prefix} campaign report return cost reversal`,
+        entryDate: "2025-01-13",
+        lines: [
+          { accountKey: "inventory", productId: crossPeriodProduct.id, debitZmw: "10.00" },
+          { accountKey: "cost_of_goods_sold", productId: crossPeriodProduct.id, creditZmw: "10.00" },
+        ],
+      })),
+    ]);
+
     const crossPeriodReport = await request(
       "/api/marketing/reports?from=2025-01-10&to=2025-01-10",
     );
@@ -885,6 +922,27 @@ test("marketing report counts partial campaign deliveries once and matches poste
         )),
       8500n,
     );
+
+    const returnDateReport = await request(
+      "/api/marketing/reports?from=2025-01-13&to=2025-01-13",
+    );
+    assert.equal(returnDateReport.response.status, 200, JSON.stringify(returnDateReport.payload));
+    const returnDateCampaign = returnDateReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    assert.deepEqual({
+      orderCount: returnDateCampaign.orderCount,
+      attributedRevenueZmw: returnDateCampaign.attributedRevenueZmw,
+      productCostZmw: returnDateCampaign.productCostZmw,
+      netContributionZmw: returnDateCampaign.netContributionZmw,
+    }, {
+      orderCount: 1,
+      attributedRevenueZmw: "-100.00",
+      productCostZmw: "-10.00",
+      netContributionZmw: "-90.00",
+    });
+    assert.equal(returnDateReport.payload.totals.attributedRevenueZmw, "-100.00");
+    assert.equal(returnDateReport.payload.totals.productCostZmw, "-10.00");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -897,6 +955,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
         [`${prefix}-%`],
       );
       await client.query("DELETE FROM journal_entries WHERE source_key LIKE $1", [`${prefix}-%`]);
+      await client.query("DELETE FROM inventory_movements WHERE source_key LIKE $1", [`${prefix}-return-%`]);
       await client.query(
         `DELETE FROM journal_lines WHERE journal_entry_id IN (
           SELECT id FROM journal_entries
