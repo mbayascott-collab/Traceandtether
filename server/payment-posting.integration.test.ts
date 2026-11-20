@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import test from "node:test";
 import {
   accountingAccounts, businessPayments, customers, journalEntries, journalLines,
-  products, purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, suppliers,
+  products, purchaseOrderLines, purchaseOrders, salesDeliveries, salesDeliveryLines, salesOrderLines, salesOrders, suppliers,
 } from "../shared/schema";
 import { cents, journalLinesAreBalanced } from "./accounting-posting";
 
@@ -53,6 +53,7 @@ test("payment routes post both directions to the selected funds account", {
   let supplierId: number | undefined;
   let productId: number | undefined;
   let salesOrderId: number | undefined;
+  let partiallyDeliveredOrderId: number | undefined;
   let purchaseOrderId: number | undefined;
   let payableJournalKey: string | undefined;
   const paymentIds: number[] = [];
@@ -187,6 +188,30 @@ test("payment routes post both directions to the selected funds account", {
       quantity: 1,
       unitPriceZmw: "100.00",
     });
+    const [partiallyDeliveredOrder] = await db.insert(salesOrders).values({
+      orderNumber: `PAY-PARTIAL-${shortId}`,
+      customerId,
+      status: "partially_fulfilled",
+      orderDate: "2026-11-18",
+    }).returning();
+    partiallyDeliveredOrderId = partiallyDeliveredOrder.id;
+    const [partiallyDeliveredLine] = await db.insert(salesOrderLines).values({
+      salesOrderId: partiallyDeliveredOrderId,
+      productId,
+      quantity: 10,
+      unitPriceZmw: "100.00",
+    }).returning();
+    const [partialDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `PAY-PARTIAL-D-${shortId}`,
+      idempotencyKey: `pay-partial-delivery-${suffix}`,
+      salesOrderId: partiallyDeliveredOrderId,
+      deliveryDate: "2026-11-18",
+    }).returning();
+    await db.insert(salesDeliveryLines).values({
+      deliveryId: partialDelivery.id,
+      salesOrderLineId: partiallyDeliveredLine.id,
+      quantity: 4,
+    });
 
     const [purchaseOrder] = await db.insert(purchaseOrders).values({
       orderNumber: `PAY-S-${shortId}`,
@@ -306,6 +331,35 @@ test("payment routes post both directions to the selected funds account", {
       assert.equal(lines.reduce((total, line) => total + cents(line.debitZmw), 0n), 6_000n);
     }
 
+    const partialAttempts = [
+      paymentRequest("customer_receipt", partiallyDeliveredOrderId!, "cash"),
+      paymentRequest("customer_receipt", partiallyDeliveredOrderId!, "cash"),
+    ].map((body, index) => ({
+      ...body,
+      amountZmw: "250.00",
+      reference: `PARTIAL-CONCURRENT-${index}-${suffix}`,
+    }));
+    const partialResults = await Promise.all(partialAttempts.map((body) => sendPayment(body)));
+    assert.deepEqual(partialResults.map(({ status }) => status).sort(), [201, 400]);
+    const partialAccepted = partialResults.find(({ status }) => status === 201);
+    const partialRejected = partialResults.find(({ status }) => status === 400);
+    assert.ok(partialAccepted);
+    assert.match(partialRejected?.payload.error ?? "", /outstanding balance of ZMW 150\.00/i);
+    const savedPartialPayments = await db.select().from(businessPayments)
+      .where(eq(businessPayments.salesOrderId, partiallyDeliveredOrderId!));
+    const acceptedPartialPayment = savedPartialPayments.find((payment) =>
+      partialAttempts.some((attempt) => attempt.idempotencyKey === payment.idempotencyKey));
+    const rejectedPartialAttempt = partialAttempts.find((attempt) =>
+      attempt.idempotencyKey !== acceptedPartialPayment?.idempotencyKey);
+    assert.ok(acceptedPartialPayment);
+    assert.ok(rejectedPartialAttempt);
+    assert.equal(savedPartialPayments.filter((payment) =>
+      partialAttempts.some((attempt) => attempt.idempotencyKey === payment.idempotencyKey)).length, 1);
+    assert.equal((await db.select().from(businessPayments)
+      .where(eq(businessPayments.idempotencyKey, rejectedPartialAttempt.idempotencyKey))).length, 0);
+    assert.equal((await db.select().from(journalEntries)
+      .where(eq(journalEntries.sourceKey, `payment-${acceptedPartialPayment.id}`))).length, 1);
+
     assert.deepEqual(
       (await db.select().from(businessPayments).where(eq(businessPayments.id, priorCustomerPayment.id)))[0],
       priorCustomerPaymentSnapshot.payment,
@@ -333,8 +387,8 @@ test("payment routes post both directions to the selected funds account", {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
       const fixturePayments = await client.query<{ id: number }>(
-        "SELECT id FROM business_payments WHERE sales_order_id = $1 OR purchase_order_id = $2",
-        [salesOrderId ?? null, purchaseOrderId ?? null],
+        "SELECT id FROM business_payments WHERE sales_order_id = ANY($1::int[]) OR purchase_order_id = $2",
+        [[salesOrderId, partiallyDeliveredOrderId].filter((id): id is number => id !== undefined), purchaseOrderId ?? null],
       );
       for (const payment of fixturePayments.rows) paymentIds.push(payment.id);
       const journalSourceKeys = [
@@ -354,6 +408,15 @@ test("payment routes post both directions to the selected funds account", {
       if (salesOrderId) {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
+      }
+      if (partiallyDeliveredOrderId) {
+        await client.query(
+          "DELETE FROM sales_delivery_lines WHERE delivery_id IN (SELECT id FROM sales_deliveries WHERE sales_order_id = $1)",
+          [partiallyDeliveredOrderId],
+        );
+        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = $1", [partiallyDeliveredOrderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [partiallyDeliveredOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [partiallyDeliveredOrderId]);
       }
       if (purchaseOrderId) {
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);

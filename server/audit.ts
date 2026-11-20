@@ -9,7 +9,7 @@ export async function recordBusinessAudit(
     entityId: number;
     recordLabel: string;
     actor: AuditActor;
-    action: "created" | "updated" | "deleted" | "approved";
+    action: "created" | "updated" | "deleted" | "approved" | "exported";
     changedFields?: string[];
   },
 ) {

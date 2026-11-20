@@ -7,7 +7,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   accountingAccounts, businessAuditLogs, businessPayments, customers, importExpenses, inventoryLocations, inventoryMovements,
   inventoryReservations,
-  journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, salesOrders, shipmentLines,
+  journalEntries, journalLines, paymentReminders, products, purchaseOrderLines, purchaseOrders, salesOrders, shipmentLines,
   salesDeliveryLines, salesOrderLines, suppliers,
 } from "../shared/schema";
 import { cents, journalLinesAreBalanced } from "./accounting-posting";
@@ -23,11 +23,13 @@ test("database flow adjusts late import costs across partial receipts and sales"
     { registerProcurementRoutes },
     { registerInventoryRoutes },
     { registerSalesRoutes },
+    { registerAccountingRoutes },
   ] = await Promise.all([
     import("./db"),
     import("./procurement-routes"),
     import("./inventory-routes"),
     import("./sales-routes"),
+    import("./accounting-routes"),
   ]);
   closeIntegrationPool = () => pool.end();
 
@@ -42,6 +44,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
   registerProcurementRoutes(app, owner);
   registerInventoryRoutes(app, owner);
   registerSalesRoutes(app, owner);
+  registerAccountingRoutes(app, owner);
 
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -193,9 +196,19 @@ test("database flow adjusts late import costs across partial receipts and sales"
     assert.equal(afterEarlyExpense.adjustmentPreview.adjustmentAvailableZmw, "400.00");
     assert.equal(afterEarlyExpense.adjustmentPreview.canPost, true);
     assert.equal(afterEarlyExpense.adjustmentPreview.unpostedClearingZmw, "600.00");
-    await request(`/api/inventory/receipt-journals/${earlyReceiptEntry.id}/link`, {
-      shipmentLineId,
-    }, 200);
+    const concurrentReceiptLinks = await Promise.all([1, 2].map(() => fetch(
+      `${baseUrl}/api/inventory/receipt-journals/${earlyReceiptEntry.id}/link`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ shipmentLineId }),
+      },
+    )));
+    const concurrentReceiptLinkPayloads = await Promise.all(
+      concurrentReceiptLinks.map((response) => response.json() as Promise<any>),
+    );
+    assert.deepEqual(concurrentReceiptLinks.map((response) => response.status).sort(), [200, 409]);
+    assert.equal(concurrentReceiptLinkPayloads.filter((payload) => payload.journalEntry).length, 1);
     const [relinkedReceiptEntry] = await db.select().from(journalEntries)
       .where(eq(journalEntries.id, earlyReceiptEntry.id));
     assert.equal(relinkedReceiptEntry.shipmentLineId, shipmentLineId);
@@ -205,7 +218,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
       eq(businessAuditLogs.actorEmail, testEmail),
       eq(businessAuditLogs.action, "updated"),
     ));
-    assert.ok(receiptLinkAudits.some((audit) => audit.changedFields.includes("shipmentLineId")));
+    assert.equal(receiptLinkAudits.length, 1);
+    assert.ok(receiptLinkAudits[0].changedFields.includes("shipmentLineId"));
     const { orders: [afterReceiptLink] } = await request(
       `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
     );
@@ -1243,10 +1257,12 @@ test("correcting receipt clearing restores a postable landed-cost adjustment", {
     { db, pool },
     { registerProcurementRoutes },
     { registerInventoryRoutes },
+    { registerAccountingRoutes },
   ] = await Promise.all([
     import("./db"),
     import("./procurement-routes"),
     import("./inventory-routes"),
+    import("./accounting-routes"),
   ]);
   closeIntegrationPool = () => pool.end();
 
@@ -1260,6 +1276,7 @@ test("correcting receipt clearing restores a postable landed-cost adjustment", {
   };
   registerProcurementRoutes(app, owner);
   registerInventoryRoutes(app, owner);
+  registerAccountingRoutes(app, owner);
 
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -1443,6 +1460,63 @@ test("correcting receipt clearing restores a postable landed-cost adjustment", {
       debitZmw: line.debitZmw,
       creditZmw: line.creditZmw,
     }))), true);
+
+    const [storedOrder] = await db.select().from(purchaseOrders)
+      .where(eq(purchaseOrders.id, purchaseOrderId!));
+    const filteredByPurchaseOrder = await request(
+      `/api/accounting?from=2000-01-01&to=2099-12-31&purchaseOrder=${encodeURIComponent(storedOrder.orderNumber)}`,
+      undefined,
+      200,
+    );
+    const purchaseOrderJournalIds = filteredByPurchaseOrder.entries.map((entry: any) => entry.id);
+    assert.ok(purchaseOrderJournalIds.includes(receiptEntry.id));
+    assert.ok(purchaseOrderJournalIds.includes(journalEntry.id));
+    assert.ok(filteredByPurchaseOrder.entries.every((entry: any) => entry.lines.length > 0));
+
+    const filteredByShipment = await request(
+      `/api/accounting?from=2000-01-01&to=2099-12-31&shipment=${encodeURIComponent(`ACC-REPAIR-SHIP-${suffix}`)}`,
+      undefined,
+      200,
+    );
+    assert.ok(filteredByShipment.entries.some((entry: any) => entry.id === receiptEntry.id));
+    const noMatchingJournals = await request(
+      `/api/accounting?from=2000-01-01&to=2099-12-31&purchaseOrder=${encodeURIComponent(`missing-${suffix}`)}`,
+      undefined,
+      200,
+    );
+    assert.deepEqual(noMatchingJournals.entries, []);
+
+    const updatedLandedCosts = await request(
+      `/api/landed-costs?purchaseOrderId=${purchaseOrderId}`, undefined, 200,
+    );
+    assert.ok(updatedLandedCosts.orders[0].adjustmentPreview.adjustments.some(
+      (adjustment: any) => adjustment.journalEntryId === journalEntry.id,
+    ));
+    const csvResponse = await fetch(`${baseUrl}/api/landed-costs/${purchaseOrderId}/receipt-clearing.csv`);
+    assert.equal(csvResponse.status, 200);
+    assert.match(csvResponse.headers.get("content-type") ?? "", /text\/csv/i);
+    assert.match(csvResponse.headers.get("content-disposition") ?? "", /receipt-clearing-/i);
+    const csv = await csvResponse.text();
+    assert.match(csv, /Reconciliation total/);
+    assert.match(csv, /80\.00/);
+    const exportAudits = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "receipt_clearing_report"),
+      eq(businessAuditLogs.entityId, purchaseOrderId!),
+      eq(businessAuditLogs.actorEmail, testEmail),
+      eq(businessAuditLogs.action, "exported"),
+    ));
+    assert.equal(exportAudits.length, 1);
+    assert.ok(exportAudits[0].createdAt instanceof Date);
+
+    const missingExport = await fetch(`${baseUrl}/api/landed-costs/2147483647/receipt-clearing.csv`);
+    assert.equal(missingExport.status, 404);
+    const failedExportAudits = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "receipt_clearing_report"),
+      eq(businessAuditLogs.entityId, 2147483647),
+      eq(businessAuditLogs.actorEmail, testEmail),
+      eq(businessAuditLogs.action, "exported"),
+    ));
+    assert.equal(failedExportAudits.length, 0);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();

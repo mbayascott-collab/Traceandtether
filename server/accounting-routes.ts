@@ -1,9 +1,10 @@
-import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import {
-  accountingAccounts, accountingCorrections, businessExpenses, journalEntries, journalLines, ownerFundTransactions,
+  accountingAccounts, accountingCorrections, businessExpenses, importExpenses, inventoryMovements, journalEntries, journalLines,
+  ownerFundTransactions, purchaseOrderLines, purchaseOrders, shipmentLines, shipmentPurchaseOrders, shipments,
 } from "../shared/schema";
 import { db } from "./db";
 import { recordBusinessAudit } from "./audit";
@@ -722,6 +723,21 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     const year = today.slice(0, 4);
     const from = String(req.query.from ?? `${year}-01-01`);
     const to = String(req.query.to ?? today);
+    const readReference = (key: string) => {
+      const raw = req.query[key];
+      if (raw === undefined) return "";
+      return typeof raw === "string" && raw.length <= 120 ? raw.trim() : null;
+    };
+    const purchaseOrderReference = readReference("purchaseOrder");
+    const shipmentReference = readReference("shipment");
+    if (purchaseOrderReference === null || shipmentReference === null) {
+      res.status(400).json({ error: "Enter one purchase order or shipment reference at a time." });
+      return;
+    }
+    if (purchaseOrderReference && shipmentReference) {
+      res.status(400).json({ error: "Filter by a purchase order or a shipment, not both." });
+      return;
+    }
     if (!dateQuery.safeParse(from).success || !dateQuery.safeParse(to).success || from > to) {
       res.status(400).json({ error: "Choose a valid start and end date." });
       return;
@@ -730,6 +746,105 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
     const result = await db.transaction(async (tx) => {
       await ensureAccountingAccounts(tx);
       const accounts = await tx.select().from(accountingAccounts).orderBy(accountingAccounts.code);
+      let journalEntryFilterIds: Set<number> | null = null;
+      if (purchaseOrderReference || shipmentReference) {
+        const purchaseOrderRows = purchaseOrderReference
+          ? await tx.select({ id: purchaseOrders.id }).from(purchaseOrders)
+            .where(eq(purchaseOrders.orderNumber, purchaseOrderReference))
+          : [];
+        let purchaseOrderIds: number[] | null = purchaseOrderReference
+          ? purchaseOrderRows.map((row) => row.id)
+          : null;
+        const shipmentRows = shipmentReference
+          ? await tx.select({ id: shipments.id }).from(shipments)
+            .where(eq(shipments.shipmentReference, shipmentReference))
+          : [];
+        let shipmentIds: number[] | null = shipmentReference
+          ? shipmentRows.map((row) => row.id)
+          : null;
+
+        if (shipmentIds !== null) {
+          const linkedOrderRows = shipmentIds.length
+            ? await tx.select({ purchaseOrderId: shipmentPurchaseOrders.purchaseOrderId })
+              .from(shipmentPurchaseOrders).where(inArray(shipmentPurchaseOrders.shipmentId, shipmentIds))
+            : [];
+          const legacyOrderRows = shipmentIds.length
+            ? await tx.select({ purchaseOrderId: shipments.purchaseOrderId }).from(shipments)
+              .where(inArray(shipments.id, shipmentIds))
+            : [];
+          const linkedOrderIds = [...new Set([
+            ...linkedOrderRows.map((row) => row.purchaseOrderId),
+            ...legacyOrderRows.map((row) => row.purchaseOrderId),
+          ])];
+          purchaseOrderIds = purchaseOrderIds === null
+            ? linkedOrderIds
+            : purchaseOrderIds.filter((id) => linkedOrderIds.includes(id));
+        }
+
+        if (purchaseOrderIds !== null) {
+          const linkedShipmentRows = purchaseOrderIds.length
+            ? await tx.select({ shipmentId: shipmentPurchaseOrders.shipmentId })
+              .from(shipmentPurchaseOrders).where(inArray(shipmentPurchaseOrders.purchaseOrderId, purchaseOrderIds))
+            : [];
+          const legacyShipmentRows = purchaseOrderIds.length
+            ? await tx.select({ id: shipments.id }).from(shipments)
+              .where(inArray(shipments.purchaseOrderId, purchaseOrderIds))
+            : [];
+          const linkedShipmentIds = [...new Set([
+            ...linkedShipmentRows.map((row) => row.shipmentId),
+            ...legacyShipmentRows.map((row) => row.id),
+          ])];
+          shipmentIds = shipmentIds === null
+            ? linkedShipmentIds
+            : shipmentIds.filter((id) => linkedShipmentIds.includes(id));
+        }
+
+        const linePredicates = [];
+        if (purchaseOrderIds?.length) linePredicates.push(inArray(purchaseOrderLines.purchaseOrderId, purchaseOrderIds));
+        if (shipmentIds?.length) linePredicates.push(inArray(shipmentLines.shipmentId, shipmentIds));
+        const relatedLineRows = linePredicates.length
+          ? await tx.select({ id: shipmentLines.id }).from(shipmentLines)
+            .innerJoin(purchaseOrderLines, eq(shipmentLines.purchaseOrderLineId, purchaseOrderLines.id))
+            .where(or(...linePredicates))
+          : [];
+        const relatedLineIds = new Set(relatedLineRows.map((row) => row.id));
+        const expensePredicates = [];
+        if (purchaseOrderIds?.length) expensePredicates.push(inArray(importExpenses.purchaseOrderId, purchaseOrderIds));
+        if (shipmentIds?.length) expensePredicates.push(inArray(importExpenses.shipmentId, shipmentIds));
+        const relatedExpenseRows = expensePredicates.length
+          ? await tx.select({ id: importExpenses.id }).from(importExpenses).where(or(...expensePredicates))
+          : [];
+        const relatedJournalIds = new Set<number>();
+        if (purchaseOrderIds?.length) {
+          const adjustmentRows = await tx.select({ id: journalEntries.id }).from(journalEntries).where(and(
+            eq(journalEntries.sourceType, "landed_cost_adjustment"),
+            inArray(journalEntries.sourceId, purchaseOrderIds),
+          ));
+          adjustmentRows.forEach((row) => relatedJournalIds.add(row.id));
+        }
+        if (relatedExpenseRows.length) {
+          const expenseJournalRows = await tx.select({ id: journalEntries.id }).from(journalEntries).where(and(
+            eq(journalEntries.sourceType, "import_expense"),
+            inArray(journalEntries.sourceId, relatedExpenseRows.map((row) => row.id)),
+          ));
+          expenseJournalRows.forEach((row) => relatedJournalIds.add(row.id));
+        }
+        if (relatedLineIds.size) {
+          const receiptJournalRows = await tx.select({
+            id: journalEntries.id,
+            shipmentLineId: journalEntries.shipmentLineId,
+            movementSourceKey: inventoryMovements.sourceKey,
+          }).from(journalEntries)
+            .leftJoin(inventoryMovements, eq(journalEntries.sourceId, inventoryMovements.id))
+            .where(eq(journalEntries.sourceType, "stock_receipt"));
+          for (const row of receiptJournalRows) {
+            const sourceKeyMatch = row.movementSourceKey?.match(/^shipment-line-(\d+)-to-\d+$/);
+            const shipmentLineId = row.shipmentLineId ?? (sourceKeyMatch ? Number(sourceKeyMatch[1]) : null);
+            if (shipmentLineId !== null && relatedLineIds.has(shipmentLineId)) relatedJournalIds.add(row.id);
+          }
+        }
+        journalEntryFilterIds = relatedJournalIds;
+      }
       const [openingBalanceEntry] = await tx.select({
         id: journalEntries.id,
         entryDate: journalEntries.entryDate,
@@ -882,7 +997,9 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
          lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
       }>();
       for (const row of records) {
-        if (row.entry.entryDate >= from && !entryMap.has(row.entry.id)) {
+        if (row.entry.entryDate >= from &&
+            (journalEntryFilterIds === null || journalEntryFilterIds.has(row.entry.id)) &&
+            !entryMap.has(row.entry.id)) {
           entryMap.set(row.entry.id, {
             id: row.entry.id, entryNumber: row.entry.entryNumber, memo: row.entry.memo,
             entryDate: row.entry.entryDate, sourceType: row.entry.sourceType, sourceId: row.entry.sourceId, lines: [],

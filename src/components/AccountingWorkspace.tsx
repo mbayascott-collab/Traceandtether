@@ -131,7 +131,12 @@ async function fingerprintCorrection(path: string, values: Record<string, FormDa
 export default function AccountingWorkspace() {
   const [from, setFrom] = useState(`${currentYear}-01-01`);
   const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
-  const [range, setRange] = useState({ from: `${currentYear}-01-01`, to: new Date().toISOString().slice(0, 10) });
+  const [range, setRange] = useState({
+    from: `${currentYear}-01-01`, to: new Date().toISOString().slice(0, 10),
+    purchaseOrder: "", shipment: "",
+  });
+  const [purchaseOrderFilter, setPurchaseOrderFilter] = useState("");
+  const [shipmentFilter, setShipmentFilter] = useState("");
   const [data, setData] = useState<ReportData | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -152,7 +157,10 @@ export default function AccountingWorkspace() {
   useEffect(() => {
     let alive = true;
     setLoading(true); setError("");
-    fetch(`/api/accounting?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`)
+    const query = new URLSearchParams({ from: range.from, to: range.to });
+    if (range.purchaseOrder) query.set("purchaseOrder", range.purchaseOrder);
+    if (range.shipment) query.set("shipment", range.shipment);
+    fetch(`/api/accounting?${query.toString()}`)
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Accounting records could not be loaded.");
@@ -542,7 +550,7 @@ export default function AccountingWorkspace() {
       <h2>Year-end report period</h2>
       <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
       <label>Through<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
-      <button className="button button-primary" onClick={() => setRange({ from, to })}>Run reports</button>
+      <button className="button button-primary" onClick={() => setRange((current) => ({ ...current, from, to }))}>Run reports</button>
     </section>
     <div className="notice-strip" style={{ marginBottom: 16 }}>
       These reports include entries already recorded in the app. Compare bank and mobile money statements on the <a href="/payments">Payments page</a>; statement matching does not change journals. Opening stock, tax treatment, and accountant review still need to be completed before relying on this as a full year-end filing.
@@ -608,15 +616,58 @@ export default function AccountingWorkspace() {
           <div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Amount</th></tr></thead><tbody>{data.balanceSheet.map((row, index) => <tr key={`${row.code}-${index}`}><td>{row.code} {row.name}</td><td>{row.type}</td><td>{money(row.amountZmw)}</td></tr>)}</tbody></table></div>
         </div>
       </section>
-      <section className="panel">
+    <section className="panel" style={{ marginBottom: 16 }}>
+      <div className="panel-heading"><h2>Filter journal history</h2></div>
+      <form className="panel-body form-grid" onSubmit={(event) => {
+        event.preventDefault();
+        const orderReference = purchaseOrderFilter.trim();
+        const shipmentReference = shipmentFilter.trim();
+        if (orderReference && shipmentReference) {
+          setError("Filter by a purchase order or a shipment, not both.");
+          return;
+        }
+        setError("");
+        setRange((current) => ({
+          ...current,
+          purchaseOrder: orderReference,
+          shipment: shipmentReference,
+        }));
+      }}>
+        <p className="report-footnote" style={{ gridColumn: "1 / -1" }}>
+          These filters narrow the journal list only; the accounting reports above keep their full date-range totals.
+          Enter one exact purchase order or shipment reference at a time.
+        </p>
+        <label>Purchase order reference<input value={purchaseOrderFilter} maxLength={120}
+          onChange={(event) => setPurchaseOrderFilter(event.target.value)} placeholder="For example, PO-001" /></label>
+        <label>Shipment reference<input value={shipmentFilter} maxLength={120}
+          onChange={(event) => setShipmentFilter(event.target.value)} placeholder="Enter the shipment reference" /></label>
+        <div className="toolbar">
+          <button className="button button-primary">Apply journal filters</button>
+          <button className="button button-secondary" type="button" onClick={() => {
+            setPurchaseOrderFilter("");
+            setShipmentFilter("");
+            setRange((current) => ({ ...current, purchaseOrder: "", shipment: "" }));
+          }}>Clear filters</button>
+        </div>
+      </form>
+    </section>
+    <section className="panel">
         <div className="panel-heading"><h2>Journal entries in period</h2><span>{data.entries.length} entries</span></div>
+      {(range.purchaseOrder || range.shipment) && <p className="report-footnote" role="status">
+        Filtered by {[
+          range.purchaseOrder ? `purchase order ${range.purchaseOrder}` : "",
+          range.shipment ? `shipment ${range.shipment}` : "",
+        ].filter(Boolean).join(" and ")}.
+      </p>}
         <div className="table-wrap"><table><thead><tr><th>Date / entry</th><th>Details</th><th>Account</th><th>Debit</th><th>Credit</th></tr></thead><tbody>
           {data.entries.flatMap((entry) => entry.lines.map((line, index) => <tr key={`${entry.id}-${index}`}>
             <td>{index === 0 ? <>{entry.entryDate}<br /><small>{entry.entryNumber}</small></> : null}</td>
             <td>{index === 0 ? entry.memo : line.description}</td><td>{line.accountCode} · {line.accountName}</td>
             <td>{line.debitZmw !== "0.00" ? money(line.debitZmw) : "—"}</td><td>{line.creditZmw !== "0.00" ? money(line.creditZmw) : "—"}</td>
           </tr>))}
-          {!data.entries.length && <tr><td colSpan={5}>No accounting entries in this period.</td></tr>}
+          {!data.entries.length && <tr><td colSpan={5}>{range.purchaseOrder || range.shipment
+            ? "No journal entries match these references in this period."
+            : "No accounting entries in this period."}</td></tr>}
         </tbody></table></div>
       </section>
     </>}

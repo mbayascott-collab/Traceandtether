@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   createImportExpense, createPurchaseOrder, createShipment, fetchImportExpenses, fetchLandedCosts,
-  landedCostReceiptClearingCsv, postLandedCostAdjustment,
+  postLandedCostAdjustment,
   fetchProducts, fetchPurchaseOrders, fetchShipments, fetchSuppliers, receiveShipment,
   type ImportExpense, type LandedCostOrder, type PurchaseOrder, type Product, type Shipment, type Supplier,
 } from "../lib/api";
@@ -11,17 +11,6 @@ type LineDraft = { productId: string; quantityOrdered: string; unitPrice: string
 type ShipmentLineDraft = { purchaseOrderLineId: string; quantityShipped: string };
 const today = () => new Date().toISOString().slice(0, 10);
 const money = (value: string, currency = "ZMW") => `${currency} ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-function downloadReceiptClearing(order: LandedCostOrder) {
-  const csv = landedCostReceiptClearingCsv(order);
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-  const link = document.createElement("a");
-  const safeOrderNumber = order.orderNumber.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-|-$/g, "") || String(order.id);
-  link.href = url;
-  link.download = `receipt-clearing-${safeOrderNumber}-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
 export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [shipments, setShipments] = useState<Shipment[]>([]);
@@ -70,6 +59,29 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
       setError(err instanceof Error ? err.message : "Could not post the reviewed adjustment.");
     } finally {
       setAdjustingOrderId(null);
+    }
+  }
+
+  async function downloadReceiptClearing(order: LandedCostOrder) {
+    setError("");
+    try {
+      const response = await fetch(`/api/landed-costs/${order.id}/receipt-clearing.csv`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(payload.error || "Could not download the receipt-clearing report.");
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") ?? "";
+      const fileName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+        ?? `receipt-clearing-${order.id}.csv`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not download the receipt-clearing report.");
     }
   }
 
@@ -176,7 +188,7 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
           <p>Clearing balance: <strong>{money(o.adjustmentPreview.clearingBalanceZmw)}</strong> · Ready for posted stock: <strong>{money(o.adjustmentPreview.adjustmentAvailableZmw)}</strong> · Still awaiting stock posting: <strong>{money(o.adjustmentPreview.unpostedClearingZmw)}</strong></p>
           <div className="toolbar">
             <h3>Receipt clearing detail</h3>
-            <button type="button" className="button button-secondary" onClick={() => downloadReceiptClearing(o)}>
+             <button type="button" className="button button-secondary" onClick={() => void downloadReceiptClearing(o)}>
               Download audit CSV
             </button>
           </div>
@@ -193,6 +205,14 @@ export default function ProcurementWorkspace({ mode }: { mode: Mode }) {
               </tr>)}
             </tbody><tfoot><tr><th colSpan={5}>Total cleared by receipts</th><th className="money-cell">{money(o.adjustmentPreview.receiptClearedTotalZmw)}</th></tr></tfoot></table></div>
             : <p className="report-footnote">No linked receipt journals have cleared landed costs for this order.</p>}
+          <h3>Posted landed-cost adjustments</h3>
+          {o.adjustmentPreview.adjustments.length
+            ? <ul>{o.adjustmentPreview.adjustments.map((adjustment) => <li key={adjustment.journalEntryId}>
+              {adjustment.entryDate} · <a href={`/accounting?journalEntryId=${adjustment.journalEntryId}`}>
+                {adjustment.entryNumber}
+              </a> · {adjustment.memo}
+            </li>)}</ul>
+            : <p className="report-footnote">No landed-cost adjustments have been posted for this order.</p>}
           <div className="data-table-wrap"><table><thead><tr><th>Product</th><th>Posted qty</th><th>On hand</th><th>Weighted-average unit value</th><th>Correction</th><th>Inventory</th><th>Cost of goods sold</th></tr></thead><tbody>
             {o.adjustmentPreview.lines.map((line) => <tr key={line.lineId}>
               <td>{line.productName} · {o.lines.find((item) => item.id === line.lineId)?.sku}</td>

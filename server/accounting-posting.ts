@@ -290,6 +290,12 @@ export type LandedCostAdjustmentPreview = {
     quantity: number;
     clearedAmountZmw: string;
   }[];
+  adjustments: {
+    journalEntryId: number;
+    entryNumber: string;
+    entryDate: string;
+    memo: string;
+  }[];
   lines: LandedCostAdjustmentLine[];
 };
 
@@ -441,6 +447,17 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
       eq(journalEntries.sourceType, "landed_cost_adjustment"),
       eq(journalEntries.sourceId, purchaseOrderId),
     ));
+  const adjustmentJournalRows = await tx.select({
+    journalEntryId: journalEntries.id,
+    entryNumber: journalEntries.entryNumber,
+    entryDate: journalEntries.entryDate,
+    memo: journalEntries.memo,
+  }).from(journalEntries)
+    .where(and(
+      eq(journalEntries.sourceType, "landed_cost_adjustment"),
+      eq(journalEntries.sourceId, purchaseOrderId),
+    ))
+    .orderBy(asc(journalEntries.entryDate), asc(journalEntries.id));
   let priorClearingCredits = 0n;
   const priorAdjustmentByProduct = new Map<number, bigint>();
   priorAdjustmentRows.forEach((row: any) => {
@@ -541,6 +558,7 @@ export async function landedCostAdjustmentPreview(tx: any, purchaseOrderId: numb
     canPost: adjustmentCents > 0n && !hasNegativeLine,
     hasNegativeLine,
     receipts: receiptDetails,
+    adjustments: adjustmentJournalRows,
     lines: corrections.map((line: any) => ({
       lineId: line.lineId, productId: line.productId, productName: line.productName,
       stockedQuantity: line.stockedQuantity, onHand: line.onHand,

@@ -53,8 +53,12 @@ test("payment overview derives term dates from deliveries and purchase orders an
   let supplierId: number | undefined;
   let productId: number | undefined;
   let salesOrderId: number | undefined;
+  let siblingSalesOrderId: number | undefined;
   let purchaseOrderId: number | undefined;
+  let siblingPurchaseOrderId: number | undefined;
+  let siblingDeliveryId: number | undefined;
   const payableSourceKey = `payment-aging-${suffix}`;
+  const siblingPayableSourceKey = `payment-aging-sibling-${suffix}`;
 
   const getOverview = async () => {
     const response = await fetch(`${baseUrl}/api/payments`);
@@ -63,13 +67,17 @@ test("payment overview derives term dates from deliveries and purchase orders an
     return payload;
   };
 
-  const saveDueDate = async (direction: "customer_receipt" | "supplier_payment", orderId: number, dueDate: string) => {
+  const requestDueDate = async (direction: "customer_receipt" | "supplier_payment", orderId: number, dueDate: string) => {
     const response = await fetch(`${baseUrl}/api/payments/due-date`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ direction, orderId, dueDate }),
     });
-    const payload = await response.json() as any;
+    return { response, payload: await response.json() as any };
+  };
+
+  const saveDueDate = async (direction: "customer_receipt" | "supplier_payment", orderId: number, dueDate: string) => {
+    const { response, payload } = await requestDueDate(direction, orderId, dueDate);
     assert.equal(response.status, 200, JSON.stringify(payload));
     assert.equal(payload.dueDate, dueDate);
   };
@@ -158,6 +166,61 @@ test("payment overview derives term dates from deliveries and purchase orders an
     await db.update(customers).set({ paymentTermDays: 90 }).where(eq(customers.id, customerId));
     await db.update(suppliers).set({ paymentTermDays: 120 }).where(eq(suppliers.id, supplierId));
 
+    for (const [direction, orderId, savedDate] of [
+      ["customer_receipt", salesOrderId, "2027-01-15"],
+      ["supplier_payment", purchaseOrderId, "2027-02-20"],
+    ] as const) {
+      const rejected = await requestDueDate(direction, orderId, "2026-02-30");
+      assert.equal(rejected.response.status, 400, JSON.stringify(rejected.payload));
+      assert.match(rejected.payload.error, /date/i);
+    }
+
+    const [siblingSalesOrder] = await db.insert(salesOrders).values({
+      orderNumber: `AGE-C-SIB-${suffix.slice(0, 10)}`,
+      customerId,
+      status: "partially_fulfilled",
+      orderDate: "2026-10-01",
+    }).returning();
+    siblingSalesOrderId = siblingSalesOrder.id;
+    const [siblingSalesLine] = await db.insert(salesOrderLines).values({
+      salesOrderId: siblingSalesOrderId,
+      productId,
+      quantity: 2,
+      unitPriceZmw: "100.00",
+    }).returning();
+    const [siblingDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `AGE-D-SIB-${suffix.slice(0, 10)}`,
+      idempotencyKey: `age-d-sib-${suffix}`,
+      salesOrderId: siblingSalesOrderId,
+      deliveryDate: "2026-10-20",
+    }).returning();
+    siblingDeliveryId = siblingDelivery.id;
+    await db.insert(salesDeliveryLines).values({
+      deliveryId: siblingDeliveryId,
+      salesOrderLineId: siblingSalesLine.id,
+      quantity: 1,
+    });
+
+    const [siblingPurchaseOrder] = await db.insert(purchaseOrders).values({
+      orderNumber: `AGE-S-SIB-${suffix.slice(0, 10)}`,
+      supplierId,
+      currency: "ZMW",
+      exchangeRateToZmw: "1",
+      orderedAt: "2026-10-15",
+    }).returning();
+    siblingPurchaseOrderId = siblingPurchaseOrder.id;
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: siblingPayableSourceKey,
+      sourceType: "stock_receipt",
+      sourceId: siblingPurchaseOrder.id,
+      memo: `Stock receipt for ${siblingPurchaseOrder.orderNumber}`,
+      entryDate: "2026-10-15",
+      lines: [
+        { accountKey: "inventory", debitZmw: "100.00" },
+        { accountKey: "accounts_payable", creditZmw: "100.00" },
+      ],
+    }));
+
     overview = await getOverview();
     assert.equal(
       overview.invoices.find((item: any) => item.orderId === salesOrderId)?.dueDate,
@@ -179,11 +242,36 @@ test("payment overview derives term dates from deliveries and purchase orders an
       "saved",
       "supplier due date is identified as manually saved",
     );
+    assert.equal(
+      overview.invoices.find((item: any) => item.orderId === salesOrderId)?.dueDate,
+      "2027-01-15",
+      "an invalid date must not replace the saved customer deadline",
+    );
+    assert.equal(
+      overview.bills.find((item: any) => item.orderId === purchaseOrderId)?.dueDate,
+      "2027-02-20",
+      "an invalid date must not replace the saved supplier deadline",
+    );
+    assert.equal(
+      overview.invoices.find((item: any) => item.orderId === siblingSalesOrderId)?.dueDate,
+      "2027-01-18",
+      "saving one customer deadline must leave its sibling based on customer terms",
+    );
+    assert.equal(
+      overview.bills.find((item: any) => item.orderId === siblingPurchaseOrderId)?.dueDate,
+      "2027-02-12",
+      "saving one supplier deadline must leave its sibling based on supplier terms",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      await client.query(
+        "DELETE FROM journal_lines WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE source_key = $1)",
+        [siblingPayableSourceKey],
+      );
+      await client.query("DELETE FROM journal_entries WHERE source_key = $1", [siblingPayableSourceKey]);
       await client.query(
         "DELETE FROM journal_lines WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE source_key = $1)",
         [payableSourceKey],
@@ -198,7 +286,14 @@ test("payment overview derives term dates from deliveries and purchase orders an
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [salesOrderId]);
       }
+      if (siblingSalesOrderId) {
+        await client.query("DELETE FROM sales_delivery_lines WHERE delivery_id = ANY($1::int[])", [[siblingDeliveryId]]);
+        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = $1", [siblingSalesOrderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [siblingSalesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [siblingSalesOrderId]);
+      }
       if (purchaseOrderId) await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      if (siblingPurchaseOrderId) await client.query("DELETE FROM purchase_orders WHERE id = $1", [siblingPurchaseOrderId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);

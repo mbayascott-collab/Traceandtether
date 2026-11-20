@@ -3,6 +3,7 @@ import type { Express, RequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { allocateLandedCosts } from "../shared/landed-cost";
+import { landedCostReceiptClearingCsv } from "../shared/landed-cost-receipt-clearing-csv";
 import {
   importExpenses, products, purchaseOrderLines, purchaseOrders, shipmentLines, shipmentPurchaseOrders, shipments, suppliers,
 } from "../shared/schema";
@@ -348,30 +349,65 @@ export function registerProcurementRoutes(app: Express, owner: RequestHandler) {
     res.status(201).json({ expense: result.expense });
   });
 
+  const buildLandedCostOrder = async (order: typeof purchaseOrders.$inferSelect, supplierName: string) => {
+    const orderLines = await db.select({ line: purchaseOrderLines, productName: products.name, sku: products.sku })
+      .from(purchaseOrderLines).innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+      .where(eq(purchaseOrderLines.purchaseOrderId, order.id));
+    const expenses = await importExpensesForPurchaseOrder(db, order.id);
+    const allocated = allocateLandedCosts(
+      orderLines.map(({ line }) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
+      expenses.map((expense) => ({
+        expenseId: expense.id, amount: expense.amount, exchangeRateToZmw: expense.exchangeRateToZmw,
+        basis: expense.basis, lineAllocations: expense.lineAllocations,
+      })),
+      order.exchangeRateToZmw,
+    );
+    const adjustmentPreview = await landedCostAdjustmentPreview(db, order.id);
+    return {
+      ...order,
+      supplierName,
+      adjustmentPreview,
+      lines: orderLines.map(({ line, productName, sku }) => ({
+        ...line, productName, sku, ...allocated.lines.find((result) => result.lineId === line.id),
+      })),
+      allocations: allocated.allocations,
+    };
+  };
+
   app.get("/api/landed-costs", owner, async (req, res) => {
     const requestedId = req.query.purchaseOrderId ? Number(req.query.purchaseOrderId) : undefined;
     if (requestedId !== undefined && (!Number.isSafeInteger(requestedId) || requestedId <= 0)) return invalid(res, "Invalid purchase order filter.");
     const orders = await db.select({ order: purchaseOrders, supplierName: suppliers.name }).from(purchaseOrders)
       .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
       .where(requestedId ? eq(purchaseOrders.id, requestedId) : undefined).orderBy(asc(purchaseOrders.createdAt));
-    const lines = await db.select({ line: purchaseOrderLines, productName: products.name, sku: products.sku })
-      .from(purchaseOrderLines).innerJoin(products, eq(purchaseOrderLines.productId, products.id));
-    res.json({ orders: await Promise.all(orders.map(async ({ order, supplierName }) => {
-      const orderLines = lines.filter(({ line }) => line.purchaseOrderId === order.id);
-      const expenses = await importExpensesForPurchaseOrder(db, order.id);
-      const allocated = allocateLandedCosts(
-        orderLines.map(({ line }) => ({ lineId: line.id, quantityOrdered: line.quantityOrdered, unitPrice: line.unitPrice })),
-        expenses.map((expense) => ({
-          expenseId: expense.id, amount: expense.amount, exchangeRateToZmw: expense.exchangeRateToZmw,
-          basis: expense.basis, lineAllocations: expense.lineAllocations,
-        })),
-        order.exchangeRateToZmw,
-      );
-      const adjustmentPreview = await landedCostAdjustmentPreview(db, order.id);
-      return { ...order, supplierName, adjustmentPreview, lines: orderLines.map(({ line, productName, sku }) => ({
-        ...line, productName, sku, ...allocated.lines.find((result) => result.lineId === line.id),
-      })), allocations: allocated.allocations };
-    })) });
+    res.json({ orders: await Promise.all(orders.map(({ order, supplierName }) =>
+      buildLandedCostOrder(order, supplierName))) });
+  });
+
+  app.get("/api/landed-costs/:purchaseOrderId/receipt-clearing.csv", owner, async (req, res) => {
+    const purchaseOrderId = Number(req.params.purchaseOrderId);
+    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) return invalid(res, "Invalid purchase order.");
+    const [result] = await db.select({ order: purchaseOrders, supplierName: suppliers.name }).from(purchaseOrders)
+      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+      .where(eq(purchaseOrders.id, purchaseOrderId)).limit(1);
+    if (!result) return res.status(404).json({ error: "Purchase order not found." });
+    const actor = res.locals.actor;
+    if (!actor) return res.status(401).json({ error: "Sign in to download this report." });
+    const order = await buildLandedCostOrder(result.order, result.supplierName);
+    const csv = landedCostReceiptClearingCsv(order);
+    const safeOrderNumber = order.orderNumber.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-|-$/g, "") || String(order.id);
+    const fileName = `receipt-clearing-${safeOrderNumber}-${new Date().toISOString().slice(0, 10)}.csv`;
+    await db.transaction((tx) => recordBusinessAudit(tx, {
+      entityType: "receipt_clearing_report",
+      entityId: order.id,
+      recordLabel: `Receipt clearing report · ${order.orderNumber}`,
+      actor,
+      action: "exported",
+      changedFields: ["format:csv"],
+    }));
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.status(200).send(csv);
   });
 
   app.post("/api/landed-costs/:purchaseOrderId/adjust", owner, async (req, res) => {

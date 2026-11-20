@@ -34,6 +34,7 @@ const order: LandedCostOrder = {
     unpostedClearingZmw: "20.00",
     canPost: true,
     hasNegativeLine: false,
+    adjustments: [],
     receipts: [{
       journalEntryId: 88,
       entryNumber: "JE-0088",
