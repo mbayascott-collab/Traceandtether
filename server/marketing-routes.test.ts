@@ -664,6 +664,19 @@ test("marketing report counts partial campaign deliveries once and matches poste
   try {
     const baseline = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
     assert.equal(baseline.response.status, 200, JSON.stringify(baseline.payload));
+    assert.deepEqual(baseline.payload.period, { from: reportDate, to: reportDate });
+    for (const invalidQuery of [
+      "/api/marketing/reports?from=",
+      "/api/marketing/reports?to=",
+      `/api/marketing/reports?from=${reportDate}&from=${reportDate}`,
+      `/api/marketing/reports?to=${reportDate}&to=${reportDate}`,
+      "/api/marketing/reports?from=not-a-date",
+      "/api/marketing/reports?from=2025-02-30",
+    ]) {
+      const invalid = await request(invalidQuery);
+      assert.equal(invalid.response.status, 400, invalidQuery);
+      assert.match(invalid.payload.error, /valid report date range/i);
+    }
 
     const [fullyCostedCampaign] = await db.insert(marketingCampaigns).values({
       name: `${prefix} fully costed`, status: "active",
@@ -1238,6 +1251,100 @@ test("marketing report counts partial campaign deliveries once and matches poste
     assert.equal(returnDateReport.payload.totals.attributedRevenueZmw, "-100.00");
     assert.equal(returnDateReport.payload.totals.productCostZmw, "-10.00");
 
+    const linkReturnDate = "2025-01-14";
+    const linkReturnBaseline = await request(
+      `/api/marketing/reports?from=${linkReturnDate}&to=${linkReturnDate}`,
+    );
+    const [linkReturnOrder] = await db.insert(salesOrders).values({
+      orderNumber: `${orderPrefix}-LINKRETURN`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: "2025-01-01",
+    }).returning();
+    const [linkReturnLine] = await db.insert(salesOrderLines).values({
+      salesOrderId: linkReturnOrder.id,
+      productId: crossPeriodProduct.id,
+      quantity: 1,
+      unitPriceZmw: "40.00",
+    }).returning();
+    const [linkReturnDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `MR-${suffix.slice(0, 12)}-LR`,
+      salesOrderId: linkReturnOrder.id,
+      deliveryDate: "2025-01-10",
+    }).returning();
+    const [linkReturnDeliveryLine] = await db.insert(salesDeliveryLines).values({
+      deliveryId: linkReturnDelivery.id,
+      salesOrderLineId: linkReturnLine.id,
+      quantity: 1,
+    }).returning();
+    await db.insert(marketingAttributions).values({
+      salesOrderId: linkReturnOrder.id,
+      campaignId: crossPeriodCampaign.id,
+      source: "campaign_link",
+    });
+    await Promise.all([
+      postCrossPeriodEntry(linkReturnDelivery.id, "revenue", "40.00", "2025-01-10"),
+      postCrossPeriodEntry(linkReturnDelivery.id, "cogs", "4.00", "2025-01-10"),
+    ]);
+    const [linkReturnMovement] = await db.insert(inventoryMovements).values({
+      productId: crossPeriodProduct.id,
+      kind: "stock_return",
+      quantityDelta: 1,
+      reason: `${prefix} campaign-link return`,
+      reference: linkReturnDelivery.deliveryNumber,
+      sourceKey: `${prefix}-return-link-movement`,
+      salesDeliveryLineId: linkReturnDeliveryLine.id,
+    }).returning();
+    await Promise.all([
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-return-link-revenue`,
+        sourceType: "sales_return",
+        sourceId: linkReturnMovement.id,
+        memo: `${prefix} campaign-link return revenue reversal`,
+        entryDate: linkReturnDate,
+        lines: [
+          { accountKey: "sales_revenue", debitZmw: "40.00" },
+          { accountKey: "accounts_receivable", creditZmw: "40.00" },
+        ],
+      })),
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-return-link-cogs`,
+        sourceType: "sales_return_cogs",
+        sourceId: linkReturnMovement.id,
+        memo: `${prefix} campaign-link return cost reversal`,
+        entryDate: linkReturnDate,
+        lines: [
+          { accountKey: "inventory", productId: crossPeriodProduct.id, debitZmw: "4.00" },
+          { accountKey: "cost_of_goods_sold", productId: crossPeriodProduct.id, creditZmw: "4.00" },
+        ],
+      })),
+    ]);
+    const linkReturnReport = await request(
+      `/api/marketing/reports?from=${linkReturnDate}&to=${linkReturnDate}`,
+    );
+    const linkReturnCampaign = linkReturnReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    assert.deepEqual({
+      orderCount: linkReturnCampaign.orderCount,
+      attributedRevenueZmw: linkReturnCampaign.attributedRevenueZmw,
+      productCostZmw: linkReturnCampaign.productCostZmw,
+      netContributionZmw: linkReturnCampaign.netContributionZmw,
+    }, {
+      orderCount: 1,
+      attributedRevenueZmw: "-40.00",
+      productCostZmw: "-4.00",
+      netContributionZmw: "-36.00",
+    });
+    assert.equal(
+      linkReturnReport.payload.totals.campaignLinkOrders,
+      linkReturnBaseline.payload.totals.campaignLinkOrders + 1,
+    );
+    assert.equal(
+      linkReturnReport.payload.totals.ordersWithoutCampaignLinks,
+      linkReturnBaseline.payload.totals.ordersWithoutCampaignLinks,
+    );
+
     const fullRangeBeforeReversal = await request(
       "/api/marketing/reports?from=2025-01-10&to=2025-01-11",
     );
@@ -1660,9 +1767,10 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
   };
 
   let campaignId: number | undefined;
+  let destinationCampaignId: number | undefined;
   let customerId: number | undefined;
-  let productId: number | undefined;
-  let orderId: number | undefined;
+  const productIds: number[] = [];
+  const orderIds: number[] = [];
   try {
     const before = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
     assert.equal(before.response.status, 200, JSON.stringify(before.payload));
@@ -1672,13 +1780,26 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       status: "active",
     }).returning();
     campaignId = campaign.id;
-    const [product] = await db.insert(products).values({
-      sku: `CANCEL-${suffix}`,
-      name: `${prefix} product`,
-      sellingPriceZmw: "100.00",
+    const [destinationCampaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} destination`,
       status: "active",
     }).returning();
-    productId = product.id;
+    destinationCampaignId = destinationCampaign.id;
+    const [productA, productB] = await db.insert(products).values([
+      {
+        sku: `CANCEL-${suffix}-A`,
+        name: `${prefix} product A`,
+        sellingPriceZmw: "100.00",
+        status: "active",
+      },
+      {
+        sku: `CANCEL-${suffix}-B`,
+        name: `${prefix} product B`,
+        sellingPriceZmw: "60.00",
+        status: "active",
+      },
+    ]).returning();
+    productIds.push(productA.id, productB.id);
     const [customer] = await db.insert(customers).values({
       name: `${prefix} customer`,
     }).returning();
@@ -1690,13 +1811,11 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       status: "partially_fulfilled",
       orderDate: reportDate,
     }).returning();
-    orderId = order.id;
-    const [line] = await db.insert(salesOrderLines).values({
-      salesOrderId: order.id,
-      productId: product.id,
-      quantity: 5,
-      unitPriceZmw: "100.00",
-    }).returning();
+    orderIds.push(order.id);
+    const [lineA, lineB] = await db.insert(salesOrderLines).values([
+      { salesOrderId: order.id, productId: productA.id, quantity: 5, unitPriceZmw: "100.00" },
+      { salesOrderId: order.id, productId: productB.id, quantity: 4, unitPriceZmw: "60.00" },
+    ]).returning();
     const [firstDelivery] = await db.insert(salesDeliveries).values({
       deliveryNumber: `CD1-${suffix.slice(0, 32)}`,
       salesOrderId: order.id,
@@ -1708,8 +1827,10 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       deliveryDate: reportDate,
     }).returning();
     await db.insert(salesDeliveryLines).values([
-      { deliveryId: firstDelivery.id, salesOrderLineId: line.id, quantity: 1 },
-      { deliveryId: secondDelivery.id, salesOrderLineId: line.id, quantity: 1 },
+      { deliveryId: firstDelivery.id, salesOrderLineId: lineA.id, quantity: 1 },
+      { deliveryId: firstDelivery.id, salesOrderLineId: lineB.id, quantity: 2 },
+      { deliveryId: secondDelivery.id, salesOrderLineId: lineA.id, quantity: 1 },
+      { deliveryId: secondDelivery.id, salesOrderLineId: lineB.id, quantity: 1 },
     ]);
     await db.insert(marketingAttributions).values({
       salesOrderId: order.id,
@@ -1717,18 +1838,45 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       source: "campaign_link",
     });
 
+    const [undeliveredOrder] = await db.insert(salesOrders).values({
+      orderNumber: `C0-${suffix.slice(0, 30)}`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    orderIds.push(undeliveredOrder.id);
+    await db.insert(salesOrderLines).values({
+      salesOrderId: undeliveredOrder.id,
+      productId: productA.id,
+      quantity: 2,
+      unitPriceZmw: "100.00",
+    });
+    await db.insert(marketingAttributions).values({
+      salesOrderId: undeliveredOrder.id,
+      campaignId: campaign.id,
+      source: "campaign_link",
+    });
+
     const cancelled = await request(`/api/sales-orders/${order.id}/cancel`, "POST", {});
     assert.equal(cancelled.response.status, 200, JSON.stringify(cancelled.payload));
     assert.equal(cancelled.payload.order.status, "cancelled");
+    const undeliveredCancelled = await request(`/api/sales-orders/${undeliveredOrder.id}/cancel`, "POST", {});
+    assert.equal(undeliveredCancelled.response.status, 200, JSON.stringify(undeliveredCancelled.payload));
+    assert.equal(undeliveredCancelled.payload.order.status, "cancelled");
 
     const salesOrdersResponse = await request("/api/sales-orders");
     assert.equal(salesOrdersResponse.response.status, 200, JSON.stringify(salesOrdersResponse.payload));
     const salesOrder = salesOrdersResponse.payload.orders.find((item: { id: number }) => item.id === order.id);
     assert.ok(salesOrder);
-    assert.equal(salesOrder.deliveredZmw, "200.00");
-    assert.equal(salesOrder.totalZmw, "500.00");
-    assert.equal(salesOrder.lines[0].deliveredQuantity, 2);
-    assert.equal(salesOrder.lines[0].remainingQuantity, 3);
+    assert.equal(salesOrder.deliveredZmw, "380.00");
+    assert.equal(salesOrder.totalZmw, "740.00");
+    assert.equal(salesOrder.lines.length, 2);
+    assert.deepEqual(
+      salesOrder.lines.map((line: { productId: number; deliveredQuantity: number; remainingQuantity: number }) => [
+        line.productId, line.deliveredQuantity, line.remainingQuantity,
+      ]).sort((a: number[], b: number[]) => a[0] - b[0]),
+      [[productA.id, 2, 3], [productB.id, 3, 1]].sort((a, b) => a[0] - b[0]),
+    );
     assert.equal(salesOrder.deliveries.length, 2);
 
     const report = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
@@ -1739,25 +1887,55 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
     assert.equal(campaignReport.attributedRevenueZmw, salesOrder.deliveredZmw);
     assert.equal(report.payload.totals.campaignLinkOrders, before.payload.totals.campaignLinkOrders + 1);
     assert.equal(report.payload.totals.attributedOrders, before.payload.totals.attributedOrders + 1);
+
+    const moved = await request(`/api/sales-orders/${order.id}/attribution`, "PATCH", {
+      campaignId: destinationCampaign.id,
+    });
+    assert.equal(moved.response.status, 200, JSON.stringify(moved.payload));
+    const afterMove = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    const oldCampaignAfterMove = afterMove.payload.campaigns.find(
+      (item: { id: number }) => item.id === campaign.id,
+    );
+    const destinationAfterMove = afterMove.payload.campaigns.find(
+      (item: { id: number }) => item.id === destinationCampaign.id,
+    );
+    assert.deepEqual({
+      oldOrderCount: oldCampaignAfterMove.orderCount,
+      oldRevenue: oldCampaignAfterMove.attributedRevenueZmw,
+      newOrderCount: destinationAfterMove.orderCount,
+      newRevenue: destinationAfterMove.attributedRevenueZmw,
+      attributedOrdersDelta: afterMove.payload.totals.attributedOrders - before.payload.totals.attributedOrders,
+      campaignLinkOrdersDelta: afterMove.payload.totals.campaignLinkOrders - before.payload.totals.campaignLinkOrders,
+      ordersWithoutLinksDelta: afterMove.payload.totals.ordersWithoutCampaignLinks - before.payload.totals.ordersWithoutCampaignLinks,
+    }, {
+      oldOrderCount: 0,
+      oldRevenue: "0.00",
+      newOrderCount: 1,
+      newRevenue: "380.00",
+      attributedOrdersDelta: 1,
+      campaignLinkOrdersDelta: 1,
+      ordersWithoutLinksDelta: 0,
+    });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
-      if (orderId) {
-        await client.query("DELETE FROM marketing_attributions WHERE sales_order_id = $1", [orderId]);
+      if (orderIds.length) {
+        await client.query("DELETE FROM marketing_attributions WHERE sales_order_id = ANY($1)", [orderIds]);
         await client.query(
-          "DELETE FROM sales_delivery_lines WHERE delivery_id IN (SELECT id FROM sales_deliveries WHERE sales_order_id = $1)",
-          [orderId],
+          "DELETE FROM sales_delivery_lines WHERE delivery_id IN (SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($1))",
+          [orderIds],
         );
-        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = $1", [orderId]);
-        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [orderId]);
-        await client.query("DELETE FROM sales_orders WHERE id = $1", [orderId]);
+        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = ANY($1)", [orderIds]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1)", [orderIds]);
+        await client.query("DELETE FROM sales_orders WHERE id = ANY($1)", [orderIds]);
       }
       if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
+      if (destinationCampaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [destinationCampaignId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
-      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (productIds.length) await client.query("DELETE FROM products WHERE id = ANY($1)", [productIds]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1771,10 +1949,12 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
 test("clearing a manual campaign assignment moves its totals to unattributed without changing link counts", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
-  const [{ db, pool }, { registerMarketingRoutes }, { registerSalesRoutes }] = await Promise.all([
+  const [{ db, pool }, { registerMarketingRoutes }, { registerSalesRoutes }, { createBusinessAccessMiddleware }, { postJournal }] = await Promise.all([
     import("./db"),
     import("./marketing-routes"),
     import("./sales-routes"),
+    import("./access-control"),
+    import("./accounting-posting"),
   ]);
   const requiredColumns = new Set([
     "marketing_attributions.source",
@@ -1800,12 +1980,19 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
   const reportDate = "9999-12-31";
   const app = express();
   app.use(express.json());
-  const owner: RequestHandler = (_req, res, next) => {
-    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
-    next();
-  };
-  registerSalesRoutes(app, owner);
-  registerMarketingRoutes(app, owner);
+  const access = createBusinessAccessMiddleware(
+    async (userId) => ({
+      authorized: true as const,
+      actor: {
+        clerkUserId: userId,
+        email: userId === "test-manager" ? `${prefix}-manager@example.test` : actorEmail,
+        role: userId === "test-manager" ? "manager" as const : "owner" as const,
+      },
+    }),
+    (req) => req.header("x-test-user"),
+  );
+  registerSalesRoutes(app, access);
+  registerMarketingRoutes(app, access);
   app.use(((error: unknown, _req, res, _next) => {
     res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
   }) as ErrorRequestHandler);
@@ -1815,10 +2002,13 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
-  const request = async (path: string, method = "GET", body?: unknown) => {
+  const request = async (path: string, method = "GET", body?: unknown, userId = "test-owner") => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      headers: {
+        "x-test-user": userId,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { response, payload: await response.json() as any };
@@ -1859,13 +2049,62 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
       orderDate: reportDate,
     }).returning();
     orderIds.push(manualOrder.id, linkOrder.id);
-    await db.insert(salesOrderLines).values([
+    const [manualLine, linkLine] = await db.insert(salesOrderLines).values([
       { salesOrderId: manualOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "100.00" },
       { salesOrderId: linkOrder.id, productId: product.id, quantity: 1, unitPriceZmw: "50.00" },
-    ]);
+    ]).returning();
     await db.insert(marketingAttributions).values([
       { salesOrderId: manualOrder.id, campaignId: campaign.id, source: "manual" },
       { salesOrderId: linkOrder.id, campaignId: campaign.id, source: "campaign_link" },
+    ]);
+    const [manualDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `CLR-DM-${suffix.slice(0, 24)}`,
+      salesOrderId: manualOrder.id,
+      deliveryDate: reportDate,
+    }).returning();
+    const [linkDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `CLR-DL-${suffix.slice(0, 24)}`,
+      salesOrderId: linkOrder.id,
+      deliveryDate: reportDate,
+    }).returning();
+    await db.insert(salesDeliveryLines).values([
+      { deliveryId: manualDelivery.id, salesOrderLineId: manualLine.id, quantity: 1 },
+      { deliveryId: linkDelivery.id, salesOrderLineId: linkLine.id, quantity: 1 },
+    ]);
+    await Promise.all([
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-manual-cogs`,
+        sourceType: "sales_delivery_cogs",
+        sourceId: manualDelivery.id,
+        memo: `${prefix} manual delivery cost`,
+        entryDate: reportDate,
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "30.00" },
+          { accountKey: "inventory", productId: product.id, creditZmw: "30.00" },
+        ],
+      })),
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-link-cogs`,
+        sourceType: "sales_delivery_cogs",
+        sourceId: linkDelivery.id,
+        memo: `${prefix} link delivery cost`,
+        entryDate: reportDate,
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "20.00" },
+          { accountKey: "inventory", productId: product.id, creditZmw: "20.00" },
+        ],
+      })),
+      db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-late-cost`,
+        sourceType: "landed_cost_adjustment",
+        sourceId: product.id,
+        memo: `${prefix} shared late cost`,
+        entryDate: reportDate,
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "5.00" },
+          { accountKey: "inventory", productId: product.id, creditZmw: "5.00" },
+        ],
+      })),
     ]);
 
     const beforeClear = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
@@ -1874,8 +2113,23 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     assert.ok(campaignBefore);
     assert.equal(campaignBefore.orderCount, 2);
     assert.equal(campaignBefore.attributedRevenueZmw, "150.00");
+    assert.equal(campaignBefore.productCostZmw, "55.00");
+    assert.equal(campaignBefore.landedCostAdjustmentZmw, "5.00");
+    assert.deepEqual(campaignBefore.missingCostOrders, []);
     assert.equal(beforeClear.payload.totals.campaignLinkOrders, baseline.payload.totals.campaignLinkOrders + 1);
     assert.equal(beforeClear.payload.totals.ordersWithoutCampaignLinks, baseline.payload.totals.ordersWithoutCampaignLinks + 1);
+
+    const managerClear = await request(
+      `/api/sales-orders/${manualOrder.id}/attribution`,
+      "PATCH",
+      { campaignId: null },
+      "test-manager",
+    );
+    assert.equal(managerClear.response.status, 403);
+    const preservedAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, manualOrder.id));
+    assert.equal(preservedAttribution[0]?.campaignId, campaign.id);
+    assert.equal(preservedAttribution[0]?.source, "manual");
 
     const cleared = await request(`/api/sales-orders/${manualOrder.id}/attribution`, "PATCH", { campaignId: null });
     assert.equal(cleared.response.status, 200, JSON.stringify(cleared.payload));
@@ -1887,6 +2141,19 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     assert.ok(campaignAfter);
     assert.equal(campaignAfter.orderCount, 1);
     assert.equal(campaignAfter.attributedRevenueZmw, "50.00");
+    assert.equal(campaignAfter.productCostZmw, "22.00");
+    assert.equal(campaignAfter.landedCostAdjustmentZmw, "2.00");
+    assert.deepEqual(campaignAfter.missingCostOrders, []);
+    assert.equal(
+      BigInt(campaignAfter.productCostZmw.replace(".", "")) -
+        BigInt(campaignBefore.productCostZmw.replace(".", "")),
+      -3300n,
+    );
+    assert.equal(
+      BigInt(campaignAfter.landedCostAdjustmentZmw.replace(".", "")) -
+        BigInt(campaignBefore.landedCostAdjustmentZmw.replace(".", "")),
+      -300n,
+    );
     assert.equal(afterClear.payload.totals.attributedOrders, baseline.payload.totals.attributedOrders + 1);
     assert.equal(afterClear.payload.totals.unattributedOrders, baseline.payload.totals.unattributedOrders + 1);
     assert.equal(
@@ -1902,8 +2169,20 @@ test("clearing a manual campaign assignment moves its totals to unattributed wit
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      await client.query(
+        `DELETE FROM journal_lines WHERE journal_entry_id IN (
+          SELECT id FROM journal_entries WHERE source_key LIKE $1
+        )`,
+        [`${prefix}-%`],
+      );
+      await client.query("DELETE FROM journal_entries WHERE source_key LIKE $1", [`${prefix}-%`]);
       if (orderIds.length) {
         await client.query("DELETE FROM marketing_attributions WHERE sales_order_id = ANY($1)", [orderIds]);
+        await client.query(
+          "DELETE FROM sales_delivery_lines WHERE delivery_id IN (SELECT id FROM sales_deliveries WHERE sales_order_id = ANY($1))",
+          [orderIds],
+        );
+        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = ANY($1)", [orderIds]);
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1)", [orderIds]);
         await client.query("DELETE FROM sales_orders WHERE id = ANY($1)", [orderIds]);
       }

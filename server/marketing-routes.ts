@@ -529,8 +529,13 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
   });
 
   app.get("/api/marketing/reports", owner, async (req, res) => {
-    const from = typeof req.query.from === "string" ? req.query.from : "";
-    const to = typeof req.query.to === "string" ? req.query.to : "";
+    const rawFrom = req.query.from;
+    const rawTo = req.query.to;
+    const hasAmbiguousDate = [rawFrom, rawTo].some((value) =>
+      value !== undefined && (typeof value !== "string" || value.length === 0));
+    if (hasAmbiguousDate) return res.status(400).json({ error: "Choose a valid report date range." });
+    const from = typeof rawFrom === "string" ? rawFrom : "";
+    const to = typeof rawTo === "string" ? rawTo : "";
     const validDay = (value: string) => {
       if (!value) return true;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;

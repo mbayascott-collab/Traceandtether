@@ -1248,7 +1248,11 @@ export function registerSalesRoutes(
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
   });
-  app.patch("/api/sales-orders/:id/attribution", owner, async (req, res) => {
+  app.patch(
+    "/api/sales-orders/:id/attribution",
+    owner,
+    requireBusinessOwner("Only the business owner can change campaign assignments."),
+    async (req, res) => {
     const id = idOf(req.params.id);
     if (!id) return bad(res, "Invalid sales order.");
     const campaignId = req.body?.campaignId;
@@ -1276,7 +1280,8 @@ export function registerSalesRoutes(
       });
     });
     res.json({ campaignId });
-  });
+    },
+  );
   app.post("/api/sales-orders", owner, async (req, res) => {
     const parsed = salesOrderInputSchema.safeParse(req.body);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check the order details.");
