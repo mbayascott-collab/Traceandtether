@@ -1577,6 +1577,14 @@ test("marketing report counts partial campaign deliveries once and matches poste
       campaignId: crossPeriodCampaign.id,
       source: "campaign_link",
     });
+    const [savedLinkReturnAttribution] = await db.select({
+      campaignId: marketingAttributions.campaignId,
+      source: marketingAttributions.source,
+    }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, linkReturnOrder.id));
+    assert.deepEqual(savedLinkReturnAttribution, {
+      campaignId: crossPeriodCampaign.id,
+      source: "campaign_link",
+    });
     await Promise.all([
       postCrossPeriodEntry(linkReturnDelivery.id, "revenue", "40.00", "2025-01-10"),
       postCrossPeriodEntry(linkReturnDelivery.id, "cogs", "4.00", "2025-01-10"),
@@ -1617,6 +1625,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
     const linkReturnReport = await request(
       `/api/marketing/reports?from=${linkReturnDate}&to=${linkReturnDate}`,
     );
+    assert.equal(linkReturnReport.response.status, 200, JSON.stringify(linkReturnReport.payload));
     const linkReturnCampaign = linkReturnReport.payload.campaigns.find(
       (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
     );
