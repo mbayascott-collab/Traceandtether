@@ -426,6 +426,16 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
     const group = await findCustomerGroup(req, res);
     if (!group) return;
     const members = await getCustomerGroupMemberDetails(group);
+    const csv = customerGroupContactsCsv(members);
+    await db.transaction(async (tx) => {
+      await recordBusinessAudit(tx, {
+        entityType: "marketing_customer_group",
+        entityId: group.id,
+        recordLabel: group.name,
+        actor: res.locals.actor,
+        action: "exported",
+      });
+    });
     const filename = `${group.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "customer-group"}-${group.id}.csv`;
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
@@ -433,7 +443,7 @@ export function registerMarketingRoutes(app: Express, owner: RequestHandler) {
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
     });
-    res.send(customerGroupContactsCsv(members));
+    res.send(csv);
   });
   app.post("/api/marketing/customer-groups", owner, ownerOnly, async (req, res) => {
     const parsed = customerGroupSchema.safeParse(req.body);

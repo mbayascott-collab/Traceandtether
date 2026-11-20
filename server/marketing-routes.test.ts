@@ -419,6 +419,9 @@ test("customer-group CSV downloads are limited to owners", {
   const contactEmail = `group-export-${suffix}@example.test`;
   const contactPhone = `+260-${suffix.slice(0, 8)}`;
   const groupName = `Group export ${suffix}`;
+  const ownerUserId = `test-owner-${suffix}`;
+  const managerUserId = `test-manager-${suffix}`;
+  const ownerEmail = `${ownerUserId}@example.test`;
   const app = express();
   const access = createBusinessAccessMiddleware(
     async (userId) => ({
@@ -426,7 +429,7 @@ test("customer-group CSV downloads are limited to owners", {
       actor: {
         clerkUserId: userId,
         email: `${userId}@example.test`,
-        role: userId === "test-manager" ? "manager" as const : "owner" as const,
+        role: userId.startsWith("test-manager-") ? "manager" as const : "owner" as const,
       },
     }),
     (req) => req.header("x-test-user"),
@@ -451,21 +454,35 @@ test("customer-group CSV downloads are limited to owners", {
     }).returning();
     groupId = group.id;
 
-    const download = async (userId?: string) => {
-      const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${group.id}/export.csv`, {
+    const download = async (userId?: string, targetGroupId: number | string = group.id) => {
+      const response = await fetch(`${baseUrl}/api/marketing/customer-groups/${targetGroupId}/export.csv`, {
         headers: userId ? { "x-test-user": userId } : undefined,
       });
       return { response, body: await response.text() };
     };
 
-    const ownerDownload = await download("test-owner");
+    const ownerDownload = await download(ownerUserId);
     assert.equal(ownerDownload.response.status, 200, ownerDownload.body);
     assert.match(ownerDownload.response.headers.get("content-type") ?? "", /text\/csv/i);
     assert.ok(ownerDownload.body.includes(customerName));
     assert.ok(ownerDownload.body.includes(contactEmail));
     assert.ok(ownerDownload.body.includes(contactPhone));
+    const successfulExports = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "marketing_customer_group"),
+      eq(businessAuditLogs.entityId, group.id),
+      eq(businessAuditLogs.actorEmail, ownerEmail),
+      eq(businessAuditLogs.action, "exported"),
+    ));
+    assert.equal(successfulExports.length, 1);
+    assert.equal(successfulExports[0]?.recordLabel, groupName);
+    assert.equal(successfulExports[0]?.actorClerkUserId, ownerUserId);
+    assert.ok(successfulExports[0]?.createdAt);
+    const auditText = JSON.stringify(successfulExports[0]);
+    for (const contact of [customerName, contactEmail, contactPhone]) {
+      assert.equal(auditText.includes(contact), false, "audit records must not copy customer contact details");
+    }
 
-    const managerDownload = await download("test-manager");
+    const managerDownload = await download(managerUserId);
     assert.equal(managerDownload.response.status, 403);
     assert.match(managerDownload.body, /Only the business owner/i);
     assert.ok(!managerDownload.body.includes(customerName));
@@ -478,8 +495,25 @@ test("customer-group CSV downloads are limited to owners", {
     assert.ok(!signedOutDownload.body.includes(customerName));
     assert.ok(!signedOutDownload.body.includes(contactEmail));
     assert.ok(!signedOutDownload.body.includes(contactPhone));
+
+    const failedDownload = await download(ownerUserId, "not-a-group");
+    assert.equal(failedDownload.response.status, 400);
+    const exportsAfterDeniedRequests = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "marketing_customer_group"),
+      eq(businessAuditLogs.entityId, group.id),
+      eq(businessAuditLogs.actorEmail, ownerEmail),
+      eq(businessAuditLogs.action, "exported"),
+    ));
+    assert.equal(exportsAfterDeniedRequests.length, 1);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (groupId) {
+      await db.delete(businessAuditLogs).where(and(
+        eq(businessAuditLogs.entityType, "marketing_customer_group"),
+        eq(businessAuditLogs.entityId, groupId),
+        eq(businessAuditLogs.actorEmail, ownerEmail),
+      ));
+    }
     if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
     if (customerId) await db.delete(customers).where(eq(customers.id, customerId));
   }
