@@ -1002,6 +1002,26 @@ test("database flow adjusts late import costs across partial receipts and sales"
     ));
     await db.update(journalEntries).set({ shipmentLineId: null })
       .where(eq(journalEntries.id, mismatchReceiptEntry.id));
+    const otherProductShipmentLine = mismatchShipmentLines.find((line) => line.id !== mismatchShipmentLineId);
+    assert.ok(otherProductShipmentLine);
+    const otherProductOrderLine = mismatchOrderLines.find(
+      (line) => line.id === otherProductShipmentLine.purchaseOrderLineId,
+    );
+    assert.ok(otherProductOrderLine);
+    assert.notEqual(otherProductOrderLine.productId, mismatchMovement.productId);
+    await request(`/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
+      shipmentLineId: otherProductShipmentLine.id,
+    }, 400);
+    const [stillUnlinkedReceiptEntry] = await db.select().from(journalEntries)
+      .where(eq(journalEntries.id, mismatchReceiptEntry.id));
+    assert.equal(stillUnlinkedReceiptEntry.shipmentLineId, null);
+    const rejectedLinkAudits = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "journal_entry"),
+      eq(businessAuditLogs.entityId, mismatchReceiptEntry.id),
+      eq(businessAuditLogs.actorEmail, testEmail),
+      eq(businessAuditLogs.action, "updated"),
+    ));
+    assert.ok(rejectedLinkAudits.every((audit) => !audit.changedFields.includes("shipmentLineId")));
     const overCapacityLink = await fetch(`${baseUrl}/api/inventory/receipt-journals/${mismatchReceiptEntry.id}/link`, {
       method: "POST",
       headers: { "content-type": "application/json" },
