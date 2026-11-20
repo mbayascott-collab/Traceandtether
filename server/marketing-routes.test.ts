@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import express, { type RequestHandler } from "express";
+import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import test from "node:test";
 import {
@@ -334,7 +334,6 @@ test("marketing report counts partial campaign deliveries once and matches poste
   );
   for (const column of availableColumns.rows) requiredColumns.delete(`${column.table_name}.${column.column_name}`);
   if (requiredColumns.size > 0) {
-    await pool.end();
     t.skip("requires the campaign attribution and business audit migrations");
     return;
   }
@@ -1008,6 +1007,171 @@ test("marketing report counts partial campaign deliveries once and matches poste
       await client.query("DELETE FROM marketing_campaigns WHERE name LIKE $1", [`${prefix}%`]);
       await client.query("DELETE FROM customers WHERE name = $1", [`${prefix} customer`]);
       await client.query("DELETE FROM products WHERE sku LIKE $1", [`MKT-${suffix}%`]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+});
+
+test("campaign reporting keeps delivered revenue after the remainder of an order is cancelled", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerMarketingRoutes }, { registerSalesRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+    import("./sales-routes"),
+  ]);
+  const requiredColumns = new Set([
+    "marketing_attributions.source",
+    "business_audit_logs.actor_email",
+  ]);
+  const availableColumns = await pool.query<{ table_name: string; column_name: string }>(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND (table_name, column_name) IN (
+         ('marketing_attributions', 'source'),
+         ('business_audit_logs', 'actor_email')
+       )`,
+  );
+  for (const column of availableColumns.rows) requiredColumns.delete(`${column.table_name}.${column.column_name}`);
+  if (requiredColumns.size > 0) {
+    t.skip("requires the campaign attribution and business audit migrations");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const prefix = `cancelled-campaign-order-${suffix}`;
+  const actorEmail = `${prefix}@example.test`;
+  const reportDate = "9999-12-31";
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerSalesRoutes(app, owner);
+  registerMarketingRoutes(app, owner);
+  app.use(((error: unknown, _req, res, _next) => {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Request failed." });
+  }) as ErrorRequestHandler);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = async (path: string, method = "GET", body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { response, payload: await response.json() as any };
+  };
+
+  let campaignId: number | undefined;
+  let customerId: number | undefined;
+  let productId: number | undefined;
+  let orderId: number | undefined;
+  try {
+    const before = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(before.response.status, 200, JSON.stringify(before.payload));
+
+    const [campaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} campaign`,
+      status: "active",
+    }).returning();
+    campaignId = campaign.id;
+    const [product] = await db.insert(products).values({
+      sku: `CANCEL-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [customer] = await db.insert(customers).values({
+      name: `${prefix} customer`,
+    }).returning();
+    customerId = customer.id;
+
+    const [order] = await db.insert(salesOrders).values({
+      orderNumber: `C-${suffix.slice(0, 30)}`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    orderId = order.id;
+    const [line] = await db.insert(salesOrderLines).values({
+      salesOrderId: order.id,
+      productId: product.id,
+      quantity: 5,
+      unitPriceZmw: "100.00",
+    }).returning();
+    const [firstDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `CD1-${suffix.slice(0, 32)}`,
+      salesOrderId: order.id,
+      deliveryDate: reportDate,
+    }).returning();
+    const [secondDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `CD2-${suffix.slice(0, 32)}`,
+      salesOrderId: order.id,
+      deliveryDate: reportDate,
+    }).returning();
+    await db.insert(salesDeliveryLines).values([
+      { deliveryId: firstDelivery.id, salesOrderLineId: line.id, quantity: 1 },
+      { deliveryId: secondDelivery.id, salesOrderLineId: line.id, quantity: 1 },
+    ]);
+    await db.insert(marketingAttributions).values({
+      salesOrderId: order.id,
+      campaignId: campaign.id,
+      source: "campaign_link",
+    });
+
+    const cancelled = await request(`/api/sales-orders/${order.id}/cancel`, "POST", {});
+    assert.equal(cancelled.response.status, 200, JSON.stringify(cancelled.payload));
+    assert.equal(cancelled.payload.order.status, "cancelled");
+
+    const salesOrdersResponse = await request("/api/sales-orders");
+    assert.equal(salesOrdersResponse.response.status, 200, JSON.stringify(salesOrdersResponse.payload));
+    const salesOrder = salesOrdersResponse.payload.orders.find((item: { id: number }) => item.id === order.id);
+    assert.ok(salesOrder);
+    assert.equal(salesOrder.deliveredZmw, "200.00");
+    assert.equal(salesOrder.totalZmw, "500.00");
+    assert.equal(salesOrder.lines[0].deliveredQuantity, 2);
+    assert.equal(salesOrder.lines[0].remainingQuantity, 3);
+    assert.equal(salesOrder.deliveries.length, 2);
+
+    const report = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(report.response.status, 200, JSON.stringify(report.payload));
+    const campaignReport = report.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
+    assert.ok(campaignReport);
+    assert.equal(campaignReport.orderCount, 1);
+    assert.equal(campaignReport.attributedRevenueZmw, salesOrder.deliveredZmw);
+    assert.equal(report.payload.totals.campaignLinkOrders, before.payload.totals.campaignLinkOrders + 1);
+    assert.equal(report.payload.totals.attributedOrders, before.payload.totals.attributedOrders + 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+      if (orderId) {
+        await client.query("DELETE FROM marketing_attributions WHERE sales_order_id = $1", [orderId]);
+        await client.query(
+          "DELETE FROM sales_delivery_lines WHERE delivery_id IN (SELECT id FROM sales_deliveries WHERE sales_order_id = $1)",
+          [orderId],
+        );
+        await client.query("DELETE FROM sales_deliveries WHERE sales_order_id = $1", [orderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [orderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [orderId]);
+      }
+      if (campaignId) await client.query("DELETE FROM marketing_campaigns WHERE id = $1", [campaignId]);
+      if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
+      if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
