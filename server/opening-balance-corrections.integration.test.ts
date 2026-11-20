@@ -78,7 +78,7 @@ test("opening-balance reversals and replacements reject retries and concurrent d
         sourceType: "opening_balances",
         sourceId: null,
         memo: "Opening-balance correction integration fixture",
-        entryDate: "2026-11-18",
+        entryDate: "2026-11-17",
       }).returning();
       await tx.insert(journalLines).values(originalLines.map((line) => ({
         journalEntryId: entry.id,
@@ -91,7 +91,7 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     });
     fixtureEntryIds.push(original.id);
 
-    const reversalBody = { effectiveAt: "2026-11-18", reason: `Correction test ${suffix}` };
+    const reversalBody = { effectiveAt: "2026-11-17", reason: `Correction test ${suffix}` };
     assert.equal(
       (await post(`/api/accounting/opening-balances/${original.id}/reverse`, reversalBody, "manager")).status,
       403,
@@ -120,7 +120,7 @@ test("opening-balance reversals and replacements reject retries and concurrent d
 
     const replacementBody = {
       reversalEntryId: reversal.id,
-      effectiveAt: "2026-11-18",
+      effectiveAt: "2026-11-17",
       cashOnHandZmw: "150.00",
       bankZmw: "0.00",
       mobileMoneyZmw: "0.00",
@@ -159,8 +159,9 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     assert.equal(reversal.sourceId, original.id);
     assert.equal(original.sourceType, "opening_balances");
 
+    const secondReversalBody = { ...reversalBody, effectiveAt: "2026-11-19" };
     assert.equal(
-      (await post(`/api/accounting/opening-balances/${replacement.id}/reverse`, reversalBody)).status,
+      (await post(`/api/accounting/opening-balances/${replacement.id}/reverse`, secondReversalBody)).status,
       201,
       "a replacement may be reversed for a later correction",
     );
@@ -175,6 +176,7 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     const secondReplacementBody = {
       ...replacementBody,
       reversalEntryId: secondReversal.id,
+      effectiveAt: "2026-11-19",
       cashOnHandZmw: "175.00",
       memo: `Second corrected opening balances ${suffix}`,
     };
@@ -190,7 +192,7 @@ test("opening-balance reversals and replacements reject retries and concurrent d
     assert.equal(secondReversal.sourceId, replacement.id);
     assert.equal(secondReplacement.sourceKey, `opening-balance-replacement-${secondReversal.id}`);
 
-    const historyResponse = await get("/api/accounting?from=2026-11-18&to=2026-11-19");
+    const historyResponse = await get("/api/accounting?from=2026-11-19&to=2026-11-19");
     assert.equal(historyResponse.status, 200, JSON.stringify(historyResponse.payload));
     const openingHistory = historyResponse.payload.openingBalances.history;
     assert.equal(openingHistory.length, 5, "history must return the original and both correction cycles exactly once");
@@ -199,6 +201,17 @@ test("opening-balance reversals and replacements reject retries and concurrent d
       [original.id, reversal.id, replacement.id, secondReversal.id, secondReplacement.id].sort((a, b) => a - b),
     );
     assert.equal(new Set(openingHistory.map((entry: { id: number }) => entry.id)).size, 5);
+    assert.deepEqual(
+      openingHistory.filter((entry: { entryDate: string }) => entry.entryDate === "2026-11-17")
+        .map((entry: { id: number }) => entry.id).sort((a: number, b: number) => a - b),
+      [original.id, reversal.id, replacement.id].sort((a, b) => a - b),
+      "entries outside the narrow report period must remain available to explain the linked history",
+    );
+    assert.deepEqual(
+      openingHistory.filter((entry: { entryDate: string }) => entry.entryDate === "2026-11-19")
+        .map((entry: { id: number }) => entry.id).sort((a: number, b: number) => a - b),
+      [secondReversal.id, secondReplacement.id].sort((a, b) => a - b),
+    );
 
     type OpeningHistoryEntry = {
       id: number;
