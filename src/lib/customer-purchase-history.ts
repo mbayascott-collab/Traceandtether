@@ -29,3 +29,13 @@ export function matchesCustomerPurchaseHistory(order: SearchableSalesOrder, quer
 export function filterCustomerPurchaseHistory<T extends SearchableSalesOrder>(orders: readonly T[], query: string): T[] {
   return orders.filter((order) => matchesCustomerPurchaseHistory(order, query));
 }
+
+export function pageCustomerPurchaseHistory<T extends SearchableSalesOrder>(
+  orders: readonly T[],
+  query: string,
+  visibleCount: number,
+): { matching: T[]; visible: T[]; hasMore: boolean } {
+  const matching = filterCustomerPurchaseHistory(orders, query);
+  const visible = matching.slice(0, Math.max(0, visibleCount));
+  return { matching, visible, hasMore: visible.length < matching.length };
+}

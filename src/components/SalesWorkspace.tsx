@@ -4,14 +4,16 @@ import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopBlockedSpike, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
-import { filterCustomerPurchaseHistory } from "../lib/customer-purchase-history";
+import { pageCustomerPurchaseHistory } from "../lib/customer-purchase-history";
+import { describeDeliveryNoteLocations } from "../lib/delivery-note-locations";
+import { processDeliveryProofUploads, type DeliveryProofUpload } from "../lib/delivery-proof-upload";
 import { salesInvoiceDocument } from "../lib/sales-invoice-document";
 import { clearSalesProofRetryKey, getSalesProofRetryKey } from "../lib/sales-proof-retry";
 import { chooseSalesStockAllocations } from "../../shared/sales-stock-allocation";
 
 type Mode = "customers" | "orders";
 type Line = { productId: string; quantity: string; unitPriceZmw: string };
-type ReceiptProofUpload = { file: File; idempotencyKey: string };
+type ReceiptProofUpload = DeliveryProofUpload<File>;
 const emptyLine = (): Line => ({ productId: "", quantity: "1", unitPriceZmw: "" });
 const zmw = (amount: string) => `ZMW ${Number(amount).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const companyName = "Trace and Tether Craft Studio Limited";
@@ -58,6 +60,7 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
   const [purchaseHistorySearch, setPurchaseHistorySearch] = useState("");
+  const [purchaseHistoryVisibleCount, setPurchaseHistoryVisibleCount] = useState(25);
   const [customerSearch, setCustomerSearch] = useState("");
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
@@ -222,11 +225,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const uploads = receiptProofUploads.filter(({ file }) => file.size > 0);
-    const files = uploads.map(({ file }) => file);
-    if (files.some((file) => file.size > 5 * 1024 * 1024)) {
-      setError("Each signed proof file must be 5 MB or smaller.");
-      return;
-    }
+    const preparedUploads = uploads.map((upload) => upload.file.size > 5 * 1024 * 1024
+      ? { ...upload, status: "failed" as const, error: "Each signed proof file must be 5 MB or smaller." }
+      : upload);
+    const oversizedKeys = new Set(preparedUploads
+      .filter((upload) => upload.file.size > 5 * 1024 * 1024)
+      .map((upload) => upload.idempotencyKey));
+    const validUploads = preparedUploads.filter((upload) => !oversizedKeys.has(upload.idempotencyKey));
+    setReceiptProofUploads(preparedUploads);
     const receivedAtValue = String(form.get("receivedAt") || "");
     const receivedAt = new Date(receivedAtValue);
     if (!Number.isFinite(receivedAt.getTime())) {
@@ -241,13 +247,30 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         receivedBy: String(form.get("receivedBy") || "").trim(),
         receivedAt: receivedAt.toISOString(),
       });
-      for (const upload of uploads) {
-        const proof = await addSalesDeliveryReceiptProof(delivery.id, upload.file, upload.idempotencyKey);
-        clearSalesProofRetryKey(window.sessionStorage, delivery.id, upload.file);
-        if (!savedProofs.some((saved) => saved.id === proof.id)) savedProofs.push(proof);
-        setReceiptDelivery((current) => current?.delivery.id === delivery.id
-          ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
-          : current);
+      const result = await processDeliveryProofUploads(
+        validUploads,
+        async (upload) => {
+          const proof = await addSalesDeliveryReceiptProof(delivery.id, upload.file, upload.idempotencyKey);
+          clearSalesProofRetryKey(window.sessionStorage, delivery.id, upload.file);
+          if (!savedProofs.some((saved) => saved.id === proof.id)) savedProofs.push(proof);
+          setReceiptDelivery((current) => current?.delivery.id === delivery.id
+            ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
+            : current);
+          return proof;
+        },
+        (progress) => {
+          const progressByKey = new Map(progress.map((upload) => [upload.idempotencyKey, upload]));
+          setReceiptProofUploads((current) => current.map((upload) => progressByKey.get(upload.idempotencyKey) ?? upload));
+        },
+      );
+      const progressByKey = new Map(result.uploads.map((upload) => [upload.idempotencyKey, upload]));
+      const finalUploads = preparedUploads.map((upload) => progressByKey.get(upload.idempotencyKey) ?? upload);
+      setReceiptProofUploads(finalUploads);
+      if (result.failed.length || finalUploads.some((upload) => upload.status === "failed")) {
+        const failedFiles = finalUploads.filter((upload) => upload.status === "failed");
+        const failureDetails = failedFiles.map((upload) => `${upload.file.name}: ${upload.error}`).join(" ");
+        setError(`Receipt details were saved. ${savedProofs.length} proof file(s) are attached; ${failedFiles.length} file(s) need attention. ${failureDetails} Save again to retry only unfinished files.`);
+        return;
       }
       setReceiptProofUploads([]);
       setReceiptDelivery(null);
@@ -258,8 +281,8 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         setReceiptDelivery((current) => current?.delivery.id === delivery.id
           ? { ...current, delivery: { ...current.delivery, receipt: { ...savedReceipt!, proofs: [...savedProofs] } } }
           : current);
-        const detail = cause instanceof Error ? cause.message : "Could not upload a proof file.";
-        setError(`The receipt is saved and ${savedProofs.length} proof file(s) are attached. ${detail} Keep the selected files and save again to safely retry.`);
+        const detail = cause instanceof Error ? cause.message : "Could not save the delivery receipt.";
+        setError(`Could not save the delivery receipt details. ${detail} Any selected proof files remain available to retry.`);
       } else {
         setError(cause instanceof Error ? cause.message : "Could not save the delivery receipt.");
       }
@@ -361,19 +384,22 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
         if (historyCustomer && !matchesCustomer(historyCustomer, value)) {
           setHistoryCustomer(null);
           setPurchaseHistorySearch("");
+          setPurchaseHistoryVisibleCount(25);
         }
       }} /></label>
       <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => {
         const closing = historyCustomer?.id === c.id;
         setHistoryCustomer(closing ? null : c);
         setPurchaseHistorySearch("");
+        setPurchaseHistoryVisibleCount(25);
       }}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
       {historyCustomer && filteredCustomers.some((item) => item.id === historyCustomer.id) && (() => {
         const customer = customers.find((item) => item.id === historyCustomer.id) ?? historyCustomer;
         const purchases = orders
           .filter((order) => order.customerId === customer.id && Number(order.deliveredZmw) > 0)
           .sort((a, b) => b.orderDate.localeCompare(a.orderDate));
-        const matchingPurchases = filterCustomerPurchaseHistory(purchases, purchaseHistorySearch);
+        const { matching: matchingPurchases, visible: visiblePurchases, hasMore } =
+          pageCustomerPurchaseHistory(purchases, purchaseHistorySearch, purchaseHistoryVisibleCount);
         return <div className="panel data-table-wrap">
           <div className="panel-heading"><div><p className="eyebrow">Customer account</p><h2>{customer.name}</h2><p>Customer ID: <strong>{customerCode(customer.id)}</strong></p></div><div><button className="button button-secondary button-small" onClick={() => setEditingCustomer(customer)}>Edit details</button>{" "}<button className="button button-secondary button-small" onClick={() => setHistoryCustomer(null)}>Close customer</button></div></div>
           <p><strong>Contact person:</strong> {customer.contactPerson || "—"}</p>
@@ -388,10 +414,14 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             type="search"
             placeholder="Order number, delivery note, or date"
             value={purchaseHistorySearch}
-            onChange={(event) => setPurchaseHistorySearch(event.target.value)}
+            onChange={(event) => {
+              setPurchaseHistorySearch(event.target.value);
+              setPurchaseHistoryVisibleCount(25);
+            }}
           /></label>
+          <p className="report-footnote">Showing {visiblePurchases.length} of {matchingPurchases.length} matching purchase(s).</p>
           <table><thead><tr><th>Order</th><th>Order date</th><th>Items delivered</th><th>Delivered value</th><th>Delivery notes and proof</th><th>Status</th></tr></thead>
-            <tbody>{matchingPurchases.map((order) => <tr key={order.id}>
+            <tbody>{visiblePurchases.map((order) => <tr key={order.id}>
               <td>{order.orderNumber}</td><td>{new Date(order.orderDate).toLocaleDateString("en-ZM")}</td>
               <td>{order.lines.filter((line) => line.deliveredQuantity > 0).map((line) => `${line.productName} × ${line.deliveredQuantity}`).join(", ")}</td>
               <td>{zmw(order.deliveredZmw)}</td>
@@ -427,6 +457,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
           {!purchases.length
             ? <p className="report-footnote">This customer has no delivered purchases yet.</p>
             : !matchingPurchases.length && <p className="report-footnote">No delivered purchases match “{purchaseHistorySearch}”. Try an order number, delivery note number, or date.</p>}
+          {hasMore && <button
+            type="button"
+            className="button button-secondary button-small"
+            onClick={() => setPurchaseHistoryVisibleCount((current) => current + 25)}
+          >Load 25 more purchases</button>}
         </div>;
       })()}
     </>}
@@ -637,12 +672,19 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
                 idempotencyKey: getSalesProofRetryKey(
                   window.sessionStorage, receiptDelivery.delivery.id, file, () => window.crypto.randomUUID(),
                 ),
+                status: "pending",
               })));
             } catch {
               setError("This browser could not save a safe retry key for the proof upload. Check storage settings and select the file again.");
             }
-          }} />
+          }} disabled={receiptSubmitting} />
         </label>
+        {!!receiptProofUploads.length && <ul className="proof-upload-progress" aria-live="polite" aria-label="Signed proof upload progress">
+          {receiptProofUploads.map((upload) => <li key={upload.idempotencyKey}>
+            <strong>{upload.file.name}</strong>
+            <span>{upload.status === "pending" ? "Waiting" : upload.status === "uploading" ? "Uploading…" : upload.status === "saved" ? "Saved" : `Failed${upload.error ? `: ${upload.error}` : ""}`}</span>
+          </li>)}
+        </ul>}
         {!!receiptDelivery.delivery.receipt?.proofs.length && <div>
           <strong>Saved signed proof files</strong>
           <ul>{receiptDelivery.delivery.receipt.proofs.map((proof, index) => <li key={proof.id ?? `legacy-${index}`}>
@@ -732,7 +774,10 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
       const noteRef = delivery?.deliveryNumber ?? deliveryNoteNumber(order);
       const noteLines = delivery
         ? delivery.lines.map((line) => ({ ...line }))
-        : order.lines.map((line) => ({ salesOrderLineId: line.id, productName: line.productName, sku: line.sku, quantity: line.quantity }));
+        : order.lines.map((line) => ({
+          salesOrderLineId: line.id, productName: line.productName, sku: line.sku, quantity: line.quantity,
+          stockLocations: [],
+        }));
       return <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="delivery-note-preview-title">
         <div className="quote-preview-panel">
           <div className="quote-preview-toolbar">
@@ -762,7 +807,11 @@ export default function SalesWorkspace({ mode }: { mode: Mode }) {
             <table className="customer-quote-document-table">
               <thead><tr><th>Product</th><th>SKU</th><th className="quote-number-cell">Quantity</th></tr></thead>
               <tbody>{noteLines.map((line) => <tr key={line.salesOrderLineId}>
-                <td>{line.productName}</td><td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td>
+                <td>
+                  <strong>{line.productName}</strong>
+                  <small className="delivery-note-locations">Shipped from: {describeDeliveryNoteLocations(line.stockLocations)}</small>
+                </td>
+                <td>{line.sku}</td><td className="quote-number-cell">{line.quantity}</td>
               </tr>)}</tbody>
             </table>
             {order.notes && <section className="customer-quote-document-notes"><span>ORDER NOTES</span><p>{order.notes}</p></section>}

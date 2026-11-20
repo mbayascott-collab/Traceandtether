@@ -27,7 +27,9 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
     type: "application/octet-stream",
     limit: "5mb",
   }));
-  const owner: RequestHandler = (_req, res, next) => {
+  const owner: RequestHandler = (req, res, next) => {
+    const role = req.header("x-test-role") ?? "owner";
+    if (role !== "owner") return res.status(403).json({ error: "Only an owner may download signed delivery proof." });
     res.locals.actor = { clerkUserId: `proof-retry-${suffix}`, email: actorEmail, role: "owner" };
     next();
   };
@@ -157,6 +159,10 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
     );
     assert.equal(separate.response.status, 201, JSON.stringify(separate.payload));
     assert.notEqual(separate.payload.proof.id, original.payload.proof.id);
+    const invalidUpload = await upload(
+      delivery.id, "invalid-proof.txt", randomUUID(), Buffer.from("not a supported proof file"),
+    );
+    assert.equal(invalidUpload.response.status, 400, JSON.stringify(invalidUpload.payload));
     const additionalFormats = [
       {
         fileName: "signed-receipt.jpg",
@@ -271,7 +277,9 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
       "editing receipt details must leave every signed proof attached",
     );
 
-    const download = async (url: string) => fetch(new URL(url, baseUrl));
+    const download = async (url: string, role = "owner") => fetch(new URL(url, baseUrl), {
+      headers: { "x-test-role": role },
+    });
     for (const [ownDeliveryId, proof] of [
       [delivery.id, { id: original.payload.proof.id, mimeType: "application/pdf", data: firstFile }],
       [delivery.id, {
@@ -288,6 +296,9 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
       const response = await download(url);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get("content-type"), proof.mimeType);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.match(response.headers.get("content-disposition") ?? "", /^attachment;\s*filename="/i);
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), proof.data);
     }
     const legacyUrl = salesDeliveryReceiptProofUrl(legacyDelivery.id);
@@ -296,7 +307,19 @@ test("customer purchase history keeps delivery notes, receipt details, and prote
     assert.equal(legacyDownload.status, 200);
     assert.equal(legacyDownload.headers.get("content-type"), "application/pdf");
     assert.match(legacyDownload.headers.get("content-disposition") ?? "", /legacy-signed-note\.pdf/);
+    assert.equal(legacyDownload.headers.get("cache-control"), "no-store");
+    assert.equal(legacyDownload.headers.get("x-content-type-options"), "nosniff");
     assert.deepEqual(Buffer.from(await legacyDownload.arrayBuffer()), legacyFile);
+
+    for (const url of [
+      salesDeliveryReceiptProofFileUrl(delivery.id, original.payload.proof.id),
+      salesDeliveryReceiptProofUrl(legacyDelivery.id),
+    ]) {
+      const denied = await download(url, "manager");
+      assert.equal(denied.status, 403);
+      const denialBody = await denied.text();
+      assert.doesNotMatch(denialBody, /signed-receipt|legacy-signed-note|application\/pdf|%PDF/);
+    }
 
     for (const proofId of [original.payload.proof.id, separate.payload.proof.id]) {
       const mismatched = await download(salesDeliveryReceiptProofFileUrl(otherDelivery.id, proofId));

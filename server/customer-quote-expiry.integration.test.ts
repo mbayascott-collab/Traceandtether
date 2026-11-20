@@ -3,8 +3,10 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
-import { eq } from "drizzle-orm";
-import { customers, customerQuoteLines, customerQuotes, products, salesOrders } from "../shared/schema";
+import { and, eq } from "drizzle-orm";
+import {
+  businessAuditLogs, customers, customerQuoteLines, customerQuotes, products, salesOrderLines, salesOrders,
+} from "../shared/schema";
 
 test("customer quote conversion requires explicit confirmation only after expiry", {
   skip: !process.env.DATABASE_URL,
@@ -113,12 +115,41 @@ test("customer quote conversion requires explicit confirmation only after expiry
     assert.equal(confirmed.payload.quote.status, "converted");
     assert.equal(confirmed.payload.order.status, "draft");
     orderIds.push(confirmed.payload.order.id);
+    const expiredApprovalRows = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "customer_quote"),
+      eq(businessAuditLogs.entityId, expiredQuote.id),
+    ));
+    const expiredApproval = expiredApprovalRows.find((entry) => entry.action === "approved");
+    assert.ok(expiredApproval, "expired quote conversion must create an approval audit entry");
+    assert.equal(expiredApproval.actorEmail, actorEmail);
+    assert.ok(expiredApproval.changedFields.includes("Expired quote prices"));
+    assert.ok(expiredApproval.changedFields.includes("Quote expiry date: 2000-01-01"));
 
-    const current = await convert(currentQuote.id, {});
+    const current = await convert(currentQuote.id, { confirmExpired: true });
     assert.equal(current.status, 200, JSON.stringify(current.payload));
     assert.equal(current.payload.quote.status, "converted");
     assert.equal(current.payload.order.status, "draft");
     orderIds.push(current.payload.order.id);
+    const currentAuditRows = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "customer_quote"),
+      eq(businessAuditLogs.entityId, currentQuote.id),
+    ));
+    assert.equal(
+      currentAuditRows.some((entry) => entry.action === "approved"),
+      false,
+      "confirmation on an unexpired quote must not create an expired-price approval",
+    );
+
+    const repeated = await convert(expiredQuote.id, { confirmExpired: true });
+    assert.equal(repeated.status, 409, JSON.stringify(repeated.payload));
+    const [savedExpiredQuote] = await db.select().from(customerQuotes)
+      .where(eq(customerQuotes.id, expiredQuote.id));
+    assert.equal(savedExpiredQuote?.salesOrderId, confirmed.payload.order.id);
+    const customerOrders = await db.select().from(salesOrders).where(eq(salesOrders.customerId, customerId));
+    assert.equal(customerOrders.length, 2, "repeat conversion must not create a second order");
+    const linkedOrderLines = await db.select().from(salesOrderLines)
+      .where(eq(salesOrderLines.salesOrderId, confirmed.payload.order.id));
+    assert.equal(linkedOrderLines.length, 1, "repeat conversion must not duplicate the draft order lines");
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

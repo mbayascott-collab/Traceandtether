@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterCustomerPurchaseHistory, matchesCustomerPurchaseHistory } from "./customer-purchase-history";
+import { filterCustomerPurchaseHistory, matchesCustomerPurchaseHistory, pageCustomerPurchaseHistory } from "./customer-purchase-history";
 
 const order = {
   orderNumber: "SO-00421",
@@ -59,4 +59,30 @@ test("filtering customer purchase history keeps the original delivery proof link
   const filtered = filterCustomerPurchaseHistory([withProof], "DN-00421-02");
   assert.equal(filtered[0], withProof, "Filtering should retain the full purchase record.");
   assert.deepEqual(filtered[0]?.deliveries[0]?.receipt?.proofs, withProof.deliveries[0]?.receipt?.proofs);
+});
+
+test("purchase history pages results after searching the full customer history", () => {
+  const orders = Array.from({ length: 40 }, (_, index) => ({
+    ...order,
+    orderNumber: `SO-${String(index + 1).padStart(5, "0")}`,
+    deliveries: [{
+      deliveryNumber: `DN-${String(index + 1).padStart(5, "0")}`,
+      deliveryDate: "2026-06-12",
+      receipt: {
+        receivedBy: "Customer",
+        receivedAt: "2026-06-12T12:00:00.000Z",
+        proofs: [{ id: index + 1, fileName: `signed-${index + 1}.pdf`, mimeType: "application/pdf" }],
+      },
+    }],
+  }));
+  const firstPage = pageCustomerPurchaseHistory(orders, "", 25);
+  assert.equal(firstPage.visible.length, 25);
+  assert.equal(firstPage.matching.length, 40);
+  assert.equal(firstPage.hasMore, true);
+
+  const laterMatch = pageCustomerPurchaseHistory(orders, "DN-00040", 25);
+  assert.equal(laterMatch.matching.length, 1, "Search must include entries beyond the first visible page.");
+  assert.equal(laterMatch.visible[0]?.orderNumber, "SO-00040");
+  assert.equal(laterMatch.visible[0]?.deliveries[0]?.receipt?.proofs[0]?.fileName, "signed-40.pdf");
+  assert.equal(laterMatch.hasMore, false);
 });
