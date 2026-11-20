@@ -103,6 +103,39 @@ test("allocates product landed-cost adjustments once across deliveries by record
   assert.equal([...allocated.values()].reduce((total, value) => total + value, 0n), 150n);
 });
 
+test("allocates negative landed-cost reversals deterministically without losing cents", () => {
+  const result = allocateLandedCostAdjustments(
+    [
+      { deliveryId: 10, orderId: 1, productId: 4 },
+      { deliveryId: 11, orderId: 2, productId: 4 },
+      { deliveryId: 12, orderId: 3, productId: 4 },
+    ],
+    [
+      { deliveryId: 10, productId: 4, debitZmw: "1.00" },
+      { deliveryId: 11, productId: 4, debitZmw: "1.00" },
+      { deliveryId: 12, productId: 4, debitZmw: "2.00" },
+    ],
+    [{ productId: 4, debitZmw: "0.00", creditZmw: "0.05" }],
+  );
+  assert.deepEqual([...result.adjustmentByDelivery].sort(([a], [b]) => a - b), [
+    [10, -1n], [11, -1n], [12, -3n],
+  ]);
+  assert.deepEqual(
+    [...result.adjustmentByDeliveryProduct].map(([deliveryId, products]) => [
+      deliveryId,
+      [...products],
+    ]).sort(([a], [b]) => Number(a) - Number(b)),
+    [[10, [[4, -1n]]], [11, [[4, -1n]]], [12, [[4, -3n]]]],
+  );
+  assert.equal([...result.adjustmentByDelivery.values()].reduce((total, value) => total + value, 0n), -5n);
+  assert.equal(
+    [...result.adjustmentByDeliveryProduct.values()]
+      .flatMap((allocations) => [...allocations.values()])
+      .reduce((total, value) => total + value, 0n),
+    -5n,
+  );
+});
+
 test("does not invent a delivery allocation when product COGS has no delivery-cost basis", () => {
   const missingBasis = allocateLandedCostAdjustments(
     [{ deliveryId: 10, orderId: 1, productId: 4 }],

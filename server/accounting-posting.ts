@@ -146,6 +146,7 @@ export function allocateLandedCostAdjustments(
   }
 
   const adjustmentByDelivery = new Map<number, bigint>();
+  const adjustmentByDeliveryProduct = new Map<number, Map<number, bigint>>();
   const unallocatedByProduct = new Map<number, bigint>();
   for (const [productId, adjustment] of adjustmentsByProduct) {
     if (adjustment === 0n) continue;
@@ -184,10 +185,16 @@ export function allocateLandedCostAdjustments(
         allocation.deliveryId,
         (adjustmentByDelivery.get(allocation.deliveryId) ?? 0n) + signedAmount,
       );
+      const productAllocations = adjustmentByDeliveryProduct.get(allocation.deliveryId) ?? new Map<number, bigint>();
+      productAllocations.set(
+        productId,
+        (productAllocations.get(productId) ?? 0n) + signedAmount,
+      );
+      adjustmentByDeliveryProduct.set(allocation.deliveryId, productAllocations);
       remaining -= extraCent;
     }
   }
-  return { adjustmentByDelivery, unallocatedByProduct };
+  return { adjustmentByDelivery, adjustmentByDeliveryProduct, unallocatedByProduct };
 }
 
 export function allocateLandedCostAdjustmentsByDelivery(

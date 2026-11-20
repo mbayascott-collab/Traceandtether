@@ -1237,6 +1237,297 @@ test("marketing report counts partial campaign deliveries once and matches poste
     });
     assert.equal(returnDateReport.payload.totals.attributedRevenueZmw, "-100.00");
     assert.equal(returnDateReport.payload.totals.productCostZmw, "-10.00");
+
+    const fullRangeBeforeReversal = await request(
+      "/api/marketing/reports?from=2025-01-10&to=2025-01-11",
+    );
+    const beforeReversalCampaign = fullRangeBeforeReversal.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    const reversalEntry = await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-cross-negative-adjustment`,
+      sourceType: "landed_cost_adjustment",
+      sourceId: crossPeriodProduct.id,
+      memo: `${prefix} cross-period landed-cost reversal`,
+      entryDate: "2025-02-01",
+      lines: [
+        { accountKey: "inventory", productId: crossPeriodProduct.id, debitZmw: "1.01" },
+        { accountKey: "cost_of_goods_sold", productId: crossPeriodProduct.id, creditZmw: "1.01" },
+      ],
+    }));
+    const readReversalJournal = () => db.select({
+      systemKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalEntries.id, reversalEntry.id));
+    const sourceReversalJournal = await readReversalJournal();
+    assert.deepEqual(
+      sourceReversalJournal
+        .map((line) => [line.systemKey, line.debitZmw, line.creditZmw])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      [
+        ["cost_of_goods_sold", "0.00", "1.01"],
+        ["inventory", "1.01", "0.00"],
+      ],
+    );
+
+    const jan10AfterReversal = await request(
+      "/api/marketing/reports?from=2025-01-10&to=2025-01-10",
+    );
+    const jan11AfterReversal = await request(
+      "/api/marketing/reports?from=2025-01-11&to=2025-01-11",
+    );
+    const fullRangeAfterReversal = await request(
+      "/api/marketing/reports?from=2025-01-10&to=2025-01-11",
+    );
+    const jan10Campaign = jan10AfterReversal.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    const jan11Campaign = jan11AfterReversal.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    const fullRangeCampaign = fullRangeAfterReversal.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    assert.deepEqual({
+      jan10: [
+        jan10Campaign.productCostZmw,
+        jan10Campaign.landedCostAdjustmentZmw,
+        jan10Campaign.netContributionZmw,
+        jan10Campaign.landedCostAdjustmentDeliveries[0].adjustmentZmw,
+      ],
+      jan11: [
+        jan11Campaign.productCostZmw,
+        jan11Campaign.landedCostAdjustmentZmw,
+        jan11Campaign.netContributionZmw,
+        jan11Campaign.landedCostAdjustmentDeliveries[0].adjustmentZmw,
+      ],
+      combined: [
+        fullRangeCampaign.productCostZmw,
+        fullRangeCampaign.landedCostAdjustmentZmw,
+        fullRangeCampaign.netContributionZmw,
+      ],
+    }, {
+      jan10: ["14.75", "4.75", "85.25", "4.75"],
+      jan11: ["44.24", "14.24", "55.76", "14.24"],
+      combined: ["58.99", "18.99", "141.01"],
+    });
+    assert.equal(
+      centsDelta(fullRangeAfterReversal.payload.totals.productCostZmw, fullRangeBeforeReversal.payload.totals.productCostZmw),
+      "-101",
+    );
+    assert.equal(
+      centsDelta(fullRangeAfterReversal.payload.totals.landedCostAdjustmentZmw, fullRangeBeforeReversal.payload.totals.landedCostAdjustmentZmw),
+      "-101",
+    );
+    assert.equal(centsDelta(fullRangeCampaign.netContributionZmw, beforeReversalCampaign.netContributionZmw), "101");
+    assert.equal(
+      centsDelta(jan10Campaign.productCostZmw, fullRangeCampaign.productCostZmw),
+      "-4424",
+    );
+    assert.equal(
+      centsDelta(jan11Campaign.productCostZmw, fullRangeCampaign.productCostZmw),
+      "-1475",
+    );
+    assert.equal(
+      BigInt(jan10Campaign.attributedRevenueZmw.replace(".", ""))
+        + BigInt(jan11Campaign.attributedRevenueZmw.replace(".", "")),
+      BigInt(fullRangeCampaign.attributedRevenueZmw.replace(".", "")),
+    );
+    assert.equal(
+      BigInt(jan10Campaign.productCostZmw.replace(".", ""))
+        + BigInt(jan11Campaign.productCostZmw.replace(".", "")),
+      BigInt(fullRangeCampaign.productCostZmw.replace(".", "")),
+    );
+    assert.equal(
+      BigInt(jan10Campaign.landedCostAdjustmentZmw.replace(".", ""))
+        + BigInt(jan11Campaign.landedCostAdjustmentZmw.replace(".", "")),
+      BigInt(fullRangeCampaign.landedCostAdjustmentZmw.replace(".", "")),
+    );
+    assert.deepEqual(await readReversalJournal(), sourceReversalJournal);
+
+    const [breakdownProductA, breakdownProductB] = await db.insert(products).values([
+      {
+        sku: `MKT-${suffix}-PDA`,
+        name: `${prefix} breakdown product A`,
+        sellingPriceZmw: "100.00",
+        status: "active",
+      },
+      {
+        sku: `MKT-${suffix}-PDB`,
+        name: `${prefix} breakdown product B`,
+        sellingPriceZmw: "200.00",
+        status: "active",
+      },
+    ]).returning();
+    const [breakdownOrder] = await db.insert(salesOrders).values({
+      orderNumber: `${orderPrefix}-BREAKDOWN`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: "2025-02-02",
+    }).returning();
+    const [breakdownLineA, breakdownLineB] = await db.insert(salesOrderLines).values([
+      { salesOrderId: breakdownOrder.id, productId: breakdownProductA.id, quantity: 1, unitPriceZmw: "100.00" },
+      { salesOrderId: breakdownOrder.id, productId: breakdownProductB.id, quantity: 1, unitPriceZmw: "200.00" },
+    ]).returning();
+    const [breakdownDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `MR-${suffix.slice(0, 12)}-BD`,
+      salesOrderId: breakdownOrder.id,
+      deliveryDate: "2025-02-02",
+    }).returning();
+    await db.insert(salesDeliveryLines).values([
+      { deliveryId: breakdownDelivery.id, salesOrderLineId: breakdownLineA.id, quantity: 1 },
+      { deliveryId: breakdownDelivery.id, salesOrderLineId: breakdownLineB.id, quantity: 1 },
+    ]);
+    await db.insert(marketingAttributions).values({
+      salesOrderId: breakdownOrder.id,
+      campaignId: crossPeriodCampaign.id,
+      source: "manual",
+    });
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-breakdown-revenue`,
+      sourceType: "sales_delivery",
+      sourceId: breakdownDelivery.id,
+      memo: `${prefix} product breakdown revenue`,
+      entryDate: "2025-02-02",
+      lines: [
+        { accountKey: "accounts_receivable", debitZmw: "300.00" },
+        { accountKey: "sales_revenue", creditZmw: "300.00" },
+      ],
+    }));
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-breakdown-cogs`,
+      sourceType: "sales_delivery_cogs",
+      sourceId: breakdownDelivery.id,
+      memo: `${prefix} product breakdown cost`,
+      entryDate: "2025-02-02",
+      lines: [
+        { accountKey: "cost_of_goods_sold", productId: breakdownProductA.id, debitZmw: "10.00" },
+        { accountKey: "inventory", productId: breakdownProductA.id, creditZmw: "10.00" },
+        { accountKey: "cost_of_goods_sold", productId: breakdownProductB.id, debitZmw: "20.00" },
+        { accountKey: "inventory", productId: breakdownProductB.id, creditZmw: "20.00" },
+      ],
+    }));
+    for (const [product, amount] of [[breakdownProductA, "1.01"], [breakdownProductB, "2.03"]] as const) {
+      await db.transaction((tx) => postJournal(tx, {
+        sourceKey: `${prefix}-breakdown-adjustment-${product.id}`,
+        sourceType: "landed_cost_adjustment",
+        sourceId: product.id,
+        memo: `${prefix} product breakdown landed cost`,
+        entryDate: "2025-02-02",
+        lines: [
+          { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: amount },
+          { accountKey: "inventory", productId: product.id, creditZmw: amount },
+        ],
+      }));
+    }
+    const breakdownReport = await request(
+      "/api/marketing/reports?from=2025-02-02&to=2025-02-02",
+    );
+    const breakdownCampaign = breakdownReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === crossPeriodCampaign.id,
+    );
+    const breakdownDetails = breakdownCampaign.landedCostAdjustmentDeliveries.find(
+      (delivery: { deliveryId: number }) => delivery.deliveryId === breakdownDelivery.id,
+    );
+    assert.deepEqual({
+      revenue: breakdownCampaign.attributedRevenueZmw,
+      productCost: breakdownCampaign.productCostZmw,
+      adjustment: breakdownCampaign.landedCostAdjustmentZmw,
+      contribution: breakdownCampaign.netContributionZmw,
+      deliveryAdjustment: breakdownDetails.adjustmentZmw,
+      productShares: breakdownDetails.products.map(
+        (product: { productName: string; adjustmentZmw: string }) => [product.productName, product.adjustmentZmw],
+      ),
+    }, {
+      revenue: "300.00",
+      productCost: "33.04",
+      adjustment: "3.04",
+      contribution: "266.96",
+      deliveryAdjustment: "3.04",
+      productShares: [
+        [`${prefix} breakdown product A`, "1.01"],
+        [`${prefix} breakdown product B`, "2.03"],
+      ],
+    });
+    assert.equal(
+      breakdownDetails.products.reduce(
+        (total: bigint, product: { adjustmentZmw: string }) => total + BigInt(product.adjustmentZmw.replace(".", "")),
+        0n,
+      ),
+      BigInt(breakdownDetails.adjustmentZmw.replace(".", "")),
+    );
+
+    const [unallocatedCampaign] = await db.insert(marketingCampaigns).values({
+      name: `${prefix} unallocated`, status: "active",
+    }).returning();
+    const [unallocatedProduct] = await db.insert(products).values({
+      sku: `MKT-${suffix}-UNALLOCATED`,
+      name: `${prefix} unallocated product`,
+      sellingPriceZmw: "50.00",
+      status: "active",
+    }).returning();
+    const [unallocatedOrder] = await db.insert(salesOrders).values({
+      orderNumber: `${orderPrefix}-UNCOSTED`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: "2025-02-03",
+    }).returning();
+    const [unallocatedLine] = await db.insert(salesOrderLines).values({
+      salesOrderId: unallocatedOrder.id,
+      productId: unallocatedProduct.id,
+      quantity: 1,
+      unitPriceZmw: "50.00",
+    }).returning();
+    const [unallocatedDelivery] = await db.insert(salesDeliveries).values({
+      deliveryNumber: `MR-${suffix.slice(0, 12)}-UC`,
+      salesOrderId: unallocatedOrder.id,
+      deliveryDate: "2025-02-03",
+    }).returning();
+    await db.insert(salesDeliveryLines).values({
+      deliveryId: unallocatedDelivery.id,
+      salesOrderLineId: unallocatedLine.id,
+      quantity: 1,
+    });
+    await db.insert(marketingAttributions).values({
+      salesOrderId: unallocatedOrder.id,
+      campaignId: unallocatedCampaign.id,
+      source: "manual",
+    });
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-unallocated-adjustment`,
+      sourceType: "landed_cost_adjustment",
+      sourceId: unallocatedProduct.id,
+      memo: `${prefix} unallocated landed cost`,
+      entryDate: "2025-02-03",
+      lines: [
+        { accountKey: "cost_of_goods_sold", productId: unallocatedProduct.id, debitZmw: "5.00" },
+        { accountKey: "inventory", productId: unallocatedProduct.id, creditZmw: "5.00" },
+      ],
+    }));
+    const unallocatedReport = await request(
+      "/api/marketing/reports?from=2025-02-03&to=2025-02-03",
+    );
+    const unallocatedCampaignReport = unallocatedReport.payload.campaigns.find(
+      (campaign: { id: number }) => campaign.id === unallocatedCampaign.id,
+    );
+    const unallocatedCorrection = unallocatedReport.payload.unallocatedLandedCostAdjustments.find(
+      (item: { productId: number }) => item.productId === unallocatedProduct.id,
+    );
+    assert.equal(unallocatedCampaignReport.productCostZmw, "0.00");
+    assert.equal(unallocatedCampaignReport.landedCostAdjustmentZmw, "0.00");
+    assert.equal(unallocatedCampaignReport.netContributionZmw, null);
+    assert.deepEqual(unallocatedCorrection, {
+      productId: unallocatedProduct.id,
+      productName: unallocatedProduct.name,
+      adjustmentZmw: "5.00",
+      campaignNames: [unallocatedCampaign.name],
+    });
+    assert.equal(unallocatedReport.payload.totals.unallocatedLandedCostAdjustmentZmw, "5.00");
+    assert.equal(unallocatedReport.payload.totals.netContributionZmw, null);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
