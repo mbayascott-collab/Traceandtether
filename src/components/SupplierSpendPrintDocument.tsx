@@ -13,7 +13,9 @@ export default function SupplierSpendPrintDocument({ report }: Props) {
   return <article id="supplier-spend-print-document" className="supplier-spend-print-document">
     <header className="supplier-spend-print-header">
       <p className="supplier-spend-print-eyebrow">Supplier report · ZMW</p>
-      <h1>Supplier spend and delivery</h1>
+      <h1>{report.suppliers.length === 1
+        ? `Supplier spend and delivery · ${report.suppliers[0]!.name}`
+        : "Supplier spend and delivery"}</h1>
       <p className="supplier-spend-print-period">
         {report.period.from ?? "All dates"} to {report.period.to ?? "All dates"}
       </p>
@@ -109,25 +111,29 @@ export default function SupplierSpendPrintDocument({ report }: Props) {
         Shared shipment expenses are allocated across linked supplier orders once. Unassigned costs are excluded from supplier rows.
       </p>
       <table className="supplier-spend-print-table supplier-spend-print-monthly">
-        <thead><tr><th scope="col">Month</th><th scope="col">Supplier</th><th scope="col">Goods ordered</th><th scope="col">Allocated import costs</th></tr></thead>
+        <thead><tr>
+          <th scope="col">Month</th><th scope="col">Supplier</th><th scope="col">Goods ordered</th>
+          <th scope="col">Allocated import costs</th><th scope="col">Supplier payments · separate</th>
+        </tr></thead>
         <tbody>
           {report.monthlySpend.flatMap((month) => month.suppliers.length
             ? [
               ...month.suppliers.map((supplier) => <tr key={`${month.month}-${supplier.supplierId}`}>
                 <th scope="row">{monthLabel(month.month)}</th><td>{supplier.supplierName}</td>
-                <td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td>
+                <td>{money(supplier.orderedGoodsZmw)}</td><td>{money(supplier.importCostsZmw)}</td><td>{money(supplier.paymentsZmw)}</td>
               </tr>),
               <tr key={`${month.month}-supplier-total`}>
                 <th scope="row">{monthLabel(month.month)} supplier-allocated total</th><td />
                 <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.orderedGoodsZmw), 0).toFixed(2))}</td>
                 <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.importCostsZmw), 0).toFixed(2))}</td>
+                <td>{money(month.suppliers.reduce((sum, supplier) => sum + Number(supplier.paymentsZmw), 0).toFixed(2))}</td>
               </tr>,
             ]
             : [<tr key={`${month.month}-supplier-empty`}>
-              <th scope="row">{monthLabel(month.month)}</th><td>No supplier costs assigned this month.</td>
+              <th scope="row">{monthLabel(month.month)}</th><td colSpan={2}>No supplier costs assigned this month.</td>
               <td>{money("0.00")}</td><td>{money("0.00")}</td>
             </tr>])}
-          {!report.monthlySpend.length && <tr><td colSpan={4}>No supplier costs in this period.</td></tr>}
+          {!report.monthlySpend.length && <tr><td colSpan={5}>No supplier costs in this period.</td></tr>}
         </tbody>
       </table>
     </section>

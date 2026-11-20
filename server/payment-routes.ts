@@ -404,33 +404,36 @@ export function registerPaymentRoutes(
     const { lineId, paymentId } = parsed.data;
     const [line] = await db.select().from(paymentStatementLines).where(eq(paymentStatementLines.id, lineId)).limit(1);
     if (!line) return bad(res, "Statement line not found.", 404);
-    if (paymentId === null) {
-      await db.transaction(async (tx) => {
-        await tx.update(paymentStatementLines).set({ matchedPaymentId: null }).where(eq(paymentStatementLines.id, lineId));
-        await recordBusinessAudit(tx, {
-          entityType: "payment_statement_line", entityId: line.id,
-          recordLabel: `Statement line #${line.id}`,
-          actor: res.locals.actor, action: "updated", changedFields: ["matchedPaymentId"],
-        });
-      });
-      return res.json({ ok: true });
-    }
-    const accountsByKey = await ensureAccountingAccounts(db);
-    const account = [...accountsByKey.values()].find((item) => item.id === line.accountId);
-    const method = accountMethod(account?.systemKey ?? null);
-    const [payment] = await db.select().from(businessPayments).where(eq(businessPayments.id, paymentId)).limit(1);
-    if (!payment || !method || payment.method !== method) {
-      return bad(res, "That payment does not use the selected cash, bank, or mobile money account.", 400);
+    if (paymentId !== null) {
+      const accountsByKey = await ensureAccountingAccounts(db);
+      const account = [...accountsByKey.values()].find((item) => item.id === line.accountId);
+      const method = accountMethod(account?.systemKey ?? null);
+      const [payment] = await db.select().from(businessPayments).where(eq(businessPayments.id, paymentId)).limit(1);
+      if (!payment || !method || payment.method !== method) {
+        return bad(res, "That payment does not use the selected cash, bank, or mobile money account.", 400);
+      }
     }
     try {
-      await db.transaction(async (tx) => {
-        await tx.update(paymentStatementLines).set({ matchedPaymentId: paymentId }).where(eq(paymentStatementLines.id, lineId));
+      const outcome = await db.transaction(async (tx) => {
+        const [lockedLine] = await tx.select().from(paymentStatementLines)
+          .where(eq(paymentStatementLines.id, lineId)).for("update").limit(1);
+        if (!lockedLine) return "not_found";
+        if (paymentId !== null && lockedLine.matchedPaymentId !== null && lockedLine.matchedPaymentId !== paymentId) {
+          return "already_matched";
+        }
+        if (lockedLine.matchedPaymentId === paymentId) return "unchanged";
+
+        await tx.update(paymentStatementLines).set({ matchedPaymentId: paymentId })
+          .where(eq(paymentStatementLines.id, lineId));
         await recordBusinessAudit(tx, {
-          entityType: "payment_statement_line", entityId: line.id,
-          recordLabel: `Statement line #${line.id}`,
+          entityType: "payment_statement_line", entityId: lockedLine.id,
+          recordLabel: `Statement line #${lockedLine.id}`,
           actor: res.locals.actor, action: "updated", changedFields: ["matchedPaymentId"],
         });
+        return "updated";
       });
+      if (outcome === "not_found") return bad(res, "Statement line not found.", 404);
+      if (outcome === "already_matched") return bad(res, "That statement line is already matched to another payment.", 409);
     } catch (error) {
       if (isUniqueViolation(error)) return bad(res, "That payment is already matched to another statement line.", 409);
       throw error;

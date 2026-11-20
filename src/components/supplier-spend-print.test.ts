@@ -27,7 +27,7 @@ function fixtureReport(): SupplierReportCsvData {
   const suppliers = Array.from({ length: rowCount }, (_, index) => {
     const id = String(index + 1).padStart(3, "0");
     return {
-      name: `Fixture Supplier ${id}`, orders: 2, orderedGoodsZmw: "240.00", importCostsZmw: "30.00",
+      supplierId: index + 1, name: `Fixture Supplier ${id}`, orders: 2, orderedGoodsZmw: "240.00", importCostsZmw: "30.00",
       paymentsZmw: "120.00", measuredDeliveryOrders: 2, onTimeOrders: 1, lateOrders: 1,
       missingExpectedDateOrders: 0, missingActualDateOrders: 0, incompleteDeliveryOrders: 0,
       overdueOpenOrders: 0, averageDeliveryVarianceDays: "1.5",
@@ -39,11 +39,17 @@ function fixtureReport(): SupplierReportCsvData {
     monthlySpend: [
       {
         month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
-        suppliers: [{ supplierId: 1, supplierName: "Fixture Supplier 001", orderedGoodsZmw: "240.00", importCostsZmw: "30.00" }],
+         suppliers: [{
+           supplierId: 1, supplierName: "Fixture Supplier 001",
+           orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
+         }],
       },
       {
         month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "10.00", paymentsZmw: "0.00",
-        suppliers: [{ supplierId: 1, supplierName: "Fixture Supplier 001", orderedGoodsZmw: "0.00", importCostsZmw: "10.00" }],
+         suppliers: [{
+           supplierId: 1, supplierName: "Fixture Supplier 001",
+           orderedGoodsZmw: "0.00", importCostsZmw: "10.00", paymentsZmw: "0.00",
+         }],
       },
     ],
     shipments: [{
@@ -92,6 +98,9 @@ test("supplier spend PDF includes report totals and keeps long supplier tables r
     assert.equal(pages.length, pageCount, "Extracted PDF pages should match pdfinfo.");
     const normalize = (value: string) => value.replace(/\s+/g, " ").toLocaleLowerCase();
     const allText = normalize(pages.join("\n"));
+    pages.forEach((page, index) => {
+      assert.match(normalize(page), new RegExp(`page ${index + 1}\\b`), `PDF page ${index + 1} should be numbered.`);
+    });
 
     for (let index = 1; index <= rowCount; index += 1) {
       const name = `Fixture Supplier ${String(index).padStart(3, "0")}`;

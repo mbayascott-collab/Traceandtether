@@ -96,6 +96,8 @@ test("expense and owner-fund corrections preserve originals and post linked bala
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let expenseId: number | null = null;
   let fundId: number | null = null;
+  let correctionFailureTrigger: string | null = null;
+  let correctionFailureFunction: string | null = null;
   const request = async (path: string, body?: unknown, role?: "manager") => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: body === undefined ? "GET" : "POST",
@@ -200,7 +202,7 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       method: "bank_transfer",
       reference: `corrected-expense-${suffix}`,
       notes: "Corrected expense note",
-      reason: "Wrong account and amount",
+      reason: `Wrong account and amount ${suffix}`,
       idempotencyKey: firstExpenseCorrectionKey,
     };
     const firstFundCorrectionKey = randomUUID();
@@ -214,6 +216,55 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       reason: "It was a loan, not a contribution",
       idempotencyKey: firstFundCorrectionKey,
     };
+    const triggerToken = suffix.replaceAll("-", "");
+    correctionFailureTrigger = `fail_correction_replacement_${triggerToken}`;
+    correctionFailureFunction = `fail_correction_replacement_fn_${triggerToken}`;
+    await pool.query(`
+      CREATE FUNCTION ${correctionFailureFunction}() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.source_type = 'accounting_correction'
+          AND NEW.memo LIKE '%${suffix}%'
+        THEN
+          RAISE EXCEPTION 'forced correction replacement failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER ${correctionFailureTrigger}
+      BEFORE INSERT ON journal_entries
+      FOR EACH ROW EXECUTE FUNCTION ${correctionFailureFunction}()
+    `);
+    const failedCorrection = await request(
+      `/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection,
+    );
+    assert.equal(failedCorrection.response.status, 500, JSON.stringify(failedCorrection.payload));
+    assert.equal((await db.select().from(accountingCorrections).where(and(
+      eq(accountingCorrections.recordType, "business_expense"),
+      eq(accountingCorrections.recordId, createdExpenseId),
+    ))).length, 0, "a failed replacement must roll back its correction row");
+    assert.equal((await db.select().from(businessAuditLogs)
+      .where(eq(businessAuditLogs.actorEmail, `${suffix}@example.test`)))
+      .filter((row) => row.entityType === "accounting_correction").length, 0,
+    "a failed replacement must not leave an audit record");
+    assert.equal((await db.select().from(journalEntries).where(and(
+      inArray(journalEntries.sourceType, ["accounting_correction", "accounting_correction_reversal"]),
+      like(journalEntries.memo, `%${suffix}%`),
+    ))).length, 0, "a failed replacement must roll back both correction journals");
+    const [expenseAfterFailure] = await db.select().from(businessExpenses)
+      .where(eq(businessExpenses.id, createdExpenseId));
+    assert.deepEqual(expenseAfterFailure, originalExpenseRecord);
+    const expenseJournalLinesAfterFailure = await db.select().from(journalLines)
+      .where(eq(journalLines.journalEntryId, originalExpenseJournal.id))
+      .orderBy(journalLines.id);
+    assert.deepEqual(expenseJournalLinesAfterFailure, originalExpenseJournalLines);
+    await pool.query(`DROP TRIGGER ${correctionFailureTrigger} ON journal_entries`);
+    await pool.query(`DROP FUNCTION ${correctionFailureFunction}()`);
+    correctionFailureTrigger = null;
+    correctionFailureFunction = null;
+
     const duplicateSubmissions = await Promise.all([
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection),
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, firstExpenseCorrection),
@@ -260,13 +311,35 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     const laterCorrections = await Promise.all([
       request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
         category: "utilities",
-        description: `Final expense ${suffix}`,
+        description: `Final expense version one ${suffix}`,
         amountZmw: "18.25",
         expenseDate: "2002-03-10",
         method: "mobile_money",
-        reference: `final-expense-${suffix}`,
-        notes: "Final corrected note",
-        reason: "Corrected date and amount",
+        reference: `final-expense-one-${suffix}`,
+        notes: "First later correction",
+        reason: "Corrected date and amount, version one",
+        idempotencyKey: randomUUID(),
+      }),
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
+        category: "rent",
+        description: `Final expense version two ${suffix}`,
+        amountZmw: "19.40",
+        expenseDate: "2002-03-10",
+        method: "bank_transfer",
+        reference: `final-expense-two-${suffix}`,
+        notes: "Second later correction",
+        reason: "Corrected date and amount, version two",
+        idempotencyKey: randomUUID(),
+      }),
+      request(`/api/accounting/expenses/${createdExpenseId}/correct`, {
+        category: "utilities",
+        description: `Final expense version three ${suffix}`,
+        amountZmw: "21.10",
+        expenseDate: "2002-03-10",
+        method: "cash",
+        reference: `final-expense-three-${suffix}`,
+        notes: "Third later correction",
+        reason: "Corrected date and amount, version three",
         idempotencyKey: randomUUID(),
       }),
       request(`/api/accounting/funds/${createdFundId}/correct`, {
@@ -274,9 +347,29 @@ test("expense and owner-fund corrections preserve originals and post linked bala
         amountZmw: "32.50",
         receivedAt: "2002-03-12",
         method: "mobile_money",
-        reference: `final-fund-${suffix}`,
-        notes: "Final corrected withdrawal",
-        reason: "Corrected the transaction classification",
+        reference: `final-fund-one-${suffix}`,
+        notes: "First corrected withdrawal",
+        reason: "Corrected the transaction classification, version one",
+        idempotencyKey: randomUUID(),
+      }),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        kind: "business_loan",
+        amountZmw: "35.75",
+        receivedAt: "2002-03-12",
+        method: "bank_transfer",
+        reference: `final-fund-two-${suffix}`,
+        notes: "Second corrected loan",
+        reason: "Corrected the transaction classification, version two",
+        idempotencyKey: randomUUID(),
+      }),
+      request(`/api/accounting/funds/${createdFundId}/correct`, {
+        kind: "owner_contribution",
+        amountZmw: "36.25",
+        receivedAt: "2002-03-12",
+        method: "cash",
+        reference: `final-fund-three-${suffix}`,
+        notes: "Third corrected contribution",
+        reason: "Corrected the transaction classification, version three",
         idempotencyKey: randomUUID(),
       }),
     ]);
@@ -343,8 +436,21 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       row.recordType === "business_expense" && row.recordId === createdExpenseId);
     const fundCorrections = corrections.filter((row) =>
       row.recordType === "owner_fund_transaction" && row.recordId === createdFundId);
-    assert.equal(expenseCorrections.length, 2);
-    assert.equal(fundCorrections.length, 2);
+    assert.equal(expenseCorrections.length, 4);
+    assert.equal(fundCorrections.length, 4);
+    const correctionAuditRows = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "accounting_correction"),
+      inArray(businessAuditLogs.entityId, corrections.map((correction) => correction.id)),
+    ));
+    assert.equal(correctionAuditRows.length, corrections.length);
+    for (const correction of corrections) {
+      const audit = correctionAuditRows.find((row) => row.entityId === correction.id);
+      assert.equal(audit?.actorEmail, `${suffix}@example.test`, "the owner must remain identified in correction history");
+      assert.ok(
+        audit?.changedFields.includes(`reason: ${correction.reason}`),
+        "the complete correction reason must remain visible in audit history",
+      );
+    }
     for (const chain of [expenseCorrections, fundCorrections]) {
       assert.equal(chain[0].previousCorrectionId, null);
       assert.equal(chain[1].previousCorrectionId, chain[0].id);
@@ -370,7 +476,7 @@ test("expense and owner-fund corrections preserve originals and post linked bala
     assert.equal(reportResult.payload.totals.trialDebitsZmw, reportResult.payload.totals.trialCreditsZmw);
     assert.equal(reportResult.payload.correctionHistory.filter((row: any) =>
       (row.recordType === "business_expense" && row.recordId === createdExpenseId) ||
-      (row.recordType === "owner_fund_transaction" && row.recordId === createdFundId)).length, 4);
+      (row.recordType === "owner_fund_transaction" && row.recordId === createdFundId)).length, 8);
 
     const marchReport = await request(
       `/api/accounting?from=${latestExpenseCorrection.effectiveDate}&to=${latestExpenseCorrection.effectiveDate}`,
@@ -393,7 +499,7 @@ test("expense and owner-fund corrections preserve originals and post linked bala
       correction.reversalEntryId, correction.replacementEntryId,
     ]).filter((id): id is number => id !== null);
     const journalRows = await db.select().from(journalEntries).where(inArray(journalEntries.id, relatedJournalIds));
-    assert.equal(journalRows.length, 8);
+    assert.equal(journalRows.length, 16);
     for (const entry of journalRows) {
       const lines = await db.select().from(journalLines).where(eq(journalLines.journalEntryId, entry.id));
       const debits = lines.reduce((sum, line) => sum + Math.round(Number(line.debitZmw) * 100), 0);
@@ -447,12 +553,33 @@ test("expense and owner-fund corrections preserve originals and post linked bala
               line.creditZmw === correction.amountZmw),
             `${replacement.entryNumber} must credit the selected ${correction.method} account`,
           );
+        } else {
+          const [selectedCashAccount] = await db.select().from(accountingAccounts)
+            .where(eq(
+              accountingAccounts.systemKey,
+              cashAccountKeyForMethod(correction.method as "cash" | "bank_transfer" | "mobile_money" | "other"),
+            ));
+          assert.ok(selectedCashAccount, `the ${correction.method} account must exist`);
+          const replacementLines = await db.select().from(journalLines)
+            .where(eq(journalLines.journalEntryId, replacement.id));
+          const cashSide = correction.kind === "owner_withdrawal" ? "creditZmw" : "debitZmw";
+          assert.ok(
+            replacementLines.some((line) =>
+              line.accountId === selectedCashAccount.id && line[cashSide] === correction.amountZmw),
+            `${replacement.entryNumber} must post owner funds to the selected ${correction.method} account`,
+          );
         }
         previousEntry = replacement;
       }
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (correctionFailureTrigger) {
+      await pool.query(`DROP TRIGGER IF EXISTS ${correctionFailureTrigger} ON journal_entries`);
+    }
+    if (correctionFailureFunction) {
+      await pool.query(`DROP FUNCTION IF EXISTS ${correctionFailureFunction}()`);
+    }
     const ids = [expenseId, fundId].filter((id): id is number => id !== null);
     if (ids.length) {
       const correctionFilter = or(

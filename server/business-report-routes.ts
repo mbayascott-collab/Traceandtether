@@ -374,7 +374,12 @@ export function registerBusinessReportRoutes(app: Express, owner: RequestHandler
         orderedAt: line.orderedAt, status: line.status, totalZmw: line.totalZmw,
       })),
       expenses: monthlyExpenseAllocations,
-      payments: payments.map((payment) => ({ paymentDate: payment.paymentDate, amountZmw: payment.amountZmw })),
+       payments: payments.map((payment) => ({
+         supplierId: payment.supplierId,
+         supplierName: payment.supplierName,
+         paymentDate: payment.paymentDate,
+         amountZmw: payment.amountZmw,
+       })),
       fromDate: fromDate || null, toDate: toDate || null,
     });
     const rows = [...bySupplier.values()].map((supplier) => ({

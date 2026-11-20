@@ -12,7 +12,7 @@ import {
   buildOpeningBalanceLines, cashAccountKeyForMethod, ensureAccountingAccounts, reversePostingLines,
   buildOwnerFundLines, journalLinesAreBalanced, openingBalanceDuplicateMessage, operatingExpenseAccountKey, ownerFundAccountKey, postJournal,
 } from "./accounting-posting";
-import { calculateAccountingReports } from "../shared/accounting-reports";
+import { calculateAccountingReports, findExpenseJournalWarnings } from "../shared/accounting-reports";
 
 const dateQuery = z.string().refine((value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -252,7 +252,10 @@ async function postAccountingCorrection(tx: any, actor: any, input: {
     recordLabel: `${input.recordType.replaceAll("_", " ")} ${input.recordId}`,
     actor,
     action: "created",
-    changedFields: ["amountZmw", "effectiveDate", "category", "kind", "method", "reference", "notes", "reason"],
+    changedFields: [
+      "amountZmw", "effectiveDate", "category", "kind", "method", "reference", "notes",
+      `reason: ${input.reason}`,
+    ],
   });
   return {
     correction: { ...correction, reversalEntryId: reversal.id, replacementEntryId: replacement.id },
@@ -796,6 +799,18 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
       }
       const expenseRecords = await tx.select().from(businessExpenses)
         .orderBy(desc(businessExpenses.expenseDate), desc(businessExpenses.id));
+      const originalExpenseJournals = expenseRecords.length
+        ? await tx.select({
+          id: journalEntries.id,
+          expenseId: journalEntries.sourceId,
+        }).from(journalEntries).where(and(
+          eq(journalEntries.sourceType, "business_expense"),
+          inArray(journalEntries.sourceId, expenseRecords.map((expense) => expense.id)),
+        ))
+        : [];
+      const originalJournalIdByExpense = new Map(
+        originalExpenseJournals.map((entry) => [entry.expenseId, entry.id]),
+      );
       const expenses = expenseRecords.flatMap((expense) => {
         const key = `business_expense:${expense.id}`;
         const correction = latestCorrections.get(key);
@@ -854,17 +869,17 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         line: journalLines,
         accountName: accountingAccounts.name,
         accountCode: accountingAccounts.code,
-        accountType: accountingAccounts.type,
-        accountId: accountingAccounts.id,
+        accountSystemKey: accountingAccounts.systemKey,
+        accountId: journalLines.accountId,
       }).from(journalLines)
         .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
-        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .leftJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
         .where(lte(journalEntries.entryDate, to))
         .orderBy(desc(journalEntries.entryDate), desc(journalEntries.id));
 
       const entryMap = new Map<number, {
          id: number; entryNumber: string; memo: string; entryDate: string; sourceType: string; sourceId: number | null;
-        lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
+         lines: Array<{ accountCode: string; accountName: string; debitZmw: string; creditZmw: string; description: string | null }>;
       }>();
       for (const row of records) {
         if (row.entry.entryDate >= from && !entryMap.has(row.entry.id)) {
@@ -875,7 +890,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
         }
         const entry = entryMap.get(row.entry.id);
         if (entry) entry.lines.push({
-          accountCode: row.accountCode, accountName: row.accountName,
+          accountCode: row.accountCode ?? "Unknown", accountName: row.accountName ?? "Unknown account",
           debitZmw: row.line.debitZmw, creditZmw: row.line.creditZmw, description: row.line.description,
         });
       }
@@ -886,9 +901,45 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
           entryDate: row.entry.entryDate,
           debitZmw: row.line.debitZmw,
           creditZmw: row.line.creditZmw,
+          entryId: row.entry.id,
+          entryNumber: row.entry.entryNumber,
         })),
         from,
         to,
+      );
+      const journalSnapshots = new Map<number, {
+        entryId: number;
+        entryDate: string;
+        lines: Array<{ accountKey: string | null; debitZmw: string; creditZmw: string }>;
+      }>();
+      for (const row of records) {
+        const snapshot = journalSnapshots.get(row.entry.id) ?? {
+          entryId: row.entry.id,
+          entryDate: row.entry.entryDate,
+          lines: [],
+        };
+        snapshot.lines.push({
+          accountKey: row.accountSystemKey,
+          debitZmw: row.line.debitZmw,
+          creditZmw: row.line.creditZmw,
+        });
+        journalSnapshots.set(row.entry.id, snapshot);
+      }
+      const expenseJournalWarnings = findExpenseJournalWarnings(
+        expenses.map((expense) => {
+          const correction = latestCorrections.get(`business_expense:${expense.id}`);
+          return {
+            expenseId: expense.id,
+            effectiveDate: expense.effective.expenseDate,
+            amountZmw: expense.effective.amountZmw,
+            expenseAccountKey: operatingExpenseAccountKey(expense.effective.category),
+            cashAccountKey: cashAccountKeyForMethod(expense.effective.method as "cash" | "bank_transfer" | "mobile_money" | "other"),
+            journalEntryId: correction
+              ? correction.replacementEntryId
+              : originalJournalIdByExpense.get(expense.id) ?? null,
+          };
+        }),
+        [...journalSnapshots.values()],
       );
       const entryNumberById = new Map(records.map((row) => [row.entry.id, row.entry.entryNumber]));
       const correctionHistory = correctionRows
@@ -917,6 +968,7 @@ export function registerAccountingRoutes(app: Express, owner: RequestHandler) {
           history: openingBalanceHistory,
         },
         expenses,
+        expenseJournalWarnings,
         ownerTransactions,
         correctionHistory,
         canCorrectRecords: res.locals.actor?.role === "owner",

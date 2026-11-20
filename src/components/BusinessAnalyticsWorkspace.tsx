@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { formatSupplierDeliveryVariance, supplierReportCsv } from "../../shared/supplier-report-csv";
+import {
+  formatSupplierDeliveryVariance, supplierReportCsv, supplierReportForSupplier,
+} from "../../shared/supplier-report-csv";
 import SupplierSpendPrintDocument from "./SupplierSpendPrintDocument";
 
 type ProductMetric = {
@@ -22,7 +24,9 @@ type SupplierAnalytics = {
   period: { from: string | null; to: string | null };
   monthlySpend: {
     month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
-    suppliers: { supplierId: number; supplierName: string; orderedGoodsZmw: string; importCostsZmw: string }[];
+     suppliers: {
+       supplierId: number; supplierName: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+     }[];
   }[];
   shipments: {
     supplierId: number; supplierName: string; orderNumber: string; shipmentId: number;
@@ -72,6 +76,7 @@ export default function BusinessAnalyticsWorkspace() {
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [supplierReport, setSupplierReport] = useState<SupplierAnalytics | null>(null);
+  const [printSupplierId, setPrintSupplierId] = useState("all");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const supplierReportMatchesRange = supplierReport?.period.from === from && supplierReport.period.to === to;
@@ -86,7 +91,7 @@ export default function BusinessAnalyticsWorkspace() {
         getJson<DashboardData>("/api/business-dashboard"),
         getJson<SupplierAnalytics>(`/api/supplier-analytics?${query.toString()}`),
       ]);
-      setReport(sales); setDashboard(overview); setSupplierReport(suppliers);
+      setReport(sales); setDashboard(overview); setSupplierReport(suppliers); setPrintSupplierId("all");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load analytics.");
     } finally { setLoading(false); }
@@ -108,6 +113,9 @@ export default function BusinessAnalyticsWorkspace() {
     ["Inventory value", money(dashboard.metrics.inventoryValueZmw)],
     ["Estimated cash in 30 days", money(dashboard.cashForecast.estimatedClosingZmw)],
   ] : [];
+  const printReport = supplierReport
+    ? supplierReportForSupplier(supplierReport, printSupplierId === "all" ? null : Number(printSupplierId))
+    : null;
 
   return <>
     <section className="page-heading"><div><p className="eyebrow">Business overview · ZMW</p><h1>Analytics</h1><p>Track sales, customer activity, product performance, stock and cash in one place.</p></div></section>
@@ -178,6 +186,16 @@ export default function BusinessAnalyticsWorkspace() {
         <div className="panel-heading">
           <div><h2>Supplier spend and delivery</h2><span>Orders by order date; costs and payments by their recorded dates</span></div>
           <div className="analytics-supplier-actions">
+            <label className="analytics-print-supplier">
+              <span>PDF supplier</span>
+              <select value={printSupplierId} onChange={(event) => setPrintSupplierId(event.target.value)}
+                disabled={loading || !supplierReportMatchesRange}>
+                <option value="all">All suppliers</option>
+                {supplierReport.suppliers.map((supplier) => <option key={supplier.supplierId} value={supplier.supplierId}>
+                  {supplier.name}
+                </option>)}
+              </select>
+            </label>
             <button className="button button-secondary button-small" type="button" disabled={loading || !supplierReportMatchesRange}
               title={supplierReportMatchesRange ? "Download the supplier report as CSV" : "Update analytics to load this date range"}
               onClick={() => downloadSupplierReport(supplierReport)}>
@@ -330,7 +348,7 @@ export default function BusinessAnalyticsWorkspace() {
         <p className="report-footnote analytics-supplier-note">Order values are converted using each purchase order’s recorded exchange rate. Shared shipment costs are allocated across linked supplier orders using the recorded allocation basis and counted once in the month of the recorded expense date. Supplier payments are reported separately and are not costs. Delivery summaries use a shipment’s expected date, or its purchase order’s expected date when the shipment date is blank; actual receipt dates are never inferred. The shipment detail and export show only dates recorded directly on each shipment. Average variance uses matched dates only: a positive value is late and a negative value is early.</p>
       </section>
       <p className="report-footnote">Sales reflect recorded deliveries. Gross profit can be incomplete when stock costs or opening stock values have not been recorded. Customer rankings cover this period; campaign analysis and lifetime customer groups are on Marketing.</p>
-      <SupplierSpendPrintDocument report={supplierReport} />
+      {printReport && <SupplierSpendPrintDocument report={printReport} />}
     </>}
   </>;
 }

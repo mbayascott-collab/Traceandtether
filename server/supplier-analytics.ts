@@ -53,7 +53,7 @@ export type SupplierMonthlySpendInput = {
     incurredAt: string; amountZmw: string;
     allocations: { supplierId: number; supplierName: string; amountZmw: string }[];
   }[];
-  payments: { paymentDate: string; amountZmw: string }[];
+  payments: { supplierId: number; supplierName: string; paymentDate: string; amountZmw: string }[];
   fromDate: string | null;
   toDate: string | null;
 };
@@ -66,7 +66,7 @@ const fromCents = (value: bigint) => `${value / 100n}.${String(value % 100n).pad
 
 export function supplierMonthlySpend(input: SupplierMonthlySpendInput): SupplierMonthlySpendRow[] {
   type MonthlySupplierSpend = {
-    supplierId: number; supplierName: string; orderedGoods: bigint; importCosts: bigint;
+    supplierId: number; supplierName: string; orderedGoods: bigint; importCosts: bigint; payments: bigint;
   };
   type MonthlyTotals = {
     orderedGoods: bigint; importCosts: bigint; payments: bigint;
@@ -84,7 +84,7 @@ export function supplierMonthlySpend(input: SupplierMonthlySpendInput): Supplier
   const getSupplier = (totals: MonthlyTotals, supplierId: number, supplierName: string) => {
     let supplier = totals.suppliers.get(supplierId);
     if (!supplier) {
-      supplier = { supplierId, supplierName, orderedGoods: 0n, importCosts: 0n };
+      supplier = { supplierId, supplierName, orderedGoods: 0n, importCosts: 0n, payments: 0n };
       totals.suppliers.set(supplierId, supplier);
     }
     return supplier;
@@ -113,7 +113,12 @@ export function supplierMonthlySpend(input: SupplierMonthlySpendInput): Supplier
   }
   for (const payment of input.payments) {
     const month = inRange(payment.paymentDate);
-    if (month) getMonth(month).payments += toCents(payment.amountZmw);
+    if (month) {
+      const totals = getMonth(month);
+      const amount = toCents(payment.amountZmw);
+      totals.payments += amount;
+      getSupplier(totals, payment.supplierId, payment.supplierName).payments += amount;
+    }
   }
 
   const observedMonths = [...monthTotals.keys()].sort();
@@ -139,6 +144,7 @@ export function supplierMonthlySpend(input: SupplierMonthlySpendInput): Supplier
           supplierName: supplier.supplierName,
           orderedGoodsZmw: fromCents(supplier.orderedGoods),
           importCostsZmw: fromCents(supplier.importCosts),
+          paymentsZmw: fromCents(supplier.payments),
         })),
     });
     month += 1;

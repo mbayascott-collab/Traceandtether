@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import test from "node:test";
+import express, { type RequestHandler } from "express";
 import {
   accountingReportExportRows,
   calculateAccountingReports,
+  findExpenseJournalWarnings,
   type AccountingReportAccount,
   type AccountingReportLine,
 } from "../shared/accounting-reports";
@@ -19,12 +22,13 @@ const accounts: AccountingReportAccount[] = [
   { id: 8, code: "1020", name: "Bank account", type: "asset" },
   { id: 9, code: "1030", name: "Mobile money", type: "asset" },
   { id: 10, code: "1040", name: "Other funds", type: "asset" },
+  { id: 11, code: "1200", name: "Accounts receivable", type: "asset" },
 ];
 
 type FixtureLine = AccountingReportLine & { accountKey: string };
 const accountIds = new Map([
   ["cash", 1], ["inventory", 2], ["payable", 3], ["equity", 4],
-  ["sales", 5], ["cogs", 6], ["rent", 7],
+  ["sales", 5], ["cogs", 6], ["rent", 7], ["receivables", 11],
   ["bank", 8], ["mobile_money", 9], ["other_funds", 10],
 ]);
 
@@ -278,6 +282,38 @@ test("year-end reports keep earlier gains in accumulated earnings after a curren
   assert.equal(liabilitiesAndEquity, 1250);
 });
 
+test("receipts and expenses on one fund report as a net balance without inflating expenses", () => {
+  const overlappingActivity: FixtureLine[] = [
+    ...journal("2026-11-01", [["receivables", "debit", "300.00"], ["sales", "credit", "300.00"]]),
+    ...journal("2026-11-02", [["bank", "debit", "300.00"], ["receivables", "credit", "300.00"]]),
+    ...journal("2026-11-03", [["rent", "debit", "100.00"], ["bank", "credit", "100.00"]]),
+  ];
+  const reports = calculateAccountingReports(accounts, overlappingActivity, "2026-11-01", "2026-11-30");
+
+  assert.equal(reports.trialBalance.find((row) => row.code === "1020")?.balanceZmw, "200.00");
+  assert.equal(reports.totals.incomeZmw, "300.00");
+  assert.equal(reports.totals.expensesZmw, "100.00");
+  assert.equal(reports.incomeStatement.find((row) => row.code === "6300")?.amountZmw, "100.00");
+  assert.equal(reports.totals.trialDebitsZmw, reports.totals.trialCreditsZmw);
+  assert.equal(reports.balanceSheetReconciliation.isBalanced, true);
+});
+
+test("year-end reports exclude income and expenses dated after the selected cutoff", () => {
+  const entriesAfterCutoff: FixtureLine[] = [
+    ...journal("2025-12-31", [["cash", "debit", "1000.00"], ["equity", "credit", "1000.00"]]),
+    ...journal("2026-03-31", [["cash", "debit", "200.00"], ["sales", "credit", "200.00"]]),
+    ...journal("2026-12-31", [["cash", "debit", "500.00"], ["sales", "credit", "500.00"]]),
+    ...journal("2027-01-01", [["rent", "debit", "50.00"], ["cash", "credit", "50.00"]]),
+  ];
+  const reports = calculateAccountingReports(accounts, entriesAfterCutoff, "2026-01-01", "2026-06-30");
+
+  assert.equal(reports.totals.incomeZmw, "200.00");
+  assert.equal(reports.totals.expensesZmw, "0.00");
+  assert.equal(reports.balanceSheet.at(-1)?.amountZmw, "200.00");
+  assert.equal(reports.trialBalance.find((row) => row.code === "1010")?.balanceZmw, "1200.00");
+  assert.equal(reports.totals.trialDebitsZmw, reports.totals.trialCreditsZmw);
+});
+
 test("opening-balance reversal remains in history while reports use the corrected replacement", () => {
   const openingAndCorrections: AccountingReportLine[] = [
     { accountId: 1, entryDate: "2025-12-31", debitZmw: "1000.00", creditZmw: "0.00" },
@@ -299,22 +335,35 @@ test("report export rows exactly reflect the displayed report rows", () => {
   const reports = calculateAccountingReports(accounts, knownBooks, "2026-02-01", "2026-03-31");
   const exports = accountingReportExportRows(reports);
 
-  assert.deepEqual(exports.trialBalance.slice(1), reports.trialBalance.map((row) => [
+  assert.deepEqual(exports.trialBalance.slice(5), reports.trialBalance.map((row) => [
     row.code, row.name, row.type, row.debitZmw, row.creditZmw, row.balanceZmw,
   ]));
-  assert.deepEqual(exports.incomeStatement.slice(1), reports.incomeStatement.map((row) => [
+  assert.deepEqual(exports.incomeStatement.slice(5), reports.incomeStatement.map((row) => [
     row.code, row.name, row.type, row.amountZmw,
   ]));
-  assert.deepEqual(exports.balanceSheet.slice(1), reports.balanceSheet.map((row) => [
+  assert.deepEqual(exports.balanceSheet.slice(5), reports.balanceSheet.map((row) => [
     row.code, row.name, row.type, row.amountZmw,
   ]));
+  for (const rows of Object.values(exports)) {
+    assert.deepEqual(rows.slice(0, 3), [
+      ["Report period", "2026-02-01 through 2026-03-31"],
+      ["From", "2026-02-01"],
+      ["Through", "2026-03-31"],
+    ]);
+  }
 });
 
 test("unbalanced balance sheets report and export the difference without changing journal lines", () => {
   const originalLines: AccountingReportLine[] = [
-    { accountId: 1, entryDate: "2026-01-01", debitZmw: "100.00", creditZmw: "0.00" },
+    {
+      accountId: 1, entryDate: "2026-01-01", debitZmw: "100.00", creditZmw: "0.00",
+      entryId: 12, entryNumber: "JE-2026-00012",
+    },
     // The balanced journal's other account is missing from the report's account list.
-    { accountId: 999, entryDate: "2026-01-01", debitZmw: "0.00", creditZmw: "100.00" },
+    {
+      accountId: 999, entryDate: "2026-01-01", debitZmw: "0.00", creditZmw: "100.00",
+      entryId: 12, entryNumber: "JE-2026-00012",
+    },
   ];
   const linesBeforeReport = structuredClone(originalLines);
   assert.equal(
@@ -331,7 +380,23 @@ test("unbalanced balance sheets report and export the difference without changin
     differenceZmw: "100.00",
     isBalanced: false,
   });
+  assert.deepEqual(reports.trialBalanceReconciliation, {
+    debitsZmw: "100.00",
+    creditsZmw: "0.00",
+    differenceZmw: "100.00",
+    isBalanced: false,
+  });
+  assert.deepEqual(reports.balanceSheetDiagnostics, [{
+    entryId: 12,
+    entryNumber: "JE-2026-00012",
+    entryDate: "2026-01-01",
+    differenceZmw: "100.00",
+    hasUnknownAccount: true,
+  }]);
   assert.deepEqual(originalLines, linesBeforeReport, "reporting must not modify journal lines");
+  assert.deepEqual(accountingReportExportRows(reports).trialBalance.at(-1), [
+    "", "WARNING: Trial balance does not balance", "Difference ZMW", "", "", "100.00",
+  ]);
   const exportRows = accountingReportExportRows(reports).balanceSheet;
   assert.deepEqual(exportRows.slice(-3), [
     ["", "Total assets", "Reconciliation", "100.00"],
@@ -371,10 +436,121 @@ test("cash, bank, and mobile-money balances remain separate in reports and expor
   assert.equal(sheetByCode.get("1000")?.amountZmw, "250.00");
 
   const exports = accountingReportExportRows(reports);
-  const exportedBalances = new Map(exports.balanceSheet.slice(1).map(([code, , , amount]) => [code, amount]));
+  const exportedBalances = new Map(exports.balanceSheet.slice(5).map(([code, , , amount]) => [code, amount]));
   assert.deepEqual(
     ["1010", "1020", "1030"].map((code) => exportedBalances.get(code)),
     ["30.00", "50.00", "20.00"],
   );
   assert.equal(exportedBalances.get("1000"), "250.00");
+});
+
+test("accounting reports reject malformed and reversed date ranges", () => {
+  assert.throws(
+    () => calculateAccountingReports(accounts, knownBooks, "2026-02-30", "2026-03-31"),
+    /valid start and end date/,
+  );
+  assert.throws(
+    () => calculateAccountingReports(accounts, knownBooks, "2026-04-01", "2026-03-31"),
+    /valid start and end date/,
+  );
+});
+
+test("income and expense reversals update lifetime earnings without changing prior periods", () => {
+  const reversalBooks: FixtureLine[] = [
+    ...journal("2026-01-10", [["cash", "debit", "200.00"], ["sales", "credit", "200.00"]]),
+    ...journal("2026-01-12", [["rent", "debit", "50.00"], ["cash", "credit", "50.00"]]),
+    ...journal("2026-02-02", [["sales", "debit", "200.00"], ["cash", "credit", "200.00"]]),
+    ...journal("2026-02-03", [["cash", "debit", "50.00"], ["rent", "credit", "50.00"]]),
+  ];
+
+  const january = calculateAccountingReports(accounts, reversalBooks, "2026-01-01", "2026-01-31");
+  assert.equal(january.balanceSheet.at(-1)?.amountZmw, "150.00");
+  assert.deepEqual(
+    [january.totals.incomeZmw, january.totals.expensesZmw, january.totals.netIncomeZmw],
+    ["200.00", "50.00", "150.00"],
+  );
+
+  const february = calculateAccountingReports(accounts, reversalBooks, "2026-02-01", "2026-02-28");
+  assert.equal(february.balanceSheet.at(-1)?.amountZmw, "0.00");
+  assert.deepEqual(
+    [february.totals.incomeZmw, february.totals.expensesZmw, february.totals.netIncomeZmw],
+    ["-200.00", "-50.00", "-150.00"],
+  );
+  assert.equal(february.balanceSheetReconciliation.isBalanced, true);
+});
+
+test("saved expenses are flagged when their active journals are missing or inconsistent", () => {
+  const expenses = [
+    {
+      expenseId: 1, effectiveDate: "2026-02-01", amountZmw: "20.00",
+      expenseAccountKey: "expense_rent", cashAccountKey: "cash_on_hand", journalEntryId: 10,
+    },
+    {
+      expenseId: 2, effectiveDate: "2026-02-02", amountZmw: "12.50",
+      expenseAccountKey: "expense_utilities", cashAccountKey: "bank", journalEntryId: null,
+    },
+  ];
+  const warnings = findExpenseJournalWarnings(expenses, [{
+    entryId: 10,
+    entryDate: "2026-02-01",
+    lines: [
+      { accountKey: "expense_rent", debitZmw: "20.00", creditZmw: "0.00" },
+      { accountKey: "bank", debitZmw: "0.00", creditZmw: "20.00" },
+    ],
+  }]);
+  assert.deepEqual(warnings, [
+    {
+      expenseId: 1,
+      journalEntryId: 10,
+      reason: "The active journal date, amount, or accounts do not match the saved expense.",
+    },
+    {
+      expenseId: 2,
+      journalEntryId: null,
+      reason: "No active journal entry is linked.",
+    },
+  ]);
+});
+
+test("accounting report route returns clear 400s for invalid date filters", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ pool }, { registerAccountingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./accounting-routes"),
+  ]);
+  const app = express();
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: "accounting-date-test", email: "accounting-date-test@example.test", role: "owner" };
+    next();
+  };
+  registerAccountingRoutes(app, owner);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    for (const query of [
+      "?from=&to=2026-01-31",
+      "?from=2026-01-01&from=2026-01-02&to=2026-01-31",
+      "?from=not-a-date&to=2026-01-31",
+      "?from=2026-02-30&to=2026-03-01",
+      "?from=2026-02-01&to=2026-01-31",
+    ]) {
+      const response = await fetch(`${baseUrl}/api/accounting${query}`);
+      const payload = await response.json() as { error?: string };
+      assert.equal(response.status, 400, `${query}: ${JSON.stringify(payload)}`);
+      assert.ok(payload.error, `${query} should return a helpful date error`);
+    }
+
+    const validResponse = await fetch(`${baseUrl}/api/accounting?from=2026-01-01&to=2026-01-31`);
+    const validPayload = await validResponse.json() as { period?: { from: string; to: string } };
+    assert.equal(validResponse.status, 200, JSON.stringify(validPayload));
+    assert.deepEqual(validPayload.period, { from: "2026-01-01", to: "2026-01-31" });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await pool.end();
+  }
 });

@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test, { after } from "node:test";
-import { asc, eq, inArray } from "drizzle-orm";
+import { asc, eq, inArray, like, or } from "drizzle-orm";
 import {
-  businessPayments, customers, journalEntries, journalLines, paymentStatementImportBatches,
+  businessAuditLogs, businessPayments, customers, journalEntries, journalLines, paymentStatementImportBatches,
   paymentStatementLines, salesOrders,
 } from "../shared/schema";
 import { ensureAccountingAccounts, postJournal } from "./accounting-posting";
@@ -55,6 +55,8 @@ test("adding, matching, and unmatching statement lines never changes journals", 
   let orderId: number | undefined;
   let paymentId: number | undefined;
   let journalEntryId: number | undefined;
+  let secondPaymentId: number | undefined;
+  let secondJournalEntryId: number | undefined;
   let statementLineIds: number[] = [];
   const request = async (path: string, method: string, body: unknown, expectedStatus: number) => {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -67,9 +69,11 @@ test("adding, matching, and unmatching statement lines never changes journals", 
     return payload;
   };
   const journalSnapshot = async () => {
+    const journalIds = [journalEntryId, secondJournalEntryId].filter((id): id is number => id !== undefined);
+    if (!journalIds.length) return { entries: [], lines: [] };
     const [entries, lines] = await Promise.all([
-      db.select().from(journalEntries).orderBy(asc(journalEntries.id)),
-      db.select().from(journalLines).orderBy(asc(journalLines.id)),
+      db.select().from(journalEntries).where(inArray(journalEntries.id, journalIds)).orderBy(asc(journalEntries.id)),
+      db.select().from(journalLines).where(inArray(journalLines.journalEntryId, journalIds)).orderBy(asc(journalLines.id)),
     ]);
     return { entries, lines };
   };
@@ -113,6 +117,28 @@ test("adding, matching, and unmatching statement lines never changes journals", 
     }));
     journalEntryId = entry.id;
     assert.ok(entry);
+    const [secondPayment] = await db.insert(businessPayments).values({
+      paymentNumber: `PAY-RECON-ALT-${label}`,
+      direction: "customer_receipt",
+      salesOrderId: orderId,
+      amountZmw: "80.00",
+      paymentDate: "2026-11-10",
+      method: "bank_transfer",
+      reference: `ALT-${suffix}`,
+    }).returning();
+    secondPaymentId = secondPayment.id;
+    const secondEntry = await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `payment-${secondPaymentId}`,
+      sourceType: "payment",
+      sourceId: secondPaymentId!,
+      memo: `Customer receipt ${secondPayment.paymentNumber}`,
+      entryDate: secondPayment.paymentDate,
+      lines: [
+        { accountKey: "bank_account", debitZmw: "80.00", description: "Payment received" },
+        { accountKey: "accounts_receivable", creditZmw: "80.00", description: "Customer balance reduced" },
+      ],
+    }));
+    secondJournalEntryId = secondEntry.id;
 
     const before = await journalSnapshot();
     const lines = [
@@ -165,6 +191,14 @@ test("adding, matching, and unmatching statement lines never changes journals", 
     assert.deepEqual(await journalSnapshot(), before, "unmatching before a concurrent attempt must not change journals");
 
     const concurrentLineIds = [firstLineId, statementRows[2]!.id];
+    const concurrentAuditCounts = new Map<number, number>();
+    for (const lineId of concurrentLineIds) {
+      const auditRows = await db.select().from(businessAuditLogs).where(eq(businessAuditLogs.entityId, lineId));
+      concurrentAuditCounts.set(lineId, auditRows.filter((row) =>
+        row.entityType === "payment_statement_line" && row.actorEmail === email
+          && row.action === "updated" && row.changedFields.includes("matchedPaymentId"),
+      ).length);
+    }
     const concurrentResponses = await Promise.all(concurrentLineIds.map(async (lineId) => {
       const response = await fetch(`${baseUrl}/api/payments/reconciliation/match`, {
         method: "PUT",
@@ -186,7 +220,47 @@ test("adding, matching, and unmatching statement lines never changes journals", 
       1,
       "one payment must be assigned to exactly one of the concurrent statement rows",
     );
+    for (const lineId of concurrentLineIds) {
+      const auditRows = await db.select().from(businessAuditLogs).where(eq(businessAuditLogs.entityId, lineId));
+      const count = auditRows.filter((row) =>
+        row.entityType === "payment_statement_line" && row.actorEmail === email
+          && row.action === "updated" && row.changedFields.includes("matchedPaymentId"),
+      ).length;
+      const accepted = concurrentResponses.some((response) => response.lineId === lineId && response.status === 200);
+      assert.equal(count - concurrentAuditCounts.get(lineId)!, accepted ? 1 : 0,
+        "a rejected concurrent match must not leave an audit event");
+    }
     assert.deepEqual(await journalSnapshot(), before, "concurrent matching must not change journal entries or lines");
+
+    const assignedConcurrentLine = concurrentLines.find((line) => line.matchedPaymentId === paymentId);
+    assert.ok(assignedConcurrentLine);
+    await request("/api/payments/reconciliation/match", "PUT", {
+      lineId: assignedConcurrentLine.id, paymentId: null,
+    }, 200);
+    const sameLineAuditBefore = (await db.select().from(businessAuditLogs)
+      .where(eq(businessAuditLogs.entityId, firstLineId)))
+      .filter((row) => row.entityType === "payment_statement_line" && row.actorEmail === email
+        && row.action === "updated" && row.changedFields.includes("matchedPaymentId")).length;
+    const competingPayments = [paymentId!, secondPaymentId!];
+    const sameLineResponses = await Promise.all(competingPayments.map(async (candidatePaymentId) => {
+      const response = await fetch(`${baseUrl}/api/payments/reconciliation/match`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lineId: firstLineId, paymentId: candidatePaymentId }),
+      });
+      return { candidatePaymentId, status: response.status, payload: await response.json() };
+    }));
+    assert.deepEqual(sameLineResponses.map(({ status }) => status).sort(), [200, 409], JSON.stringify(sameLineResponses));
+    const [finalStatementLine] = await db.select().from(paymentStatementLines)
+      .where(eq(paymentStatementLines.id, firstLineId));
+    assert.equal(finalStatementLine?.matchedPaymentId, sameLineResponses.find(({ status }) => status === 200)?.candidatePaymentId);
+    const sameLineAuditAfter = (await db.select().from(businessAuditLogs)
+      .where(eq(businessAuditLogs.entityId, firstLineId)))
+      .filter((row) => row.entityType === "payment_statement_line" && row.actorEmail === email
+        && row.action === "updated" && row.changedFields.includes("matchedPaymentId")).length;
+    assert.equal(sameLineAuditAfter - sameLineAuditBefore, 1,
+      "only the accepted payment assignment should create an audit event for this statement line");
+    assert.deepEqual(await journalSnapshot(), before, "competing matches must not change accounting journals");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -200,7 +274,12 @@ test("adding, matching, and unmatching statement lines never changes journals", 
         await client.query("DELETE FROM journal_lines WHERE journal_entry_id = $1", [journalEntryId]);
         await client.query("DELETE FROM journal_entries WHERE id = $1", [journalEntryId]);
       }
+      if (secondJournalEntryId) {
+        await client.query("DELETE FROM journal_lines WHERE journal_entry_id = $1", [secondJournalEntryId]);
+        await client.query("DELETE FROM journal_entries WHERE id = $1", [secondJournalEntryId]);
+      }
       if (paymentId) await client.query("DELETE FROM business_payments WHERE id = $1", [paymentId]);
+      if (secondPaymentId) await client.query("DELETE FROM business_payments WHERE id = $1", [secondPaymentId]);
       if (orderId) await client.query("DELETE FROM sales_orders WHERE id = $1", [orderId]);
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       await client.query("COMMIT");
@@ -249,6 +328,7 @@ test("CSV statement imports save review rows without changing journals", {
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let importBatchId: number | undefined;
+  const csvReferences = [`CSV-${suffix}`, `CSV-OUT-${suffix}`];
 
   const request = async (path: string, body: unknown) => {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -261,14 +341,20 @@ test("CSV statement imports save review rows without changing journals", {
     return payload;
   };
   const journalSnapshot = async () => {
-    const [entries, lines] = await Promise.all([
-      db.select().from(journalEntries).orderBy(asc(journalEntries.id)),
-      db.select().from(journalLines).orderBy(asc(journalLines.id)),
-    ]);
+    const entries = await db.select().from(journalEntries).where(or(
+      like(journalEntries.sourceKey, `%${label}%`),
+      like(journalEntries.memo, `%${label}%`),
+    )).orderBy(asc(journalEntries.id));
+    const entryIds = entries.map((entry) => entry.id);
+    const lines = entryIds.length
+      ? await db.select().from(journalLines).where(inArray(journalLines.journalEntryId, entryIds)).orderBy(asc(journalLines.id))
+      : [];
     return { entries, lines };
   };
   const paymentSnapshot = async () =>
-    db.select({ id: businessPayments.id }).from(businessPayments).orderBy(asc(businessPayments.id));
+    db.select({ id: businessPayments.id }).from(businessPayments)
+      .where(inArray(businessPayments.reference, csvReferences))
+      .orderBy(asc(businessPayments.id));
 
   try {
     const accounts = await ensureAccountingAccounts(db);

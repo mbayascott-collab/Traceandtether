@@ -30,8 +30,10 @@ type OwnerFundTransaction = {
   correctionCount: number;
 };
 type ReportData = {
+  period: { from: string; to: string };
   entries: JournalEntry[];
   expenses?: ExpenseEntry[];
+  expenseJournalWarnings: { expenseId: number; journalEntryId: number | null; reason: string }[];
   ownerTransactions?: OwnerFundTransaction[];
   canCorrectRecords: boolean;
   correctionHistory: Array<{
@@ -55,6 +57,19 @@ type ReportData = {
   incomeStatement: ReportRow[];
   balanceSheet: ReportRow[];
   balanceSheetReconciliation: BalanceSheetReconciliation;
+  trialBalanceReconciliation: {
+    debitsZmw: string;
+    creditsZmw: string;
+    differenceZmw: string;
+    isBalanced: boolean;
+  };
+  balanceSheetDiagnostics: {
+    entryId: number;
+    entryNumber: string;
+    entryDate: string;
+    differenceZmw: string;
+    hasUnknownAccount: boolean;
+  }[];
   totals: { trialDebitsZmw: string; trialCreditsZmw: string; incomeZmw: string; expensesZmw: string; netIncomeZmw: string };
 };
 
@@ -89,6 +104,30 @@ function downloadCsv(name: string, rows: unknown[][]) {
   URL.revokeObjectURL(link.href);
 }
 
+const PENDING_CORRECTION_KEY = "accounting.pending-correction.v1";
+type PendingCorrectionAttempt = { fingerprint: string; key: string };
+
+function readPendingCorrectionAttempt(): PendingCorrectionAttempt | null {
+  try {
+    const stored = sessionStorage.getItem(PENDING_CORRECTION_KEY);
+    if (!stored) return null;
+    const value = JSON.parse(stored) as Partial<PendingCorrectionAttempt>;
+    if (typeof value.fingerprint === "string" && /^[0-9a-f-]{36}$/i.test(value.key ?? "")) {
+      return { fingerprint: value.fingerprint, key: value.key! };
+    }
+    sessionStorage.removeItem(PENDING_CORRECTION_KEY);
+  } catch {
+    // Storage is optional; this tab can still retry using its in-memory key.
+  }
+  return null;
+}
+
+async function fingerprintCorrection(path: string, values: Record<string, FormDataEntryValue>) {
+  const source = JSON.stringify([path, values]);
+  const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export default function AccountingWorkspace() {
   const [from, setFrom] = useState(`${currentYear}-01-01`);
   const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
@@ -108,7 +147,7 @@ export default function AccountingWorkspace() {
   const [journalError, setJournalError] = useState("");
   const [editingCorrection, setEditingCorrection] = useState<{ type: "expense" | "fund"; id: number } | null>(null);
   const pendingOwnerFundAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
-  const pendingCorrectionAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const pendingCorrectionAttempt = useRef<PendingCorrectionAttempt | null>(readPendingCorrectionAttempt());
 
   useEffect(() => {
     let alive = true;
@@ -220,18 +259,25 @@ export default function AccountingWorkspace() {
     event.preventDefault(); setError(""); setNotice("");
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form).entries());
-    const fingerprint = JSON.stringify([path, values]);
-    if (pendingCorrectionAttempt.current?.fingerprint !== fingerprint) {
-      pendingCorrectionAttempt.current = { fingerprint, key: window.crypto.randomUUID() };
-    }
     try {
+      const fingerprint = await fingerprintCorrection(path, values);
+      if (pendingCorrectionAttempt.current?.fingerprint !== fingerprint) {
+        pendingCorrectionAttempt.current = { fingerprint, key: window.crypto.randomUUID() };
+        try {
+          sessionStorage.setItem(PENDING_CORRECTION_KEY, JSON.stringify(pendingCorrectionAttempt.current));
+        } catch {
+          // Keep the attempt usable in this tab even when browser storage is unavailable.
+        }
+      }
+      const attempt = pendingCorrectionAttempt.current!;
       const response = await fetch(path, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...values, idempotencyKey: pendingCorrectionAttempt.current.key }),
+        body: JSON.stringify({ ...values, idempotencyKey: attempt.key }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "The correction could not be posted.");
       pendingCorrectionAttempt.current = null;
+      try { sessionStorage.removeItem(PENDING_CORRECTION_KEY); } catch { /* Ignore unavailable storage. */ }
       setEditingCorrection(null);
       setNotice("Correction posted. The original record and journal remain in the history.");
       setRange((current) => ({ ...current }));
@@ -254,7 +300,8 @@ export default function AccountingWorkspace() {
   const expenses = data?.expenses;
   const ownerTransactions = data?.ownerTransactions;
   const correctionHistory = data?.correctionHistory ?? [];
-  const openingBalanceHistory = data?.openingBalances.history ?? [];
+  const openingBalanceHistory = data?.openingBalances?.history ?? [];
+  const expenseJournalWarnings = data?.expenseJournalWarnings ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
   const canEnterOpeningBalances = Boolean(data && !data.openingBalances.posted && (
     openingBalanceHistory.length === 0 ||
@@ -351,6 +398,13 @@ export default function AccountingWorkspace() {
     </section>
     <section className="panel" style={{ marginBottom: 16 }}>
       <div className="panel-heading"><h2>Business expenses in period</h2><span>{expenses?.length ?? 0} records</span></div>
+      {expenseJournalWarnings.length > 0 && <div className="alert alert-error" role="alert">
+        <p>Some saved expenses do not match their active accounting journal. Review these records before relying on the report.</p>
+        <ul>{expenseJournalWarnings.map((warning) => <li key={warning.expenseId}>
+          Expense #{warning.expenseId}: {warning.reason}{" "}
+          {warning.journalEntryId !== null && <a href={`/accounting?journalEntryId=${warning.journalEntryId}`}>Open journal entry</a>}
+        </li>)}</ul>
+      </div>}
       <div className="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid from</th><th>Reference</th><th>Amount</th><th /></tr></thead><tbody>
         <AccountingListRows rows={expenses} colSpan={7}
           emptyMessage="No business expenses recorded in this period."
@@ -396,15 +450,16 @@ export default function AccountingWorkspace() {
     <section className="panel" style={{ marginBottom: 16 }}>
       <div className="panel-heading"><h2>Expense and owner-fund correction history</h2><span>{correctionHistory.length} corrections in period</span></div>
       <div className="table-wrap"><table><thead><tr><th>Date / correction</th><th>Source record</th><th>Corrected amount</th><th>Reason</th><th>Reversal entry</th><th>Replacement entry</th></tr></thead><tbody>
-        {correctionHistory.map((correction) => <tr key={correction.id}>
+        <AccountingListRows rows={correctionHistory} colSpan={6}
+          emptyMessage="No expense or owner-fund corrections in this period."
+          renderRow={(correction) => <tr key={correction.id}>
           <td>{correction.effectiveDate}<br /><small>Correction #{correction.id}</small></td>
           <td>{correction.recordType.replaceAll("_", " ")} #{correction.recordId}</td>
           <td>{money(correction.amountZmw)}</td>
           <td>{correction.reason}</td>
           <td>{correction.reversalEntryNumber ?? `Journal ${correction.reversalEntryId ?? "pending"}`}</td>
           <td>{correction.replacementEntryNumber ?? `Journal ${correction.replacementEntryId ?? "pending"}`}</td>
-        </tr>)}
-        {!correctionHistory.length && <tr><td colSpan={6}>No expense or owner-fund corrections in this period.</td></tr>}
+        </tr>} />
       </tbody></table></div>
     </section>
     <section className="panel" style={{ padding: 16, marginBottom: 16 }}>
@@ -454,13 +509,15 @@ export default function AccountingWorkspace() {
           <button className="button button-primary">Save starting balances</button>
         </form>
       )}
-      {openingBalanceHistory.length > 0 && (
+      {(
         <div style={{ marginTop: 20 }}>
           <h3>Opening-balance journal history</h3>
           <div className="table-wrap"><table>
             <thead><tr><th>Date / entry</th><th>Record</th><th>Memo or reason</th><th>Linked entry</th><th>Status</th></tr></thead>
             <tbody>
-              {openingBalanceHistory.map((entry) => {
+              <AccountingListRows rows={openingBalanceHistory} colSpan={5}
+                emptyMessage="No opening-balance correction history is available."
+                renderRow={(entry) => {
                 const relatedEntry = entry.relatedEntryId ? openingHistoryById.get(entry.relatedEntryId) : null;
                 const reversalEntry = entry.reversalEntryId ? openingHistoryById.get(entry.reversalEntryId) : null;
                 const label = entry.kind === "reversal" ? "Reversal" : entry.kind === "replacement" ? "Replacement" : "Original";
@@ -475,7 +532,7 @@ export default function AccountingWorkspace() {
                       ? `Reversed by ${reversalEntry?.entryNumber ?? "journal entry"}`
                       : "Active"}</td>
                 </tr>;
-              })}
+              }} />
             </tbody>
           </table></div>
         </div>
@@ -524,6 +581,9 @@ export default function AccountingWorkspace() {
       </section>
       <section className="panel" style={{ marginBottom: 16 }}>
         <div className="panel-heading"><h2>Trial balance</h2><span>All entries through {range.to}</span></div>
+        {!data.trialBalanceReconciliation.isBalanced && <div className="alert alert-error" role="alert">
+          Trial balance does not balance. Debits are {money(data.trialBalanceReconciliation.debitsZmw)} and credits are {money(data.trialBalanceReconciliation.creditsZmw)}. Difference: {money(data.trialBalanceReconciliation.differenceZmw)}.
+        </div>}
         <div className="table-wrap"><table><thead><tr><th>Code</th><th>Account</th><th>Type</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead><tbody>
           {data.trialBalance.map((row) => <tr key={row.accountId}><td>{row.code}</td><td>{row.name}</td><td>{row.type}</td><td>{money(row.debitZmw)}</td><td>{money(row.creditZmw)}</td><td>{money(row.balanceZmw)}</td></tr>)}
           <tr><th colSpan={3}>Totals</th><th>{money(data.totals.trialDebitsZmw)}</th><th>{money(data.totals.trialCreditsZmw)}</th><th /></tr>
@@ -535,6 +595,15 @@ export default function AccountingWorkspace() {
           <div className="panel-heading"><h2>Balance sheet</h2></div>
           {!data.balanceSheetReconciliation.isBalanced && <div className="alert alert-error" role="alert">
             Balance sheet does not balance. Total assets are {money(data.balanceSheetReconciliation.assetsZmw)}, while liabilities and equity total {money(data.balanceSheetReconciliation.liabilitiesAndEquityZmw)}. Difference: {money(data.balanceSheetReconciliation.differenceZmw)}.
+          </div>}
+          {!data.balanceSheetReconciliation.isBalanced && data.balanceSheetDiagnostics.length > 0 && <div className="table-wrap">
+            <table><thead><tr><th>Entry date</th><th>Journal entry</th><th>Difference contribution</th><th>Review</th></tr></thead><tbody>
+              {data.balanceSheetDiagnostics.map((entry) => <tr key={entry.entryId}>
+                <td>{entry.entryDate}</td><td>{entry.entryNumber}</td>
+                <td>{entry.hasUnknownAccount ? "Includes an unavailable account" : money(entry.differenceZmw)}</td>
+                <td><a href={`/accounting?journalEntryId=${entry.entryId}`}>Open entry</a></td>
+              </tr>)}
+            </tbody></table>
           </div>}
           <div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Amount</th></tr></thead><tbody>{data.balanceSheet.map((row, index) => <tr key={`${row.code}-${index}`}><td>{row.code} {row.name}</td><td>{row.type}</td><td>{money(row.amountZmw)}</td></tr>)}</tbody></table></div>
         </div>

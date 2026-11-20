@@ -9,7 +9,7 @@ import {
   shipmentPurchaseOrders, shipments, suppliers,
 } from "../shared/schema";
 import { supplierDeliveryMetrics, supplierMonthlySpend, supplierShipmentDetails } from "./supplier-analytics";
-import { supplierReportCsv } from "../shared/supplier-report-csv";
+import { supplierReportCsv, supplierReportForSupplier } from "../shared/supplier-report-csv";
 
 test("compares recorded shipment dates and uses the purchase order date when shipment expectation is absent", () => {
   const metrics = supplierDeliveryMetrics(
@@ -130,7 +130,10 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
     }],
     monthlySpend: [{
       month: "2025-01", orderedGoodsZmw: "240.00", importCostsZmw: "35.00", paymentsZmw: "120.00",
-      suppliers: [{ supplierId: 7, supplierName: 'North "Trading"', orderedGoodsZmw: "240.00", importCostsZmw: "30.00" }],
+       suppliers: [{
+         supplierId: 7, supplierName: 'North "Trading"', orderedGoodsZmw: "240.00",
+         importCostsZmw: "30.00", paymentsZmw: "120.00",
+       }],
     }],
     totals: {
       orderedGoodsZmw: "240.00", importCostsZmw: "35.00", unallocatedImportCostsZmw: "5.00", paymentsZmw: "120.00",
@@ -138,7 +141,7 @@ test("supplier CSV keeps the selected range, supplier delivery values, and unall
       missingActualDateOrders: 0, incompleteDeliveryOrders: 0, measuredDeliveryOrders: 2,
     },
     suppliers: [{
-      name: 'North "Trading"', orders: 2, orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
+      supplierId: 7, name: 'North "Trading"', orders: 2, orderedGoodsZmw: "240.00", importCostsZmw: "30.00", paymentsZmw: "120.00",
       measuredDeliveryOrders: 2, onTimeOrders: 1, lateOrders: 1, missingExpectedDateOrders: 0,
       missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: "1.5",
     }],
@@ -164,20 +167,72 @@ test("supplier CSV protects formula-like supplier names", () => {
   const csv = supplierReportCsv({
     period: { from: null, to: null },
     monthlySpend: [],
-    shipments: [],
+    shipments: [{
+      supplierId: 9, supplierName: "@HIDDEN", orderNumber: "=PO-1", shipmentId: 2,
+      shipmentReference: "+SUM(1,1)", status: "received", expectedAt: null, receivedAt: null,
+    }],
     totals: {
       orderedGoodsZmw: "0.00", importCostsZmw: "0.00", unallocatedImportCostsZmw: "0.00", paymentsZmw: "0.00",
       orders: 0, onTimeOrders: 0, lateOrders: 0, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
       missingActualDateOrders: 0, incompleteDeliveryOrders: 0, measuredDeliveryOrders: 0,
     },
     suppliers: [{
-      name: "=HYPERLINK(\"https://example.invalid\")", orders: 0, orderedGoodsZmw: "0.00", importCostsZmw: "0.00",
+      supplierId: 9, name: "=HYPERLINK(\"https://example.invalid\")", orders: 0, orderedGoodsZmw: "0.00", importCostsZmw: "0.00",
       paymentsZmw: "0.00", measuredDeliveryOrders: 0, onTimeOrders: 0, lateOrders: 0, missingExpectedDateOrders: 0,
       missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: null,
     }],
   });
 
   assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
+  assert.match(csv, /"'@HIDDEN","'=PO-1","2","'\+SUM\(1,1\)"/);
+});
+
+test("single-supplier reports keep only that supplier's values and preserve unallocated costs", () => {
+  const report = {
+    period: { from: "2025-01-01", to: "2025-01-31" },
+    monthlySpend: [{
+      month: "2025-01", orderedGoodsZmw: "300.00", importCostsZmw: "90.00", paymentsZmw: "50.00",
+      suppliers: [
+        { supplierId: 7, supplierName: "North", orderedGoodsZmw: "100.00", importCostsZmw: "30.00", paymentsZmw: "20.00" },
+        { supplierId: 8, supplierName: "East", orderedGoodsZmw: "200.00", importCostsZmw: "60.00", paymentsZmw: "30.00" },
+      ],
+    }],
+    shipments: [
+      { supplierId: 7, supplierName: "North", orderNumber: "PO-N", shipmentId: 1, shipmentReference: null, status: "received", expectedAt: null, receivedAt: null },
+      { supplierId: 8, supplierName: "East", orderNumber: "PO-E", shipmentId: 2, shipmentReference: null, status: "received", expectedAt: null, receivedAt: null },
+    ],
+    totals: {
+      orderedGoodsZmw: "300.00", importCostsZmw: "105.00", unallocatedImportCostsZmw: "15.00", paymentsZmw: "50.00",
+      orders: 3, onTimeOrders: 2, lateOrders: 1, overdueOpenOrders: 0, missingExpectedDateOrders: 0,
+      missingActualDateOrders: 0, incompleteDeliveryOrders: 0, measuredDeliveryOrders: 3,
+    },
+    suppliers: [
+      {
+        supplierId: 7, name: "North", orders: 1, orderedGoodsZmw: "100.00", importCostsZmw: "30.00", paymentsZmw: "20.00",
+        measuredDeliveryOrders: 1, onTimeOrders: 1, lateOrders: 0, missingExpectedDateOrders: 0,
+        missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: "0.0",
+      },
+      {
+        supplierId: 8, name: "East", orders: 2, orderedGoodsZmw: "200.00", importCostsZmw: "60.00", paymentsZmw: "30.00",
+        measuredDeliveryOrders: 2, onTimeOrders: 1, lateOrders: 1, missingExpectedDateOrders: 0,
+        missingActualDateOrders: 0, incompleteDeliveryOrders: 0, overdueOpenOrders: 0, averageDeliveryVarianceDays: "1.0",
+      },
+    ],
+  };
+  const filtered = supplierReportForSupplier(report, 7);
+  assert.deepEqual(filtered.suppliers.map((supplier) => supplier.name), ["North"]);
+  assert.deepEqual(filtered.shipments.map((shipment) => shipment.orderNumber), ["PO-N"]);
+  assert.deepEqual(filtered.totals, {
+    ...report.totals,
+    orderedGoodsZmw: "100.00", importCostsZmw: "30.00", paymentsZmw: "20.00",
+    orders: 1, onTimeOrders: 1, lateOrders: 0, measuredDeliveryOrders: 1,
+  });
+  assert.deepEqual(filtered.monthlySpend[0]?.suppliers, [report.monthlySpend[0]!.suppliers[0]]);
+  assert.equal(filtered.monthlySpend[0]?.orderedGoodsZmw, "100.00");
+  assert.equal(filtered.monthlySpend[0]?.paymentsZmw, "20.00");
+  const csv = supplierReportCsv(filtered);
+  assert.match(csv, /"15\.00"|"15.00"/, "unallocated costs remain visible in the single-supplier export");
+  assert.doesNotMatch(csv, /"PO-E"|"East"/);
 });
 
 test("monthly supplier spend uses order, expense, and payment dates independently", () => {
@@ -196,26 +251,26 @@ test("monthly supplier spend uses order, expense, and payment dates independentl
       { incurredAt: "2024-12-31", amountZmw: "800.00", allocations: [] },
     ],
     payments: [
-      { paymentDate: "2025-03-01", amountZmw: "60.00" },
-      { paymentDate: "2025-01-15", amountZmw: "40.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-03-01", amountZmw: "60.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-01-15", amountZmw: "40.00" },
     ],
   });
 
   assert.deepEqual(monthly, [
     {
       month: "2025-01", orderedGoodsZmw: "100.00", importCostsZmw: "0.00", paymentsZmw: "40.00",
-      suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "100.00", importCostsZmw: "0.00" }],
+       suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "100.00", importCostsZmw: "0.00", paymentsZmw: "40.00" }],
     },
     {
       month: "2025-02", orderedGoodsZmw: "50.00", importCostsZmw: "30.00", paymentsZmw: "0.00",
       suppliers: [
-        { supplierId: 8, supplierName: "East", orderedGoodsZmw: "50.00", importCostsZmw: "0.00" },
-        { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "30.00" },
+         { supplierId: 8, supplierName: "East", orderedGoodsZmw: "50.00", importCostsZmw: "0.00", paymentsZmw: "0.00" },
+         { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "30.00", paymentsZmw: "0.00" },
       ],
     },
     {
       month: "2025-03", orderedGoodsZmw: "0.00", importCostsZmw: "20.00", paymentsZmw: "60.00",
-      suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "20.00" }],
+       suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "20.00", paymentsZmw: "60.00" }],
     },
   ]);
 });
@@ -237,10 +292,10 @@ test("monthly supplier spend includes both date boundaries and excludes adjacent
       { incurredAt: "2025-02-21", amountZmw: "4.00", allocations: [] },
     ],
     payments: [
-      { paymentDate: "2025-02-09", amountZmw: "1.00" },
-      { paymentDate: "2025-02-10", amountZmw: "2.00" },
-      { paymentDate: "2025-02-20", amountZmw: "3.00" },
-      { paymentDate: "2025-02-21", amountZmw: "4.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-02-09", amountZmw: "1.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-02-10", amountZmw: "2.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-02-20", amountZmw: "3.00" },
+      { supplierId: 7, supplierName: "North", paymentDate: "2025-02-21", amountZmw: "4.00" },
     ],
   });
 
@@ -249,7 +304,7 @@ test("monthly supplier spend includes both date boundaries and excludes adjacent
     orderedGoodsZmw: "50.00",
     importCostsZmw: "5.00",
     paymentsZmw: "5.00",
-    suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "50.00", importCostsZmw: "0.00" }],
+     suppliers: [{ supplierId: 7, supplierName: "North", orderedGoodsZmw: "50.00", importCostsZmw: "0.00", paymentsZmw: "5.00" }],
   }]);
 });
 
@@ -268,15 +323,15 @@ test("monthly supplier spend counts shared shipment expenses once in the incurre
         { supplierId: 8, supplierName: "East", amountZmw: "37.62" },
       ],
     }],
-    payments: [{ paymentDate: "2025-02-21", amountZmw: "20.00" }],
+     payments: [{ supplierId: 7, supplierName: "North", paymentDate: "2025-02-21", amountZmw: "20.00" }],
   });
 
   assert.deepEqual(monthly, [
     {
       month: "2025-02", orderedGoodsZmw: "0.00", importCostsZmw: "75.25", paymentsZmw: "20.00",
       suppliers: [
-        { supplierId: 8, supplierName: "East", orderedGoodsZmw: "0.00", importCostsZmw: "37.62" },
-        { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "37.63" },
+         { supplierId: 8, supplierName: "East", orderedGoodsZmw: "0.00", importCostsZmw: "37.62", paymentsZmw: "0.00" },
+         { supplierId: 7, supplierName: "North", orderedGoodsZmw: "0.00", importCostsZmw: "37.63", paymentsZmw: "20.00" },
       ],
     },
   ]);
@@ -303,6 +358,7 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
   let productId: number | undefined;
   let purchaseOrderIds: number[] = [];
   let shipmentId: number | undefined;
+  let outsideShipmentId: number | undefined;
   let expenseIds: number[] = [];
   let paymentIds: number[] = [];
 
@@ -367,6 +423,13 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       receivedAt: "2097-02-20",
     }).returning();
     shipmentId = shipment.id;
+    const [outsideShipment] = await db.insert(shipments).values({
+      purchaseOrderId: outsideOrders[0]!.id,
+      shipmentReference: `MRE-OUT-S-${suffix.slice(0, 10)}`,
+      status: "received",
+      receivedAt: "2097-02-20",
+    }).returning();
+    outsideShipmentId = outsideShipment.id;
     await db.insert(shipmentPurchaseOrders).values({
       shipmentId,
       purchaseOrderId: eastOrder.id,
@@ -400,7 +463,7 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       {
         paymentNumber: `MRE-P1-${suffix.slice(0, 10)}`,
         direction: "supplier_payment", purchaseOrderId: northOrder.id,
-        amountZmw: "35.00", paymentDate: "2097-01-01", method: "bank_transfer",
+        amountZmw: "35.00", paymentDate: "2096-12-31", method: "bank_transfer",
       },
       {
         paymentNumber: `MRE-P2-${suffix.slice(0, 10)}`,
@@ -409,13 +472,13 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       },
       {
         paymentNumber: `MRE-P3-${suffix.slice(0, 10)}`,
-        direction: "supplier_payment", purchaseOrderId: northOrder.id,
-        amountZmw: "70.00", paymentDate: "2096-12-31", method: "bank_transfer",
+        direction: "supplier_payment", purchaseOrderId: outsideOrders[0]!.id,
+        amountZmw: "70.00", paymentDate: "2097-02-20", method: "bank_transfer",
       },
       {
         paymentNumber: `MRE-P4-${suffix.slice(0, 10)}`,
-        direction: "supplier_payment", purchaseOrderId: eastOrder.id,
-        amountZmw: "80.00", paymentDate: "2097-04-01", method: "bank_transfer",
+        direction: "supplier_payment", purchaseOrderId: outsideOrders[1]!.id,
+        amountZmw: "80.00", paymentDate: "2096-12-30", method: "bank_transfer",
       },
     ]).returning();
     paymentIds = createdPayments.map(({ id }) => id);
@@ -429,7 +492,12 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       totals: { orders: number; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
       monthlySpend: {
         month: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+        suppliers: { supplierId: number; supplierName: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string }[];
       }[];
+      suppliers: {
+        supplierId: number; name: string; orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string;
+      }[];
+      shipments: { shipmentId: number; supplierId: number; orderNumber: string }[];
     };
     assert.equal(response.status, 200, JSON.stringify(payload));
     assert.deepEqual(payload.period, { from: "2097-01-01", to: "2097-03-31" });
@@ -442,8 +510,16 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       payload.monthlySpend.reduce((sum, month) => sum + cents(month[key]), 0n);
     assert.equal(payload.totals.orderedGoodsZmw, "600.00");
     assert.equal(payload.totals.importCostsZmw, "80.00");
-    assert.equal(payload.totals.paymentsZmw, "50.00");
+    assert.equal(payload.totals.paymentsZmw, "85.00");
     assert.equal(payload.totals.orders, 2);
+    assert.deepEqual(
+      payload.shipments.map((row) => [row.shipmentId, row.supplierId, row.orderNumber]),
+      [
+        [shipment.id, east.id, eastOrder.orderNumber],
+        [shipment.id, north.id, northOrder.orderNumber],
+      ],
+      "shipment details should include each linked in-range order once and exclude the out-of-range order",
+    );
     assert.equal(sumMonthly("orderedGoodsZmw"), cents(payload.totals.orderedGoodsZmw));
     assert.equal(sumMonthly("importCostsZmw"), cents(payload.totals.importCostsZmw));
     assert.equal(sumMonthly("paymentsZmw"), cents(payload.totals.paymentsZmw));
@@ -452,13 +528,58 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
     assert.ok(january);
     assert.equal(january.orderedGoodsZmw, "400.00");
     assert.equal(january.importCostsZmw, "60.00");
-    assert.equal(january.paymentsZmw, "35.00");
+    assert.equal(january.paymentsZmw, "0.00");
     assert.equal(cents(january.importCostsZmw), 6_000n, "the shared shipment expense must be counted once");
     const march = payload.monthlySpend.find(({ month }) => month === "2097-03");
     assert.ok(march);
     assert.equal(march.orderedGoodsZmw, "200.00");
     assert.equal(march.importCostsZmw, "20.00");
     assert.equal(march.paymentsZmw, "15.00");
+    const february = payload.monthlySpend.find(({ month }) => month === "2097-02");
+    assert.ok(february);
+    assert.equal(february.paymentsZmw, "70.00", "payments follow their recorded date even when the order is outside the period");
+
+    for (const supplier of payload.suppliers) {
+      const monthlyRows = payload.monthlySpend.flatMap((month) =>
+        month.suppliers.filter((row) => row.supplierId === supplier.supplierId),
+      );
+      assert.equal(
+        monthlyRows.reduce((sum, row) => sum + cents(row.orderedGoodsZmw), 0n),
+        cents(supplier.orderedGoodsZmw),
+        `${supplier.name} monthly goods should match its report row`,
+      );
+      assert.equal(
+        monthlyRows.reduce((sum, row) => sum + cents(row.importCostsZmw), 0n),
+        cents(supplier.importCostsZmw),
+        `${supplier.name} monthly import costs should match its report row`,
+      );
+      assert.equal(
+        monthlyRows.reduce((sum, row) => sum + cents(row.paymentsZmw), 0n),
+        cents(supplier.paymentsZmw),
+        `${supplier.name} monthly payments should match its report row`,
+      );
+    }
+
+    for (const [query, expectedPeriod] of [
+      ["?from=2097-03-01", { from: "2097-03-01", to: null }],
+      ["?to=2097-01-31", { from: null, to: "2097-01-31" }],
+    ] as const) {
+      const openRangeResponse = await fetch(`${baseUrl}/api/supplier-analytics${query}`);
+      const openRange = await openRangeResponse.json() as {
+        period: { from: string | null; to: string | null };
+        totals: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string };
+        monthlySpend: { orderedGoodsZmw: string; importCostsZmw: string; paymentsZmw: string }[];
+      };
+      assert.equal(openRangeResponse.status, 200, JSON.stringify(openRange));
+      assert.deepEqual(openRange.period, expectedPeriod);
+      for (const key of ["orderedGoodsZmw", "importCostsZmw", "paymentsZmw"] as const) {
+        assert.equal(
+          openRange.monthlySpend.reduce((sum, month) => sum + cents(month[key]), 0n),
+          cents(openRange.totals[key]),
+          `open-ended date range should reconcile monthly ${key}`,
+        );
+      }
+    }
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -469,6 +590,9 @@ test("supplier analytics includes date boundaries, excludes adjacent dates, and 
       if (shipmentId !== undefined) {
         await db.delete(shipmentPurchaseOrders).where(inArray(shipmentPurchaseOrders.shipmentId, [shipmentId]));
         await db.delete(shipments).where(inArray(shipments.id, [shipmentId]));
+      }
+      if (outsideShipmentId !== undefined) {
+        await db.delete(shipments).where(inArray(shipments.id, [outsideShipmentId]));
       }
       if (purchaseOrderIds.length) {
         await db.delete(purchaseOrderLines).where(inArray(purchaseOrderLines.purchaseOrderId, purchaseOrderIds));

@@ -1,4 +1,5 @@
 export type SupplierReportRow = {
+  supplierId: number;
   name: string;
   orders: number;
   orderedGoodsZmw: string;
@@ -24,6 +25,7 @@ export type SupplierMonthlySpendRow = {
     supplierName: string;
     orderedGoodsZmw: string;
     importCostsZmw: string;
+    paymentsZmw: string;
   }[];
 };
 
@@ -58,6 +60,41 @@ export type SupplierReportCsvData = {
   };
   suppliers: SupplierReportRow[];
 };
+
+export function supplierReportForSupplier(report: SupplierReportCsvData, supplierId: number | null): SupplierReportCsvData {
+  if (supplierId === null) return report;
+  const supplier = report.suppliers.find((row) => row.supplierId === supplierId);
+  const monthlySpend = report.monthlySpend.map((month) => {
+    const supplierMonth = month.suppliers.find((row) => row.supplierId === supplierId);
+    return {
+      ...month,
+      orderedGoodsZmw: supplierMonth?.orderedGoodsZmw ?? "0.00",
+      importCostsZmw: supplierMonth?.importCostsZmw ?? "0.00",
+      paymentsZmw: supplierMonth?.paymentsZmw ?? "0.00",
+      suppliers: supplierMonth ? [supplierMonth] : [],
+    };
+  });
+  return {
+    ...report,
+    monthlySpend,
+    shipments: report.shipments.filter((shipment) => shipment.supplierId === supplierId),
+    totals: {
+      ...report.totals,
+      orderedGoodsZmw: supplier?.orderedGoodsZmw ?? "0.00",
+      importCostsZmw: supplier?.importCostsZmw ?? "0.00",
+      paymentsZmw: supplier?.paymentsZmw ?? "0.00",
+      orders: supplier?.orders ?? 0,
+      onTimeOrders: supplier?.onTimeOrders ?? 0,
+      lateOrders: supplier?.lateOrders ?? 0,
+      overdueOpenOrders: supplier?.overdueOpenOrders ?? 0,
+      missingExpectedDateOrders: supplier?.missingExpectedDateOrders ?? 0,
+      missingActualDateOrders: supplier?.missingActualDateOrders ?? 0,
+      incompleteDeliveryOrders: supplier?.incompleteDeliveryOrders ?? 0,
+      measuredDeliveryOrders: supplier?.measuredDeliveryOrders ?? 0,
+    },
+    suppliers: supplier ? [supplier] : [],
+  };
+}
 
 export function formatSupplierDeliveryVariance(value: string | null) {
   if (value == null) return "—";
@@ -144,20 +181,21 @@ export function supplierReportCsv(report: SupplierReportCsvData) {
     [],
     ["Monthly costs by supplier"],
     ["Shared shipment expenses are allocated across linked supplier orders once; unassigned costs are excluded from supplier rows."],
-    ["Month", "Supplier", "Goods ordered (ZMW)", "Allocated import costs (ZMW)"],
+    ["Month", "Supplier", "Goods ordered (ZMW)", "Allocated import costs (ZMW)", "Supplier payments (ZMW)"],
     ...report.monthlySpend.flatMap((month) => month.suppliers.length
       ? [
         ...month.suppliers.map((supplier) => [
-          month.month, supplier.supplierName, supplier.orderedGoodsZmw, supplier.importCostsZmw,
+          month.month, supplier.supplierName, supplier.orderedGoodsZmw, supplier.importCostsZmw, supplier.paymentsZmw,
         ]),
         [
           month.month,
           "Supplier-allocated total",
           month.suppliers.reduce((total, supplier) => total + Number(supplier.orderedGoodsZmw), 0).toFixed(2),
           month.suppliers.reduce((total, supplier) => total + Number(supplier.importCostsZmw), 0).toFixed(2),
+          month.suppliers.reduce((total, supplier) => total + Number(supplier.paymentsZmw), 0).toFixed(2),
         ],
       ]
-      : [[month.month, "No supplier costs assigned this month", "0.00", "0.00"]]),
+      : [[month.month, "No supplier costs assigned this month", "0.00", "0.00", "0.00"]]),
     [],
     ["Supplier shipment receipt dates"],
     ["Dates below are recorded on the shipment; blank dates are not inferred from purchase orders."],
