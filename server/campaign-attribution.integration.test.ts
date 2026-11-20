@@ -306,6 +306,14 @@ test("public shop campaign links attribute orders and reports count them without
 
     const attributions = await db.select().from(marketingAttributions);
     const testAttributions = attributions.filter((row) => testOrders.some((order) => order.id === row.salesOrderId));
+    const replacementAttributedOrder = testOrders.find((order) => order.orderNumber === orderNumbers[2]);
+    assert.ok(replacementAttributedOrder);
+    const replacementAttribution = testAttributions.find(
+      (row) => row.salesOrderId === replacementAttributedOrder.id,
+    );
+    assert.ok(replacementAttribution, "a request using the replacement link must create an attribution");
+    assert.equal(replacementAttribution.campaignId, campaignId);
+    assert.notEqual(replacementAttribution.campaignId, secondCampaignId);
     assert.deepEqual(testAttributions.map(({ salesOrderId, campaignId: savedCampaignId, source }) => ({
       salesOrderId, campaignId: savedCampaignId, source,
     })).sort((a, b) => a.salesOrderId - b.salesOrderId), [
@@ -320,7 +328,7 @@ test("public shop campaign links attribute orders and reports count them without
         source: "campaign_link",
       },
       {
-        salesOrderId: testOrders.find((order) => order.orderNumber === orderNumbers[2])!.id,
+        salesOrderId: replacementAttributedOrder.id,
         campaignId,
         source: "campaign_link",
       },
