@@ -9,7 +9,7 @@
     "start": "NODE_ENV=production tsx server/index.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "test": "tsx --test",
+    "test": "tsx scripts/check-test-database-migrations.ts && tsx --test",
     "test:quote-print": "tsx --test src/components/customer-quote-print.test.ts",
     "test:payment-posting": "RUN_PAYMENT_POSTING_INTEGRATION=1 tsx --test server/payment-posting.integration.test.ts"
   },

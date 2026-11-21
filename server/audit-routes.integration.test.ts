@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, inArray, isNull, like } from "drizzle-orm";
 import { after, test } from "node:test";
 import {
-  businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
+  appUserAccess, businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
   journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
   purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
@@ -950,6 +950,88 @@ test("route mutations across business areas keep their audit history and actor",
     } finally {
       client.release();
     }
+  }
+});
+
+test("audit history requires active business access and remains available to approved users", {
+  skip: !process.env.DATABASE_URL,
+}, async (t) => {
+  const [{ db, pool }, { registerApiRoutes }, { createBusinessAccessMiddleware, resolveBusinessAccount }] = await Promise.all([
+    import("./db"),
+    import("./routes"),
+    import("./access-control"),
+  ]);
+  const requiredTables = await pool.query<{ audit: string | null; access: string | null }>(
+    "SELECT to_regclass('public.business_audit_logs') AS audit, to_regclass('public.app_user_access') AS access",
+  );
+  if (!requiredTables.rows[0]?.audit || !requiredTables.rows[0]?.access) {
+    t.skip("requires the business audit and user access migrations");
+    return;
+  }
+
+  const suffix = randomUUID();
+  const activeUserId = `audit-access-active-${suffix}`;
+  const inactiveUserId = `audit-access-inactive-${suffix}`;
+  const activeEmail = `${activeUserId}@example.test`;
+  const inactiveEmail = `${inactiveUserId}@example.test`;
+  const auditLabel = `Protected audit record ${suffix}`;
+  let auditId: number | undefined;
+  const app = express();
+  app.use(express.json());
+  const businessAccess = createBusinessAccessMiddleware(async (userId) => {
+    const email = userId === activeUserId ? activeEmail : inactiveEmail;
+    const [grant] = await db.select().from(appUserAccess).where(eq(appUserAccess.email, email)).limit(1);
+    return resolveBusinessAccount(userId, {
+      emailAddress: email,
+      verification: { status: "verified" },
+    }, grant);
+  }, (req) => req.header("x-test-user"));
+  registerApiRoutes(app, businessAccess, (req) => req.header("x-test-user"));
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const request = async (userId?: string) => {
+    const response = await fetch(`${baseUrl}/api/audit-logs`, {
+      headers: userId ? { "x-test-user": userId } : undefined,
+    });
+    return { response, payload: await response.json() as any };
+  };
+
+  try {
+    await db.insert(appUserAccess).values([
+      { email: activeEmail, role: "manager", active: true },
+      { email: inactiveEmail, role: "manager", active: false },
+    ]);
+    const [audit] = await db.insert(businessAuditLogs).values({
+      entityType: "customer",
+      entityId: 1,
+      recordLabel: auditLabel,
+      actorClerkUserId: activeUserId,
+      actorEmail: activeEmail,
+      action: "updated",
+      changedFields: ["name"],
+    }).returning();
+    auditId = audit.id;
+
+    const signedOut = await request();
+    assert.equal(signedOut.response.status, 401, JSON.stringify(signedOut.payload));
+    assert.equal(JSON.stringify(signedOut.payload).includes(auditLabel), false);
+
+    const inactive = await request(inactiveUserId);
+    assert.equal(inactive.response.status, 403, JSON.stringify(inactive.payload));
+    assert.equal(JSON.stringify(inactive.payload).includes(auditLabel), false);
+
+    const approved = await request(activeUserId);
+    assert.equal(approved.response.status, 200, JSON.stringify(approved.payload));
+    assert.ok(approved.payload.entries.some((entry: { id: number; recordLabel: string }) =>
+      entry.id === auditId && entry.recordLabel === auditLabel));
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (auditId) await db.delete(businessAuditLogs).where(eq(businessAuditLogs.id, auditId));
+    await db.delete(appUserAccess).where(inArray(appUserAccess.email, [activeEmail, inactiveEmail]));
   }
 });
 
