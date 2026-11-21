@@ -27,8 +27,9 @@ test("customer quote conversion requires explicit confirmation only after expiry
   const actorEmail = `customer-quote-expiry-${suffix}@example.test`;
   const app = express();
   app.use(express.json());
-  const owner: RequestHandler = (_req, res, next) => {
-    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+  const owner: RequestHandler = (req, res, next) => {
+    const role = req.get("x-test-role") === "manager" ? "manager" : "owner";
+    res.locals.actor = { clerkUserId: `test-${suffix}-${role}`, email: actorEmail, role };
     next();
   };
   registerSalesRoutes(app, owner);
@@ -46,10 +47,10 @@ test("customer quote conversion requires explicit confirmation only after expiry
   let customerId: number | undefined;
   let productId: number | undefined;
 
-  const convert = async (quoteId: number, body: Record<string, unknown>) => {
+  const convert = async (quoteId: number, body: Record<string, unknown>, role: "owner" | "manager" = "owner") => {
     const response = await fetch(`${baseUrl}/api/customer-quotes/${quoteId}/convert`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-test-role": role },
       body: JSON.stringify(body),
     });
     return { status: response.status, payload: await response.json() as Record<string, any> };
@@ -109,6 +110,17 @@ test("customer quote conversion requires explicit confirmation only after expiry
         .where(eq(salesOrders.customerId, customerId));
       assert.equal(draftOrders.length, 0, "a rejected conversion must not create a draft order");
     }
+
+    const managerConversion = await convert(expiredQuote.id, { confirmExpired: true }, "manager");
+    assert.equal(managerConversion.status, 403, JSON.stringify(managerConversion.payload));
+    assert.match(managerConversion.payload.error, /only the business owner can convert customer quotes/i);
+    const [quoteAfterManagerAttempt] = await db.select().from(customerQuotes)
+      .where(eq(customerQuotes.id, expiredQuote.id));
+    assert.equal(quoteAfterManagerAttempt?.status, "accepted");
+    assert.equal(quoteAfterManagerAttempt?.salesOrderId, null);
+    const managerDraftOrders = await db.select().from(salesOrders)
+      .where(eq(salesOrders.customerId, customerId));
+    assert.equal(managerDraftOrders.length, 0, "a manager conversion must not create a draft order");
 
     const confirmed = await convert(expiredQuote.id, { confirmExpired: true });
     assert.equal(confirmed.status, 200, JSON.stringify(confirmed.payload));

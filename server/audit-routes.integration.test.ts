@@ -204,7 +204,7 @@ test("route mutations across business areas keep their audit history and actor",
       insideRows[3],
     ];
     const orderedMatchingRows = matchingRows
-      .map((row, index) => ({ ...row, createdAt: auditRows[index].createdAt }))
+      .map((row, index) => ({ ...row, entityId: index + 1, createdAt: auditRows[index].createdAt }))
       .sort((left, right) =>
         right.createdAt.getTime() - left.createdAt.getTime() || right.id - left.id
       );
@@ -264,12 +264,47 @@ test("route mutations across business areas keep their audit history and actor",
     assert.match(exported.response.headers.get("content-type") ?? "", /text\/csv/i);
     assert.match(exported.response.headers.get("content-disposition") ?? "", /attachment/);
     assert.equal(exported.payload.raw.split("\r\n").length, 6, "export includes every matching row, not one page");
-    for (const entityId of [1, 2, 3, 4, 5]) {
-      assert.match(exported.payload.raw, new RegExp(`,"${entityId}","updated",`));
+    assert.match(exported.payload.raw.split("\r\n")[0] ?? "", /"Record ID","Change ID","Change"/);
+    for (const row of orderedMatchingRows) {
+      assert.match(
+        exported.payload.raw,
+        new RegExp(`,"${row.entityId}","${row.id}","updated",`),
+        "each exported record includes its unique audit change ID",
+      );
     }
     assert.match(exported.payload.raw, /"'\=HYPERLINK\(""https:\/\/example\.invalid"",""Audit [^"]+""\)"/);
     assert.match(exported.payload.raw, /"'\=SUM\(A1:A2\)"/);
     assert.doesNotMatch(exported.payload.raw, /sales order|other-[^,\r\n]+@example\.test/);
+
+    const literalPercentEmail = `audit-search-${safeSuffix}%@example.test`;
+    const literalUnderscoreEmail = `audit-search-${safeSuffix}_@example.test`;
+    const wildcardLookalikeEmail = `audit-search-${safeSuffix}x@example.test`;
+    const wildcardSearchRows = await db.insert(businessAuditLogs).values([
+      literalPercentEmail,
+      literalUnderscoreEmail,
+      wildcardLookalikeEmail,
+    ].map((email, index) => ({
+      entityType: "customer",
+      entityId: 20_000 + index,
+      recordLabel: `Wildcard search ${suffix} ${index}`,
+      actorClerkUserId: actorId,
+      actorEmail: email,
+      action: "updated",
+      changedFields: [],
+      createdAt: new Date("2026-11-05T12:00:00.000Z"),
+    }))).returning({ id: businessAuditLogs.id, actorEmail: businessAuditLogs.actorEmail });
+    for (const [searchEmail, expectedEmail] of [
+      [literalPercentEmail, literalPercentEmail],
+      [literalUnderscoreEmail, literalUnderscoreEmail],
+    ]) {
+      const result = await filteredHistory({ actor: searchEmail });
+      assert.equal(result.response.status, 200, JSON.stringify(result.payload));
+      assert.equal(result.payload.pagination.total, 1, `literal search ${searchEmail} must not match a similar address`);
+      assert.deepEqual(
+        result.payload.entries.map((entry: { id: number }) => entry.id),
+        [wildcardSearchRows.find((row) => row.actorEmail === expectedEmail)?.id],
+      );
+    }
 
     const streamDate = new Date("2026-11-05T12:00:00.000Z");
     const streamedEntries = await db.insert(businessAuditLogs).values(Array.from({ length: 505 }, (_, index) => ({

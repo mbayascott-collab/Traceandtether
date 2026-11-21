@@ -27,6 +27,12 @@ test("audit history filters validate and normalize supported query values", () =
   });
 });
 
+test("audit history actor filters accept literal percent and underscore characters", () => {
+  for (const actor of ["audit%search@example.test", "audit_search@example.test"]) {
+    assert.equal(auditLogQuerySchema.parse({ actor }).actor, actor);
+  }
+});
+
 test("audit history filters reject invalid values and reversed dates", () => {
   const invalidQueries = [
     { entityType: "not-a-record" },

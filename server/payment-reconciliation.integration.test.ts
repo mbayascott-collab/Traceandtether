@@ -329,14 +329,25 @@ test("CSV statement imports save review rows without changing journals", {
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let importBatchId: number | undefined;
   const csvReferences = [`CSV-${suffix}`, `CSV-UNSELECTED-${suffix}`, `CSV-OUT-${suffix}`];
+  const rejectedImportReferences = [`CSV-INVALID-DATE-${suffix}`, `CSV-INVALID-ZERO-${suffix}`];
+  const rejectedImportFileNames = [`rejected-date-${label}.csv`, `rejected-zero-${label}.csv`];
+  const trackedPaymentReferences = [
+    ...csvReferences,
+    ...rejectedImportReferences,
+    ...rejectedImportReferences.map((reference) => `${reference}-VALID`),
+  ];
 
-  const request = async (path: string, body: unknown) => {
+  const post = async (path: string, body: unknown) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     const payload = await response.json() as any;
+    return { response, payload };
+  };
+  const request = async (path: string, body: unknown) => {
+    const { response, payload } = await post(path, body);
     assert.equal(response.status, 201, JSON.stringify(payload));
     return payload;
   };
@@ -353,7 +364,7 @@ test("CSV statement imports save review rows without changing journals", {
   };
   const paymentSnapshot = async () =>
     db.select({ id: businessPayments.id }).from(businessPayments)
-      .where(inArray(businessPayments.reference, csvReferences))
+      .where(inArray(businessPayments.reference, trackedPaymentReferences))
       .orderBy(asc(businessPayments.id));
 
   try {
@@ -406,12 +417,70 @@ test("CSV statement imports save review rows without changing journals", {
       .where(eq(paymentStatementImportBatches.id, importBatchId));
     assert.equal(batches.length, 1);
     assert.equal(batches[0]?.fileName, `reconciliation-${label}.csv`);
+
+    const invalidImports = [
+      {
+        fileName: rejectedImportFileNames[0],
+        reference: rejectedImportReferences[0],
+        invalidLine: {
+          transactionDate: "2026-11-13",
+          flow: "in",
+          amountZmw: "12.00",
+          description: "Outside import date range",
+        },
+      },
+      {
+        fileName: rejectedImportFileNames[1],
+        reference: rejectedImportReferences[1],
+        invalidLine: {
+          transactionDate: "2026-11-12",
+          flow: "out",
+          amountZmw: "0.00",
+          description: "Zero amount",
+        },
+      },
+    ] as const;
+    for (const invalidImport of invalidImports) {
+      const rejected = await post("/api/payments/reconciliation/imports", {
+        accountId: bankAccount.id,
+        fileName: invalidImport.fileName,
+        from: "2026-11-10",
+        to: "2026-11-12",
+        lines: [
+          { transactionDate: "2026-11-10", flow: "in", amountZmw: "4.50", description: "Valid row first", reference: `${invalidImport.reference}-VALID` },
+          { ...invalidImport.invalidLine, reference: invalidImport.reference },
+        ],
+        includedIndexes: [0, 1],
+        allowDuplicateBatch: false,
+      });
+      assert.equal(rejected.response.status, 400, JSON.stringify(rejected.payload));
+    }
+
+    const rejectedBatches = await db.select().from(paymentStatementImportBatches)
+      .where(inArray(paymentStatementImportBatches.fileName, [...rejectedImportFileNames]));
+    const rejectedRows = await db.select().from(paymentStatementLines)
+      .where(inArray(paymentStatementLines.reference, [
+        ...rejectedImportReferences,
+        ...rejectedImportReferences.map((reference) => `${reference}-VALID`),
+      ]));
+    assert.deepEqual(rejectedBatches, [], "invalid files must not leave import batches");
+    assert.deepEqual(rejectedRows, [], "invalid files must not leave any selected statement rows");
+    assert.deepEqual(await journalSnapshot(), before, "rejected imports must not change journal entries or lines");
+    assert.deepEqual(await paymentSnapshot(), paymentsBefore, "rejected imports must not create payments");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [email]);
+      await client.query(
+        "DELETE FROM payment_statement_lines WHERE reference = ANY($1::text[])",
+        [[...rejectedImportReferences, ...rejectedImportReferences.map((reference) => `${reference}-VALID`)]],
+      );
+      await client.query(
+        "DELETE FROM payment_statement_import_batches WHERE file_name = ANY($1::text[])",
+        [rejectedImportFileNames],
+      );
       if (importBatchId) {
         await client.query("DELETE FROM payment_statement_import_batches WHERE id = $1", [importBatchId]);
       }

@@ -1214,7 +1214,11 @@ export function registerSalesRoutes(
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
   });
-  app.post("/api/customer-quotes/:id/convert", owner, async (req, res) => {
+  app.post(
+    "/api/customer-quotes/:id/convert",
+    owner,
+    requireBusinessOwner("Only the business owner can convert customer quotes."),
+    async (req, res) => {
     const id = idOf(req.params.id);
     if (!id) return bad(res, "Invalid quote.");
     const result = await db.transaction(async (tx) => {
@@ -1260,7 +1264,8 @@ export function registerSalesRoutes(
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
     res.json(result);
-  });
+    },
+  );
   app.patch(
     "/api/sales-orders/:id/attribution",
     owner,

@@ -59,9 +59,15 @@ const auditPageSchema = z.string()
   .transform(Number)
   .pipe(z.number().int().min(1).max(1_000_000));
 
+const auditActorEmailSchema = z.string().trim().min(1).max(320)
+  .refine(
+    (email) => z.string().email().safeParse(email.replaceAll("%", "+")).success,
+    "Invalid email address",
+  );
+
 export const auditLogQuerySchema = z.object({
   entityType: z.enum(auditEntityTypes).optional(),
-  actor: z.string().trim().min(1).max(320).email().optional(),
+  actor: auditActorEmailSchema.optional(),
   campaignId: z.string()
     .regex(/^[1-9]\d*$/)
     .transform(Number)

@@ -1,4 +1,5 @@
 export type AuditCsvEntry = {
+  id: number;
   createdAt: Date;
   recordLabel: string;
   entityType: string;
@@ -19,7 +20,7 @@ function humanize(value: string): string {
 }
 
 export function auditLogCsvHeader(): string {
-  return ["Date and time", "Record", "Record type", "Record ID", "Change", "Account", "Fields"]
+  return ["Date and time", "Record", "Record type", "Record ID", "Change ID", "Change", "Account", "Fields"]
     .map(csvCell)
     .join(",");
 }
@@ -30,6 +31,7 @@ export function auditLogCsvRow(entry: AuditCsvEntry): string {
     entry.recordLabel,
     humanize(entry.entityType),
     entry.entityId,
+    entry.id,
     humanize(entry.action),
     entry.actorEmail,
     entry.changedFields.map(humanize).join(", "),

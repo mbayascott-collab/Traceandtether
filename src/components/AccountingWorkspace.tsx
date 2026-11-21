@@ -47,7 +47,7 @@ type ReportData = {
     activeEntryId: number | null;
     replacementReversalId: number | null;
     canCorrect: boolean;
-    history: Array<{
+    history?: Array<{
       id: number; entryDate: string; entryNumber: string; memo: string;
       kind: "opening_balance" | "replacement" | "reversal";
       relatedEntryId: number | null; reversalEntryId: number | null; reversed: boolean;
@@ -75,6 +75,12 @@ type ReportData = {
 
 export function safeAccountingCorrectionHistory(
   history: ReportData["correctionHistory"] | null | undefined,
+) {
+  return history ?? [];
+}
+
+export function safeOpeningBalanceHistory(
+  history: ReportData["openingBalances"]["history"] | null | undefined,
 ) {
   return history ?? [];
 }
@@ -314,7 +320,7 @@ export default function AccountingWorkspace() {
   const expenses = data?.expenses;
   const ownerTransactions = data?.ownerTransactions;
   const correctionHistory = safeAccountingCorrectionHistory(data?.correctionHistory);
-  const openingBalanceHistory = data?.openingBalances?.history ?? [];
+  const openingBalanceHistory = safeOpeningBalanceHistory(data?.openingBalances?.history);
   const expenseJournalWarnings = data?.expenseJournalWarnings ?? [];
   const openingHistoryById = new Map(openingBalanceHistory.map((entry) => [entry.id, entry]));
   const canEnterOpeningBalances = Boolean(data && !data.openingBalances.posted && (

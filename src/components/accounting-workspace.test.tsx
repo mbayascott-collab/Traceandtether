@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AccountingListRows, safeAccountingCorrectionHistory } from "./AccountingWorkspace";
+import { AccountingListRows, safeAccountingCorrectionHistory, safeOpeningBalanceHistory } from "./AccountingWorkspace";
 
 function renderMissingRows(emptyMessage: string) {
   return renderToStaticMarkup(createElement("table", null,
@@ -54,7 +54,17 @@ test("accounting renders a clear empty state when a report omits correction hist
 test("accounting renders a clear empty state when opening-balance history is absent", () => {
   let markup = "";
   assert.doesNotThrow(() => {
-    markup = renderMissingRows("No opening-balance correction history is available.");
+    const history = safeOpeningBalanceHistory(undefined);
+    markup = renderToStaticMarkup(createElement("table", null,
+      createElement("tbody", null,
+        createElement(AccountingListRows, {
+          rows: history,
+          colSpan: 5,
+          emptyMessage: "No opening-balance correction history is available.",
+          renderRow: () => null,
+        }),
+      ),
+    ));
   });
   assert.match(markup, /No opening-balance correction history is available\./);
 });
