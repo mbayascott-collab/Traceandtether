@@ -358,8 +358,29 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(report.payload.totals.attributedOrders - baseline.attributedOrders, 3);
     assert.equal(report.payload.totals.unattributedOrders - baseline.unattributedOrders, 2);
 
+    await db.update(marketingCampaigns).set({
+      status: "active",
+      endsOn: oldReportDate,
+    }).where(eq(marketingCampaigns.id, campaignId));
+    const expiredShop = await request("/api/shop/products", undefined, undefined, scheduledClientIp);
+    assert.equal(expiredShop.response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
+    const expiredCampaignOrderNumber = await submitOrder(
+      5, replacementCode, expiredShop.payload.challenge, scheduledClientIp,
+    );
+    const [expiredCampaignOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
+      .where(eq(salesOrders.orderNumber, expiredCampaignOrderNumber));
+    const expiredAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, expiredCampaignOrder.id));
+    assert.equal(expiredAttribution.length, 0, "an ended campaign link must not attribute new requests");
+    const afterEndDateReport = await request(`/api/marketing/reports?from=${oldReportDate}&to=${oldReportDate}`);
+    assert.equal(afterEndDateReport.response.status, 200);
+    const historicalCampaign = afterEndDateReport.payload.campaigns.find((item: { id: number }) => item.id === campaignId);
+    assert.equal(historicalCampaign?.orderCount, 2, "orders attributed before the campaign ended must remain reportable");
+    assert.equal(historicalCampaign?.attributedRevenueZmw, "200.00");
+
     const [databaseDate] = (await pool.query<{ today: string; tomorrow: string }>(
-      "SELECT CURRENT_DATE::text AS today, (CURRENT_DATE + 1)::text AS tomorrow",
+      "SELECT (now() AT TIME ZONE 'Africa/Lusaka')::date::text AS today, ((now() AT TIME ZONE 'Africa/Lusaka')::date + 1)::text AS tomorrow",
     )).rows;
     const scheduledTrackingCode = randomUUID();
     const [scheduledCampaign] = await db.insert(marketingCampaigns).values({

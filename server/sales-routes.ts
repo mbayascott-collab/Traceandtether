@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql, sum } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql, sum } from "drizzle-orm";
 import type { Express, RequestHandler } from "express";
 import { z } from "zod";
 import {
@@ -36,6 +36,16 @@ function cents(value: string) {
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
 }
 function money(value: bigint) { return `${value / 100n}.${String(value % 100n).padStart(2, "0")}`; }
+function zambiaToday() {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Africa/Lusaka",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
 function roundedDivide(numerator: bigint, denominator: bigint) {
   return (numerator + denominator / 2n) / denominator;
 }
@@ -412,12 +422,14 @@ export function registerSalesRoutes(
     const parsed = publicShopOrderInputSchema.safeParse(orderBody);
     if (!parsed.success) return bad(res, parsed.error.issues[0]?.message ?? "Check your order details.");
     const result = await db.transaction(async (tx) => {
+      const campaignToday = zambiaToday();
       const [sourceCampaign] = parsed.data.trackingCode
         ? await tx.select({ id: marketingCampaigns.id }).from(marketingCampaigns)
           .where(and(
             eq(marketingCampaigns.trackingCode, parsed.data.trackingCode),
             eq(marketingCampaigns.status, "active"),
-            sql`(${marketingCampaigns.startsOn} is null or ${marketingCampaigns.startsOn} <= CURRENT_DATE)`,
+            or(isNull(marketingCampaigns.startsOn), lte(marketingCampaigns.startsOn, campaignToday)),
+            or(isNull(marketingCampaigns.endsOn), gte(marketingCampaigns.endsOn, campaignToday)),
           )).limit(1).for("share")
         : [];
       const ids = parsed.data.lines.map((line) => line.productId);
