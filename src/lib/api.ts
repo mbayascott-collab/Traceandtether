@@ -552,6 +552,39 @@ export function inventoryLocationValuesCsv(locationTotals: InventoryLocationTota
     `${safeCsvCell(name)},${index === 0 ? safeCsvCell(value) : `"${value}"`}`
   ).join("\r\n");
 }
+export function inventoryProductLocationCsv(inventory: InventoryItem[]): string {
+  const rows: unknown[][] = [
+    ["Product", "SKU", "Location", "On hand", "Reserved", "Available", "Stock value (ZMW)"],
+    ...inventory.flatMap((product) => product.locations.map((location) => [
+      product.name,
+      product.sku,
+      location.name,
+      location.onHand,
+      location.reserved,
+      location.available,
+      formatInventoryValueCents(inventoryValueCents(location.stockValueZmw)),
+    ])),
+  ];
+  return rows.map((row) => row.map(safeCsvCell).join(",")).join("\r\n");
+}
+export function salesDeliveryLocationCsv(orders: SalesOrder[]): string {
+  const rows: unknown[][] = [
+    ["Delivery date", "Delivery", "Order", "Customer", "Product", "SKU", "Stock location", "Delivered quantity"],
+    ...orders.flatMap((order) => order.deliveries.flatMap((delivery) =>
+      delivery.lines.flatMap((line) => line.stockLocations.map((location) => [
+        delivery.deliveryDate,
+        delivery.deliveryNumber,
+        order.orderNumber,
+        order.customerName,
+        line.productName,
+        line.sku,
+        location.locationName || "Unassigned",
+        location.quantity,
+      ]))
+    )),
+  ];
+  return rows.map((row) => row.map(safeCsvCell).join(",")).join("\r\n");
+}
 export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: number | null, download = false): string {
   const base = `/api/inventory/movements/${movementId}/opening-evidence${evidenceId == null ? "" : `/${evidenceId}`}`;
   return download ? `${base}?download=1` : base;

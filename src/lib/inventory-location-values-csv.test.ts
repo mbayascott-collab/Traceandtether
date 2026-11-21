@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inventoryLocationValuesCsv, type InventoryLocationTotal } from "./api";
+import { inventoryLocationValuesCsv, inventoryProductLocationCsv, type InventoryItem, type InventoryLocationTotal } from "./api";
 
 const totals: InventoryLocationTotal[] = [
   { id: 1, name: "Main, east", onHand: 3, reserved: 0, available: 3, stockValueZmw: "12.10" },
@@ -39,5 +39,53 @@ test("location value CSV totals negative cents exactly", () => {
       { id: 2, name: "Remaining", onHand: 0, reserved: 0, available: 0, stockValueZmw: "0.10" },
     ]).split("\r\n").at(-1),
     '"Overall total","-0.91"',
+  );
+});
+
+test("product-by-location CSV includes empty locations and exact product balances", () => {
+  const inventory: InventoryItem[] = [{
+    id: 12,
+    name: "Leather bag",
+    sku: "BAG-12",
+    unit: "piece",
+    status: "active",
+    onHand: 3,
+    reserved: 1,
+    available: 2,
+    stockValueZmw: "12.13",
+    averageUnitCostZmw: "4.04",
+    locations: [
+      { id: 1, name: "Main, east", onHand: 3, reserved: 1, available: 2, stockValueZmw: "12.13" },
+      { id: 2, name: "Empty warehouse", onHand: 0, reserved: 0, available: 0, stockValueZmw: "0.00" },
+    ],
+  }];
+
+  assert.deepEqual(inventoryProductLocationCsv(inventory).split("\r\n"), [
+    '"Product","SKU","Location","On hand","Reserved","Available","Stock value (ZMW)"',
+    '"Leather bag","BAG-12","Main, east","3","1","2","12.13"',
+    '"Leather bag","BAG-12","Empty warehouse","0","0","0","0.00"',
+  ]);
+});
+
+test("product-by-location CSV protects formula-like product and location names", () => {
+  const inventory: InventoryItem[] = [{
+    id: 13,
+    name: "=HYPERLINK(\"https://example.test\",\"open\")",
+    sku: "SKU-13",
+    unit: "piece",
+    status: "active",
+    onHand: 0,
+    reserved: 0,
+    available: 0,
+    stockValueZmw: "0.00",
+    averageUnitCostZmw: "0.00",
+    locations: [
+      { id: 3, name: "@warehouse", onHand: 0, reserved: 0, available: 0, stockValueZmw: "0.00" },
+    ],
+  }];
+
+  assert.equal(
+    inventoryProductLocationCsv(inventory).split("\r\n")[1],
+    `"'=HYPERLINK(""https://example.test"",""open"")","SKU-13","'@warehouse","0","0","0","0.00"`,
   );
 });

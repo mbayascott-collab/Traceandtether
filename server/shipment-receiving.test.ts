@@ -5,7 +5,7 @@ import express, { type RequestHandler } from "express";
 import test, { after } from "node:test";
 import { eq, sum } from "drizzle-orm";
 import {
-  products, purchaseOrderLines, shipmentLines as shipmentLineRows,
+  products, purchaseOrders, purchaseOrderLines, shipmentLines as shipmentLineRows,
   shipmentPurchaseOrders, shipments as shipmentHeaders, suppliers,
 } from "../shared/schema";
 import { calculatePurchaseReceiptPosting, journalLinesAreBalanced } from "./accounting-posting";
@@ -113,50 +113,107 @@ test("keeps the saved receipt quantity when a correction would remove stocked un
 
   let supplierId: number | undefined;
   let productId: number | undefined;
+  let secondProductId: number | undefined;
   let purchaseOrderId: number | undefined;
   try {
     const [supplier] = await db.insert(suppliers).values({ name: `Receipt correction supplier ${suffix}` }).returning();
     supplierId = supplier.id;
-    const [product] = await db.insert(products).values({
-      sku: `RCC-${suffix}`, name: `Receipt correction product ${suffix}`, status: "active", purchaseCurrency: "CNY",
-    }).returning();
+    const [product, secondProduct] = await db.insert(products).values([
+      { sku: `RCC-${suffix}`, name: `Receipt correction product ${suffix}`, status: "active", purchaseCurrency: "CNY" },
+      { sku: `RCC-2-${suffix}`, name: `Receipt correction second product ${suffix}`, status: "active", purchaseCurrency: "CNY" },
+    ]).returning();
     productId = product.id;
+    secondProductId = secondProduct.id;
 
     const orderResponse = await fetch(`${baseUrl}/api/purchase-orders`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         supplierId, currency: "CNY", exchangeRateToZmw: "2", expectedAt: null, notes: null,
-        lines: [{ productId, quantityOrdered: 5, unitPrice: "10.00" }],
+        lines: [
+          { productId, quantityOrdered: 5, unitPrice: "10.00" },
+          { productId: secondProductId, quantityOrdered: 2, unitPrice: "15.00" },
+        ],
       }),
     });
     assert.equal(orderResponse.status, 201);
     const { order } = await orderResponse.json() as { order: { id: number } };
     purchaseOrderId = order.id;
-    const [orderLine] = await db.select().from(purchaseOrderLines)
+    const orderLines = await db.select().from(purchaseOrderLines)
       .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+    const firstOrderLine = orderLines.find((line) => line.productId === productId)!;
+    const secondOrderLine = orderLines.find((line) => line.productId === secondProductId)!;
 
     const [shipment] = await db.insert(shipmentHeaders).values({
       purchaseOrderId, shipmentReference: `RCC-${suffix}`,
     }).returning();
     await db.insert(shipmentPurchaseOrders).values({ shipmentId: shipment.id, purchaseOrderId });
-    const [shipmentLine] = await db.insert(shipmentLineRows).values({
-      shipmentId: shipment.id, purchaseOrderLineId: orderLine.id,
-      quantityShipped: 4, quantityReceived: 3, quantityStocked: 2,
-    }).returning();
+    const [firstShipmentLine, secondShipmentLine] = await db.insert(shipmentLineRows).values([
+      {
+        shipmentId: shipment.id, purchaseOrderLineId: firstOrderLine.id,
+        quantityShipped: 5, quantityReceived: 5, quantityStocked: 2,
+      },
+      {
+        shipmentId: shipment.id, purchaseOrderLineId: secondOrderLine.id,
+        quantityShipped: 2, quantityReceived: 2, quantityStocked: 2,
+      },
+    ]).returning();
+
+    const blockedCorrectionResponse = await fetch(`${baseUrl}/api/shipments/${shipment.id}/receive`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lines: [
+        { shipmentLineId: firstShipmentLine.id, quantityReceived: 3 },
+        { shipmentLineId: secondShipmentLine.id, quantityReceived: 1 },
+      ] }),
+    });
+    assert.equal(blockedCorrectionResponse.status, 400);
+    const [firstLineAfterRejectedCorrection, secondLineAfterRejectedCorrection] = await Promise.all([
+      db.select({ quantityReceived: shipmentLineRows.quantityReceived }).from(shipmentLineRows)
+        .where(eq(shipmentLineRows.id, firstShipmentLine.id)),
+      db.select({ quantityReceived: shipmentLineRows.quantityReceived }).from(shipmentLineRows)
+        .where(eq(shipmentLineRows.id, secondShipmentLine.id)),
+    ]);
+    assert.deepEqual(
+      [firstLineAfterRejectedCorrection[0]?.quantityReceived, secondLineAfterRejectedCorrection[0]?.quantityReceived],
+      [5, 2],
+      "a blocked line must not partially save another line's valid correction",
+    );
+
+    const correctionResponse = await fetch(`${baseUrl}/api/shipments/${shipment.id}/receive`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lines: [
+        { shipmentLineId: firstShipmentLine.id, quantityReceived: 3 },
+        { shipmentLineId: secondShipmentLine.id, quantityReceived: 2 },
+      ] }),
+    });
+    assert.equal(correctionResponse.status, 200);
+    const correctedPayload = await correctionResponse.json() as { shipment: { status: string } };
+    assert.equal(correctedPayload.shipment.status, "partially_received");
+    const [correctedOrder] = await db.select({ status: purchaseOrders.status })
+      .from(purchaseOrders).where(eq(purchaseOrders.id, purchaseOrderId));
+    assert.equal(correctedOrder.status, "partially_received");
 
     const response = await fetch(`${baseUrl}/api/shipments/${shipment.id}/receive`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ lines: [{ shipmentLineId: shipmentLine.id, quantityReceived: 1 }] }),
+      body: JSON.stringify({ lines: [
+        { shipmentLineId: firstShipmentLine.id, quantityReceived: 1 },
+        { shipmentLineId: secondShipmentLine.id, quantityReceived: 2 },
+      ] }),
     });
     const payload = await response.json() as { error?: string };
     assert.equal(response.status, 400);
     assert.match(payload.error ?? "", /cannot be reduced below the quantity already posted to stock/i);
 
-    const [savedLine] = await db.select({ quantityReceived: shipmentLineRows.quantityReceived })
-      .from(shipmentLineRows).where(eq(shipmentLineRows.id, shipmentLine.id));
-    assert.equal(savedLine.quantityReceived, 3);
+    const savedLines = await db.select({
+      id: shipmentLineRows.id, quantityReceived: shipmentLineRows.quantityReceived,
+    }).from(shipmentLineRows).where(eq(shipmentLineRows.shipmentId, shipment.id));
+    assert.deepEqual(
+      savedLines.map(({ id, quantityReceived }) => [id, quantityReceived]),
+      [[firstShipmentLine.id, 3], [secondShipmentLine.id, 2]],
+    );
   } finally {
     try {
       await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
@@ -174,6 +231,7 @@ test("keeps the saved receipt quantity when a correction would remove stocked un
         await pool.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
       }
       if (productId) await pool.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (secondProductId) await pool.query("DELETE FROM products WHERE id = $1", [secondProductId]);
       if (supplierId) await pool.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

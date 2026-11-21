@@ -76,12 +76,12 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       { productId: secondProduct.id, locationId: null, kind: "opening_stock", quantityDelta: 1, reason: "Location value regression fixture", sourceKey: `location-value-${suffix}-2-unassigned` },
     ]).returning();
     movementIds.push(...movements.map(({ id }) => id));
-    await db.insert(inventoryReservations).values([
+    const seededReservations = await db.insert(inventoryReservations).values([
       { productId: firstProduct.id, locationId: locationA.id, quantity: 1, reason: "Location total regression fixture" },
       { productId: secondProduct.id, locationId: locationA.id, quantity: 1, reason: "Location total regression fixture" },
       { productId: firstProduct.id, locationId: locationB.id, quantity: 1, reason: "Location total regression fixture" },
       { productId: secondProduct.id, locationId: null, quantity: 1, reason: "Location total regression fixture" },
-    ]);
+    ]).returning();
 
     const inventoryAccount = await db.transaction(async (tx) => {
       const accountMap = await ensureAccountingAccounts(tx);
@@ -210,6 +210,23 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       }
     }
 
+    const releasedReservationResponse = await fetch(`${baseUrl}/api/inventory/reservations/${seededReservations[0]!.id}/release`, {
+      method: "POST",
+    });
+    assert.equal(releasedReservationResponse.status, 200);
+    const inventoryAfterReleaseResponse = await fetch(`${baseUrl}/api/inventory`);
+    const inventoryAfterRelease = await inventoryAfterReleaseResponse.json() as { inventory: any[] };
+    assert.equal(inventoryAfterReleaseResponse.status, 200);
+    const firstProductAfterRelease = inventoryAfterRelease.inventory.find((item) => item.id === firstProduct.id);
+    const locationAfterRelease = firstProductAfterRelease.locations.find(
+      (location: { id: number | null }) => location.id === locationA.id,
+    );
+    assert.deepEqual(
+      [locationAfterRelease.onHand, locationAfterRelease.reserved, locationAfterRelease.available],
+      [1, 0, 1],
+      "releasing a reservation restores available units without changing on-hand stock",
+    );
+
     const eventRequests = await Promise.all(["stock_return", "stock_damage"].map((kind) => fetch(`${baseUrl}/api/inventory/events`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -223,6 +240,36 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       assert.equal(response.status, 400, JSON.stringify(payload));
       assert.match(payload.error ?? "", /active stock location/i);
     }
+
+    const [inactiveAdjustment, inactiveReservation] = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/adjustments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: firstProduct.id, locationId: inactiveLocation.id,
+          quantityDelta: 1, reason: "Inactive location adjustment regression", reference: null,
+        }),
+      }),
+      fetch(`${baseUrl}/api/inventory/reservations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: firstProduct.id, locationId: inactiveLocation.id,
+          quantity: 1, reason: "Inactive location reservation regression", reference: null,
+        }),
+      }),
+    ]);
+    for (const response of [inactiveAdjustment, inactiveReservation]) {
+      const payload = await response.json() as { error?: string };
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.match(payload.error ?? "", /active stock location/i);
+    }
+    const rejectedInactiveWrites = await db.select().from(inventoryMovements)
+      .where(and(eq(inventoryMovements.productId, firstProduct.id), eq(inventoryMovements.locationId, inactiveLocation.id)));
+    assert.equal(rejectedInactiveWrites.length, 1, "inactive-location requests must not add inventory movements");
+    const inactiveReservations = await db.select().from(inventoryReservations)
+      .where(and(eq(inventoryReservations.productId, firstProduct.id), eq(inventoryReservations.locationId, inactiveLocation.id)));
+    assert.equal(inactiveReservations.length, 0, "inactive-location requests must not add reservations");
 
     const transferRequests = await Promise.all([
       fetch(`${baseUrl}/api/inventory/transfers`, {
@@ -318,6 +365,7 @@ test("inventory endpoint reconciles location values and quantities with ledger b
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
+    await pool.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [`inventory-location-${suffix}@example.test`]);
     if (entryIds.length) {
       await db.delete(journalLines).where(inArray(journalLines.journalEntryId, entryIds));
       await db.delete(journalEntries).where(inArray(journalEntries.id, entryIds));

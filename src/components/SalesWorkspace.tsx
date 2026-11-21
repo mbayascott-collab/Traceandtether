@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
-  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
+  addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, salesDeliveryLocationCsv, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
   type Customer, type InventoryLocation, type MarketingCampaignOption, type Product, type PublicShopAttemptDay, type PublicShopBlockedSpike, type PublicShopAttemptSummary, type SalesDelivery, type SalesOrder,
 } from "../lib/api";
 import { pageCustomerPurchaseHistory } from "../lib/customer-purchase-history";
@@ -134,6 +134,15 @@ export default function SalesWorkspace({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not export public shop request activity.");
     }
+  }
+  function downloadDeliveryLocationCsv() {
+    const csv = salesDeliveryLocationCsv(orders);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `delivered-quantities-by-warehouse-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
   async function submit(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
     event.preventDefault(); const form = event.currentTarget; setError(""); setNotice("");
@@ -536,6 +545,13 @@ export default function SalesWorkspace({
         <button type="button" className="button button-secondary" onClick={() => setLines((old) => [...old, emptyLine()])}>Add product line</button>
         <label>Notes<input name="notes" /></label><button className="button button-primary">Save draft</button>
       </form>
+          <div className="toolbar">
+            <p className="report-footnote">Export recorded delivery quantities by date, product, delivery, and warehouse location.</p>
+            <button type="button" className="button button-secondary" onClick={downloadDeliveryLocationCsv}
+              disabled={!orders.some((order) => order.deliveries.some((delivery) => delivery.lines.some((line) => line.stockLocations.length)))}>
+              Download warehouse delivery CSV
+            </button>
+          </div>
           <div className="panel data-table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Stock location</th><th>Delivered / total</th><th>Campaign source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.orderNumber}</td><td>{o.customerName}</td><td>{o.lines.map((l) => `${l.productName} × ${l.deliveredQuantity}/${l.quantity}`).join(", ")}</td><td>{o.lines.map((line) => {
             const choice = stockLocationChoices[`${o.id}:${line.productId}`] ?? "auto";
             const suggested = suggestedStockAllocations(line);

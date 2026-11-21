@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryLocationValuesCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  inventoryLocationValuesCsv, inventoryProductLocationCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 import { filterInventoryMovements } from "../lib/inventory-movement-filter";
@@ -89,6 +89,15 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
+  function downloadProductLocationCsv() {
+    const csv = inventoryProductLocationCsv(inventory);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `inventory-products-by-location-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -145,6 +154,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       <div className="toolbar">
         <label className="search-field"><Search aria-hidden="true" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name or SKU" aria-label="Search inventory by product name or SKU" /></label>
         <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>
+        <button type="button" className="button button-secondary" onClick={downloadProductLocationCsv} disabled={!inventory.length}>Export product values by location</button>
       </div>
       <InventoryOverviewTable
         products={filteredInventory}
