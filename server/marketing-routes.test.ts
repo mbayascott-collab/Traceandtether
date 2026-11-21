@@ -2361,6 +2361,51 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
     }).returning();
     customerId = customer.id;
 
+    const noDeliveryBaseline = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(noDeliveryBaseline.response.status, 200, JSON.stringify(noDeliveryBaseline.payload));
+    const [undeliveredOrder] = await db.insert(salesOrders).values({
+      orderNumber: `C0-${suffix.slice(0, 30)}`,
+      customerId: customer.id,
+      status: "partially_fulfilled",
+      orderDate: reportDate,
+    }).returning();
+    orderIds.push(undeliveredOrder.id);
+    await db.insert(salesOrderLines).values({
+      salesOrderId: undeliveredOrder.id,
+      productId: productA.id,
+      quantity: 2,
+      unitPriceZmw: "100.00",
+    });
+    await db.insert(marketingAttributions).values({
+      salesOrderId: undeliveredOrder.id,
+      campaignId: campaign.id,
+      source: "campaign_link",
+    });
+    const undeliveredCancelled = await request(`/api/sales-orders/${undeliveredOrder.id}/cancel`, "POST", {});
+    assert.equal(undeliveredCancelled.response.status, 200, JSON.stringify(undeliveredCancelled.payload));
+    assert.equal(undeliveredCancelled.payload.order.status, "cancelled");
+
+    const afterNoDeliveryCancellation = await request(`/api/marketing/reports?from=${reportDate}&to=${reportDate}`);
+    assert.equal(afterNoDeliveryCancellation.response.status, 200, JSON.stringify(afterNoDeliveryCancellation.payload));
+    const emptyCampaignReport = afterNoDeliveryCancellation.payload.campaigns.find(
+      (item: { id: number }) => item.id === campaign.id,
+    );
+    assert.ok(emptyCampaignReport);
+    assert.equal(emptyCampaignReport.orderCount, 0);
+    assert.equal(emptyCampaignReport.attributedRevenueZmw, "0.00");
+    assert.equal(
+      afterNoDeliveryCancellation.payload.totals.attributedRevenueZmw,
+      noDeliveryBaseline.payload.totals.attributedRevenueZmw,
+    );
+    assert.equal(
+      afterNoDeliveryCancellation.payload.totals.attributedOrders,
+      noDeliveryBaseline.payload.totals.attributedOrders,
+    );
+    assert.equal(
+      afterNoDeliveryCancellation.payload.totals.campaignLinkOrders,
+      noDeliveryBaseline.payload.totals.campaignLinkOrders,
+    );
+
     const [order] = await db.insert(salesOrders).values({
       orderNumber: `C-${suffix.slice(0, 30)}`,
       customerId: customer.id,
@@ -2394,31 +2439,9 @@ test("campaign reporting keeps delivered revenue after the remainder of an order
       source: "campaign_link",
     });
 
-    const [undeliveredOrder] = await db.insert(salesOrders).values({
-      orderNumber: `C0-${suffix.slice(0, 30)}`,
-      customerId: customer.id,
-      status: "partially_fulfilled",
-      orderDate: reportDate,
-    }).returning();
-    orderIds.push(undeliveredOrder.id);
-    await db.insert(salesOrderLines).values({
-      salesOrderId: undeliveredOrder.id,
-      productId: productA.id,
-      quantity: 2,
-      unitPriceZmw: "100.00",
-    });
-    await db.insert(marketingAttributions).values({
-      salesOrderId: undeliveredOrder.id,
-      campaignId: campaign.id,
-      source: "campaign_link",
-    });
-
     const cancelled = await request(`/api/sales-orders/${order.id}/cancel`, "POST", {});
     assert.equal(cancelled.response.status, 200, JSON.stringify(cancelled.payload));
     assert.equal(cancelled.payload.order.status, "cancelled");
-    const undeliveredCancelled = await request(`/api/sales-orders/${undeliveredOrder.id}/cancel`, "POST", {});
-    assert.equal(undeliveredCancelled.response.status, 200, JSON.stringify(undeliveredCancelled.payload));
-    assert.equal(undeliveredCancelled.payload.order.status, "cancelled");
 
     const salesOrdersResponse = await request("/api/sales-orders");
     assert.equal(salesOrdersResponse.response.status, 200, JSON.stringify(salesOrdersResponse.payload));
