@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
 import {
   addSalesDeliveryReceiptProof, createSalesDelivery, createSalesOrder, deleteSalesOrder, fetchCustomers, fetchInventoryLocations, fetchMarketingCampaigns, fetchProducts, fetchPublicShopOrderAttemptCsv, fetchPublicShopOrderAttemptDays, fetchPublicShopOrderAttemptSummary, fetchSalesOrders, recordSalesReturn, saveCustomer, saveSalesDeliveryReceipt, salesDeliveryReceiptProofFileUrl, salesDeliveryReceiptProofUrl, salesDeliveryLocationCsv, sendSalesDeliveryInvoice, setSalesOrderAttribution, updateSalesOrderStatus,
@@ -64,6 +64,7 @@ export default function SalesWorkspace({
   const [shopAttemptDaysRange, setShopAttemptDaysRange] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const customerFormRef = useRef<HTMLFormElement>(null);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
   const [purchaseHistorySearch, setPurchaseHistorySearch] = useState("");
   const [purchaseHistoryVisibleCount, setPurchaseHistoryVisibleCount] = useState(25);
@@ -99,6 +100,11 @@ export default function SalesWorkspace({
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "Could not load sales records."); });
     return () => { alive = false; };
   }, [reload, mode]);
+  useEffect(() => {
+    if (editingCustomer) {
+      customerFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [editingCustomer]);
   useEffect(() => {
     if (mode !== "orders") return;
     if (!shopAttemptFrom || !shopAttemptTo || shopAttemptFrom > shopAttemptTo) {
@@ -375,7 +381,7 @@ export default function SalesWorkspace({
     <header className="page-heading"><div><p className="eyebrow">Sales · private records</p><h1>{title}</h1><p>{mode === "customers" ? "Keep customer contact and delivery details in the owner workspace." : "Draft orders, reserve available inventory on confirmation, and record stock leaving with each delivery."}</p></div></header>
     {error && <div className="notice-strip" role="alert">{error}</div>}{notice && <div className="notice-strip" role="status">{notice}</div>}
     {mode === "customers" && <>
-      <form key={editingCustomer?.id ?? "new-customer"} className="panel form-grid" onSubmit={(e) => submit(e, async (d) => saveCustomer({
+      <form ref={customerFormRef} key={editingCustomer?.id ?? "new-customer"} className="panel form-grid" onSubmit={(e) => submit(e, async (d) => saveCustomer({
         name: String(d.get("name")), contactPerson: String(d.get("contactPerson") || "") || null,
         contactPersonPhone: String(d.get("contactPersonPhone") || "") || null,
         email: String(d.get("email") || "") || null, phone: String(d.get("phone") || "") || null,
@@ -402,12 +408,12 @@ export default function SalesWorkspace({
           setPurchaseHistoryVisibleCount(25);
         }
       }} /></label>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th /></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button className="button button-secondary button-small" onClick={() => {
+      <div className="panel data-table-wrap"><table><thead><tr><th>Customer</th><th>Customer ID</th><th>Actions</th></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.id}><td>{c.name}</td><td>{customerCode(c.id)}</td><td><button type="button" className="button button-secondary button-small" onClick={() => {
         const closing = historyCustomer?.id === c.id;
         setHistoryCustomer(closing ? null : c);
         setPurchaseHistorySearch("");
         setPurchaseHistoryVisibleCount(25);
-      }}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
+      }}>{historyCustomer?.id === c.id ? "Close customer" : "View customer"}</button>{" "}<button type="button" className="button button-secondary button-small" aria-label={`Edit ${c.name}`} onClick={() => setEditingCustomer(c)}>Edit</button></td></tr>)}</tbody></table>{!filteredCustomers.length && <p className="report-footnote">No customers match that name or ID.</p>}</div>
       {historyCustomer && filteredCustomers.some((item) => item.id === historyCustomer.id) && (() => {
         const customer = customers.find((item) => item.id === historyCustomer.id) ?? historyCustomer;
         const purchases = orders
