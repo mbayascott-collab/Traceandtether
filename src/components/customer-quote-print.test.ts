@@ -213,7 +213,104 @@ test("long customer quotes print every row, repeat table headings, and keep appr
 
     assert.match(css, /@page\s*\{\s*size:\s*A4/i, "Print stylesheet must continue to declare A4 page size.");
     assert.match(css, /@page\s+customer-documents[\s\S]*?content:\s*"Page "\s*counter\(page\)\s*" of "\s*counter\(pages\)/i, "Customer quotes, invoices, and delivery notes need page number footers.");
+    assert.match(css, /@page\s+customer-documents\s*\{[^}]*margin:\s*15mm\s+15mm\s+20mm/i, "Customer documents need a reserved footer margin.");
+    assert.match(css, /#sales-invoice-print,\s*#delivery-note-print\s*\{\s*page:\s*customer-documents/i, "Invoices and delivery notes must use the numbered customer-document page.");
+    assert.match(css, /\.customer-quote-document-total,[\s\S]*?\.delivery-note-signatures\s*\{\s*break-inside:\s*avoid;\s*page-break-inside:\s*avoid/i, "Invoice totals and delivery signatures must not split across pages.");
     assert.match(css, /\.customer-quote-document-table thead\s*\{\s*display:\s*table-header-group/i, "Print stylesheet must repeat quote table headings.");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("multi-page invoices and delivery notes print numbered pages without splitting totals or signatures", () => {
+  const directory = mkdtempSync(join(tmpdir(), "sales-document-print-"));
+  const cssPath = resolve("src/index.css");
+  const chromium = findChromium();
+  const normalize = (value: string) => value.replace(/\s+/g, " ").toLocaleLowerCase();
+  const documents = [
+    {
+      id: "sales-invoice-print",
+      title: "INVOICE",
+      ending: `<div class="customer-quote-document-total"><span>Total (ZMW)</span><strong>${expectedTotal}</strong></div>
+        <footer class="customer-quote-document-footer">Invoice reference: PRINT-INVOICE-001</footer>`,
+      finalContent: ["Total (ZMW)", expectedTotal, "Invoice reference: PRINT-INVOICE-001"],
+      groupedContent: [] as string[],
+    },
+    {
+      id: "delivery-note-print",
+      title: "DELIVERY NOTE",
+      ending: `<section class="delivery-note-signatures" aria-label="Delivery confirmation">
+          <div><span>Delivered by</span><span>Name and signature</span><span>Date</span></div>
+          <div><span>Received by</span><strong>Receiving customer</strong><span>Signature date</span></div>
+        </section>
+        <footer class="customer-quote-document-footer">Delivery note: PRINT-DELIVERY-001</footer>`,
+      finalContent: ["Delivery note: PRINT-DELIVERY-001"],
+      groupedContent: ["Delivered by", "Received by", "Name and signature", "Signature date"],
+    },
+  ];
+
+  try {
+    for (const document of documents) {
+      const pdfPath = join(directory, `${document.id}.pdf`);
+      const textPath = join(directory, `${document.id}.txt`);
+      const deliveryNote = document.id === "delivery-note-print";
+      const headers = deliveryNote
+        ? "<th>Product</th><th>SKU</th><th>Quantity</th>"
+        : "<th>Product</th><th>SKU</th><th>Qty</th><th>Unit price</th><th>Amount</th>";
+      const rows = Array.from({ length: rowCount }, (_, index) => {
+        const number = String(index + 1).padStart(3, "0");
+        return deliveryNote
+          ? `<tr><td>Printed document item ${number}<small class="delivery-note-locations">Shipped from: Main warehouse</small></td><td>DOC-${number}</td><td class="quote-number-cell">1</td></tr>`
+          : `<tr><td>Printed document item ${number}</td><td>DOC-${number}</td><td class="quote-number-cell">1</td><td class="quote-number-cell">ZMW ${unitPrice}</td><td class="quote-number-cell">ZMW ${unitPrice}</td></tr>`;
+      }).join("");
+      const markup = `<div class="quote-preview-overlay"><article class="customer-quote-document" id="${document.id}">
+        <header class="customer-quote-document-header"><h1>${document.title} PRINT-001</h1></header>
+        <section class="customer-quote-document-customer"><span>FOR</span><strong>Print regression customer</strong></section>
+        <table class="customer-quote-document-table">
+          <thead><tr>${headers}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        ${document.ending}
+      </article></div>`;
+      const htmlPath = join(directory, `${document.id}.html`);
+      writeFileSync(htmlPath, `<!doctype html>
+        <html><head><meta charset="utf-8"><link rel="stylesheet" href="${pathToFileURL(cssPath).href}">
+        <style>@page { size: A4; } body { margin: 0; }</style></head><body>${markup}</body></html>`);
+      execFileSync(chromium, [
+        "--headless", "--no-sandbox", "--disable-gpu", "--no-pdf-header-footer",
+        `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href,
+      ], { stdio: "pipe", timeout: 60_000 });
+
+      const pdfInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+      const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
+      assert.ok(pageCount > 1, `${document.title} should print across multiple pages.`);
+      execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
+      const pages = readFileSync(textPath, "utf8").split("\f").map((page) => page.trim()).filter(Boolean);
+      assert.equal(pages.length, pageCount);
+      pages.forEach((page, index) => {
+        assert.match(
+          normalize(page),
+          new RegExp(`page ${index + 1} of ${pageCount}`),
+          `${document.title} page ${index + 1} should show its page number.`,
+        );
+      });
+      const allText = normalize(pages.join("\n"));
+      for (let index = 1; index <= rowCount; index += 1) {
+        const itemName = `printed document item ${String(index).padStart(3, "0")}`;
+        assert.equal(allText.split(itemName).length - 1, 1, `${document.title} should print ${itemName} exactly once.`);
+      }
+      const finalPage = normalize(pages.at(-1) ?? "");
+      for (const requiredText of document.finalContent) {
+        assert.ok(finalPage.includes(normalize(requiredText)), `${document.title} final page must include "${requiredText}".`);
+      }
+      if (document.groupedContent.length > 0) {
+        const signaturePages = pages.filter((page) => document.groupedContent.every(
+          (requiredText) => normalize(page).includes(normalize(requiredText)),
+        ));
+        assert.equal(signaturePages.length, 1, "Delivery signatures should stay together on one page.");
+        assert.match(normalize(signaturePages[0] ?? ""), /page \d+ of \d+/, "The delivery signature page should retain its footer number.");
+      }
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
