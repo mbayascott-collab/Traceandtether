@@ -61,6 +61,9 @@ test("database flow adjusts late import costs across partial receipts and sales"
   let shipmentLineId: number | undefined;
   let repeatedProductOrderId: number | undefined;
   let repeatedProductShipmentId: number | undefined;
+  let repeatedProductId: number | undefined;
+  let repeatedProductSalesOrderId: number | undefined;
+  let repeatedProductDeliveryId: number | undefined;
   let multiProductAId: number | undefined;
   let multiProductBId: number | undefined;
   let multiProductOrderId: number | undefined;
@@ -533,6 +536,13 @@ test("database flow adjusts late import costs across partial receipts and sales"
       assert.equal(journalLinesAreBalanced(lines.map((line) => ({ ...line, accountKey: "return-test" }))), true);
     }
 
+    const [repeatedProduct] = await db.insert(products).values({
+      sku: `ACC-REPEATED-${suffix}`,
+      name: `Accounting repeated product ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    repeatedProductId = repeatedProduct.id;
     const { order: repeatedProductOrder } = await request("/api/purchase-orders", {
       supplierId,
       currency: "CNY",
@@ -540,8 +550,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
       expectedAt: null,
       notes: null,
       lines: [
-        { productId, quantityOrdered: 5, unitPrice: "100.00" },
-        { productId, quantityOrdered: 5, unitPrice: "100.00" },
+        { productId: repeatedProductId, quantityOrdered: 5, unitPrice: "100.00" },
+        { productId: repeatedProductId, quantityOrdered: 5, unitPrice: "100.00" },
       ],
     }, 201);
     repeatedProductOrderId = repeatedProductOrder.id;
@@ -608,6 +618,31 @@ test("database flow adjusts late import costs across partial receipts and sales"
     );
     assert.equal(firstRepeatedProductAdjustment.sourceId, repeatedProductOrderId);
 
+    const { order: repeatedProductSalesOrder } = await request("/api/sales-orders", {
+      customerId,
+      deliveryAddress: null,
+      notes: null,
+      lines: [{ productId: repeatedProductId, quantity: 1, unitPriceZmw: "500.00" }],
+    }, 201);
+    repeatedProductSalesOrderId = repeatedProductSalesOrder.id;
+    await request(`/api/sales-orders/${repeatedProductSalesOrderId}/confirm`, {}, 200);
+    const [repeatedProductSalesLine] = await db.select().from(salesOrderLines)
+      .where(eq(salesOrderLines.salesOrderId, repeatedProductSalesOrderId!));
+    const { delivery: repeatedProductDelivery } = await request(
+      `/api/sales-orders/${repeatedProductSalesOrderId}/deliveries`,
+      {
+        idempotencyKey: randomUUID(),
+        deliveryDate: "2026-11-19",
+        lines: [{ salesOrderLineId: repeatedProductSalesLine.id, quantity: 1 }],
+      },
+      201,
+    );
+    repeatedProductDeliveryId = repeatedProductDelivery.id;
+    const inventoryAfterRepeatedProductSale = await request("/api/inventory", undefined, 200);
+    const repeatedProductBalanceAfterSale = inventoryAfterRepeatedProductSale.inventory
+      .find((item: any) => item.id === repeatedProductId);
+    assert.equal(repeatedProductBalanceAfterSale.onHand, 3);
+
     await request("/api/import-expenses", {
       purchaseOrderId: repeatedProductOrderId,
       shipmentId: null,
@@ -641,6 +676,20 @@ test("database flow adjusts late import costs across partial receipts and sales"
         (total: number, line: any) => total + Number(line.adjustmentZmw), 0,
       ),
       200,
+    );
+    assert.equal(
+      incrementalRepeatedProductPreview.lines.reduce(
+        (total: number, line: any) => total + Number(line.inventoryZmw), 0,
+      ),
+      166.67,
+      "only the cost still represented by on-hand units should increase inventory",
+    );
+    assert.equal(
+      incrementalRepeatedProductPreview.lines.reduce(
+        (total: number, line: any) => total + Number(line.cogsZmw), 0,
+      ),
+      33.33,
+      "the share attributable to the unit already sold should increase cost of goods sold",
     );
     const { journalEntry: incrementalRepeatedProductAdjustment } = await request(
       `/api/landed-costs/${repeatedProductOrderId}/adjust`,
@@ -679,6 +728,19 @@ test("database flow adjusts late import costs across partial receipts and sales"
       assert.equal(lines.reduce((total, line) => total + Number(line.debitZmw), 0), expectedAmount);
       assert.equal(lines.reduce((total, line) => total + Number(line.creditZmw), 0), expectedAmount);
     }
+    const incrementalJournalLines = repeatedProductAdjustmentLines.filter(
+      (line) => line.journalEntryId === incrementalRepeatedProductAdjustment.id,
+    );
+    assert.equal(
+      incrementalJournalLines.filter((line) => line.accountKey === "inventory")
+        .reduce((total, line) => total + Number(line.debitZmw), 0),
+      166.67,
+    );
+    assert.equal(
+      incrementalJournalLines.filter((line) => line.accountKey === "cost_of_goods_sold")
+        .reduce((total, line) => total + Number(line.debitZmw), 0),
+      33.33,
+    );
 
     const [multiProductA] = await db.insert(products).values({
       sku: `ACC-MULTI-A-${suffix}`,
@@ -1116,7 +1178,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
       if (auditTable.rows[0]?.exists) {
         await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [testEmail]);
       }
-      if (productId || multiProductAId || multiProductBId || mismatchProductAId || mismatchProductBId) {
+      if (productId || repeatedProductId || multiProductAId || multiProductBId || mismatchProductAId || mismatchProductBId) {
         await client.query(`
           DELETE FROM journal_lines
           WHERE journal_entry_id IN (
@@ -1141,8 +1203,8 @@ test("database flow adjusts late import costs across partial receipts and sales"
           )
         `, [
           [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
-          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
-          [salesOrderId, multiProductSalesOrderId].filter(Boolean),
+          [productId, repeatedProductId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
+          [salesOrderId, repeatedProductSalesOrderId, multiProductSalesOrderId].filter(Boolean),
         ]);
         await client.query(`
           DELETE FROM journal_entries
@@ -1165,11 +1227,11 @@ test("database flow adjusts late import costs across partial receipts and sales"
           ))
         `, [
           [purchaseOrderId, mismatchPurchaseOrderId, repeatedProductOrderId, multiProductOrderId].filter(Boolean),
-          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
-          [salesOrderId, multiProductSalesOrderId].filter(Boolean),
+          [productId, repeatedProductId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
+          [salesOrderId, repeatedProductSalesOrderId, multiProductSalesOrderId].filter(Boolean),
         ]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [
-          [productId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
+          [productId, repeatedProductId, multiProductAId, multiProductBId, mismatchProductAId, mismatchProductBId].filter(Boolean),
         ]);
       }
       if (deliveryId) await client.query(
@@ -1182,6 +1244,12 @@ test("database flow adjusts late import costs across partial receipts and sales"
       if (multiProductDeliveryId) await client.query(
         "DELETE FROM sales_deliveries WHERE id = $1", [multiProductDeliveryId],
       );
+      if (repeatedProductDeliveryId) await client.query(
+        "DELETE FROM sales_delivery_lines WHERE delivery_id = $1", [repeatedProductDeliveryId],
+      );
+      if (repeatedProductDeliveryId) await client.query(
+        "DELETE FROM sales_deliveries WHERE id = $1", [repeatedProductDeliveryId],
+      );
       if (salesOrderId) {
         await client.query("DELETE FROM inventory_reservations WHERE sales_order_id = $1", [salesOrderId]);
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [salesOrderId]);
@@ -1191,6 +1259,11 @@ test("database flow adjusts late import costs across partial receipts and sales"
         await client.query("DELETE FROM inventory_reservations WHERE sales_order_id = $1", [multiProductSalesOrderId]);
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [multiProductSalesOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [multiProductSalesOrderId]);
+      }
+      if (repeatedProductSalesOrderId) {
+        await client.query("DELETE FROM inventory_reservations WHERE sales_order_id = $1", [repeatedProductSalesOrderId]);
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [repeatedProductSalesOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [repeatedProductSalesOrderId]);
       }
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);
       if (purchaseOrderId) {
@@ -1234,6 +1307,7 @@ test("database flow adjusts late import costs across partial receipts and sales"
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [multiProductOrderId]);
       }
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
+      if (repeatedProductId) await client.query("DELETE FROM products WHERE id = $1", [repeatedProductId]);
       if (multiProductAId) await client.query("DELETE FROM products WHERE id = $1", [multiProductAId]);
       if (multiProductBId) await client.query("DELETE FROM products WHERE id = $1", [multiProductBId]);
       if (mismatchProductAId) await client.query("DELETE FROM products WHERE id = $1", [mismatchProductAId]);

@@ -177,7 +177,8 @@ async function recordDelivery(tx: any, orderId: number,
     const onHand = Number(movementTotal?.value ?? 0);
     const stockValue = await accountBalance(tx, "inventory", line.productId);
     if (onHand > 0 && stockValue > 0n) {
-      const cost = (stockValue * BigInt(lineInput.quantity) + BigInt(onHand / 2)) / BigInt(onHand);
+      const onHandQuantity = BigInt(onHand);
+      const cost = (stockValue * BigInt(lineInput.quantity) + onHandQuantity / 2n) / onHandQuantity;
       if (cost > 0n) cogsLines.push(
         { accountKey: "cost_of_goods_sold", productId: line.productId, debitZmw: formatCents(cost), description: "Weighted-average cost of delivered goods" },
         { accountKey: "inventory", productId: line.productId, creditZmw: formatCents(cost), description: "Inventory delivered" },
