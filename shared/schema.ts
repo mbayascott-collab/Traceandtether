@@ -62,6 +62,11 @@ const auditPageSchema = z.string()
 export const auditLogQuerySchema = z.object({
   entityType: z.enum(auditEntityTypes).optional(),
   actor: z.string().trim().min(1).max(320).email().optional(),
+  campaignId: z.string()
+    .regex(/^[1-9]\d*$/)
+    .transform(Number)
+    .pipe(z.number().int().positive().max(2_147_483_647))
+    .optional(),
   from: auditDateSchema.optional(),
   to: auditDateSchema.optional(),
   page: auditPageSchema.default(() => 1),

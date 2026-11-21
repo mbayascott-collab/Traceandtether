@@ -154,6 +154,7 @@ test("route mutations across business areas keep their audit history and actor",
   let purchaseOrderId: number | undefined;
   let customerGroupId: number | undefined;
   let marketingCampaignId: number | undefined;
+  let otherMarketingCampaignId: number | undefined;
   let statementLineId: number | undefined;
   let statementMatchSalesOrderId: number | undefined;
   let paymentTestSalesOrderId: number | undefined;
@@ -308,6 +309,7 @@ test("route mutations across business areas keep their audit history and actor",
     const invalidFilters: Record<string, string>[] = [
       { entityType: "not-a-record" },
       { actor: "not-an-email" },
+      { campaignId: "0" },
       { from: "2026-11-04", to: "2026-11-03" },
     ];
     for (const invalidFilter of invalidFilters) {
@@ -537,6 +539,20 @@ test("route mutations across business areas keep their audit history and actor",
       200,
     );
     assert.notEqual(campaignLinkReplacement.campaign.trackingCode, linkedCampaign.trackingCode);
+    const [otherCampaign] = await db.insert(marketingCampaigns).values({
+      name: `Audit route other campaign ${suffix}`,
+      status: "draft",
+    }).returning();
+    otherMarketingCampaignId = otherCampaign.id;
+    await db.insert(businessAuditLogs).values({
+      entityType: "marketing_campaign",
+      entityId: otherCampaign.id,
+      recordLabel: otherCampaign.name,
+      actorClerkUserId: actorId,
+      actorEmail,
+      action: "updated",
+      changedFields: ["notes"],
+    });
     const campaignHistory = await request(
       `/api/audit-logs?entityType=marketing_campaign&actor=${encodeURIComponent(actorEmail)}`,
     );
@@ -556,6 +572,29 @@ test("route mutations across business areas keep their audit history and actor",
       && entry.action === "updated"
       && entry.changedFields.includes("trackingCode"),
     ), "campaign-link replacement should be visible in audit history with its owner");
+    const oneCampaignHistory = await request(
+      `/api/audit-logs?campaignId=${linkedCampaign.id}&actor=${encodeURIComponent(actorEmail)}`,
+    );
+    assert.equal(oneCampaignHistory.response.status, 200, JSON.stringify(oneCampaignHistory.payload));
+    assert.equal(oneCampaignHistory.payload.pagination.total, 1);
+    assert.deepEqual(
+      oneCampaignHistory.payload.entries.map((entry: { entityId: number }) => entry.entityId),
+      [linkedCampaign.id],
+    );
+    const otherCampaignHistory = await request(
+      `/api/audit-logs?campaignId=${otherCampaign.id}&actor=${encodeURIComponent(actorEmail)}`,
+    );
+    assert.equal(otherCampaignHistory.response.status, 200, JSON.stringify(otherCampaignHistory.payload));
+    assert.deepEqual(
+      otherCampaignHistory.payload.entries.map((entry: { entityId: number }) => entry.entityId),
+      [otherCampaign.id],
+    );
+    const campaignExport = await request(
+      `/api/audit-logs/export.csv?campaignId=${linkedCampaign.id}&actor=${encodeURIComponent(actorEmail)}`,
+    );
+    assert.equal(campaignExport.response.status, 200);
+    assert.match(campaignExport.payload.raw, new RegExp(linkedCampaign.name));
+    assert.doesNotMatch(campaignExport.payload.raw, new RegExp(otherCampaign.name));
     const deletionImpact = await expectStatus(
       `/api/marketing/customer-groups/${createdCustomerGroupId}/deletion-impact`,
       undefined,
@@ -830,6 +869,9 @@ test("route mutations across business areas keep their audit history and actor",
       );
       if (marketingCampaignId) await client.query(
         "DELETE FROM marketing_campaigns WHERE id = $1", [marketingCampaignId],
+      );
+      if (otherMarketingCampaignId) await client.query(
+        "DELETE FROM marketing_campaigns WHERE id = $1", [otherMarketingCampaignId],
       );
       if (purchaseOrderId) {
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);

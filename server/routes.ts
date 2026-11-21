@@ -93,12 +93,19 @@ function validationMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Check the submitted values and try again.";
 }
 
-type AuditLogFilters = Pick<z.infer<typeof auditLogQuerySchema>, "entityType" | "actor" | "from" | "to">;
+type AuditLogFilters = Pick<
+  z.infer<typeof auditLogQuerySchema>,
+  "entityType" | "actor" | "campaignId" | "from" | "to"
+>;
 const AUDIT_EXPORT_PAGE_SIZE = 250;
 
-function auditLogWhere({ entityType, actor, from, to }: AuditLogFilters): SQL | undefined {
+function auditLogWhere({ entityType, actor, campaignId, from, to }: AuditLogFilters): SQL | undefined {
   const conditions: SQL[] = [];
   if (entityType) conditions.push(eq(businessAuditLogs.entityType, entityType));
+  if (campaignId !== undefined) {
+    conditions.push(eq(businessAuditLogs.entityType, "marketing_campaign"));
+    conditions.push(eq(businessAuditLogs.entityId, campaignId));
+  }
   if (actor) {
     const escapedActor = actor.replace(/[\\%_]/g, "\\$&");
     conditions.push(ilike(businessAuditLogs.actorEmail, escapedActor));

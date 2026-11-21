@@ -1,4 +1,5 @@
 import { type FormEvent, useEffect, useState } from "react";
+import { fetchMarketingCampaigns, type MarketingCampaignOption } from "../lib/api";
 
 type AuditEntry = {
   id: number;
@@ -43,10 +44,11 @@ function humanize(value: string) {
   return value.replaceAll("_", " ");
 }
 
-function auditExportUrl(filters: { entityType: string; actor: string; from: string; to: string }) {
+function auditExportUrl(filters: { entityType: string; actor: string; campaignId: string; from: string; to: string }) {
   const query = new URLSearchParams();
   if (filters.entityType) query.set("entityType", filters.entityType);
   if (filters.actor) query.set("actor", filters.actor);
+  if (filters.campaignId) query.set("campaignId", filters.campaignId);
   if (filters.from) query.set("from", filters.from);
   if (filters.to) query.set("to", filters.to);
   return `/api/audit-logs/export.csv?${query.toString()}`;
@@ -54,7 +56,9 @@ function auditExportUrl(filters: { entityType: string; actor: string; from: stri
 
 export default function AuditWorkspace() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [filters, setFilters] = useState({ entityType: "", actor: "", from: "", to: "" });
+  const [campaigns, setCampaigns] = useState<MarketingCampaignOption[]>([]);
+  const [campaignLoadError, setCampaignLoadError] = useState("");
+  const [filters, setFilters] = useState({ entityType: "", actor: "", campaignId: "", from: "", to: "" });
   const [draft, setDraft] = useState(filters);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 50, total: 0, totalPages: 1 });
@@ -63,11 +67,22 @@ export default function AuditWorkspace() {
 
   useEffect(() => {
     let alive = true;
+    fetchMarketingCampaigns()
+      .then((latest) => { if (alive) setCampaigns(latest); })
+      .catch((cause: unknown) => {
+        if (alive) setCampaignLoadError(cause instanceof Error ? cause.message : "Could not load campaigns.");
+      });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
     setLoading(true);
     setError("");
     const query = new URLSearchParams({ page: String(page), pageSize: String(pagination.pageSize) });
     if (filters.entityType) query.set("entityType", filters.entityType);
     if (filters.actor) query.set("actor", filters.actor);
+    if (filters.campaignId) query.set("campaignId", filters.campaignId);
     if (filters.from) query.set("from", filters.from);
     if (filters.to) query.set("to", filters.to);
     fetch(`/api/audit-logs?${query.toString()}`)
@@ -101,7 +116,7 @@ export default function AuditWorkspace() {
   }
 
   function clearFilters() {
-    const empty = { entityType: "", actor: "", from: "", to: "" };
+    const empty = { entityType: "", actor: "", campaignId: "", from: "", to: "" };
     setDraft(empty);
     setFilters(empty);
     setPage(1);
@@ -123,10 +138,22 @@ export default function AuditWorkspace() {
       <form className="panel audit-controls" onSubmit={applyFilters}>
         <label className="audit-filter">
           <span>Record type</span>
-          <select value={draft.entityType} onChange={(event) => setDraft({ ...draft, entityType: event.target.value })}>
+          <select value={draft.entityType} disabled={Boolean(draft.campaignId)} onChange={(event) => setDraft({ ...draft, entityType: event.target.value })}>
             <option value="">All changes</option>
             {categories.slice(1).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
+        </label>
+        <label className="audit-filter">
+          <span>Campaign</span>
+          <select value={draft.campaignId} onChange={(event) => setDraft({
+            ...draft,
+            campaignId: event.target.value,
+            entityType: event.target.value ? "marketing_campaign" : draft.entityType,
+          })}>
+            <option value="">All campaigns</option>
+            {campaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}
+          </select>
+          {campaignLoadError && <small role="status">Campaign filter unavailable: {campaignLoadError}</small>}
         </label>
         <label className="audit-filter">
           <span>Account email</span>
