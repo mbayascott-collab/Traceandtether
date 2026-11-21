@@ -125,15 +125,16 @@ test("statement import removal preserves unrelated records and concurrent repeat
       journalEntryIds.push(entry.id);
     }
 
+    const identicalStatementLines = [
+      { transactionDate: "2026-11-10", flow: "in", amountZmw: "125.00", description: "Selected matched row", reference: `REMOVE-${suffix}` },
+      { transactionDate: "2026-11-10", flow: "out", amountZmw: "4.00", description: "Selected unmatched row", reference: `REMOVE-EXTRA-${suffix}` },
+    ];
     const deletedBatch = await request("/api/payments/reconciliation/imports", "POST", {
       accountId: bankAccount.id,
       fileName: `remove-${label}.csv`,
       from: "2026-11-10",
       to: "2026-11-10",
-      lines: [
-        { transactionDate: "2026-11-10", flow: "in", amountZmw: "125.00", description: "Selected matched row", reference: `REMOVE-${suffix}` },
-        { transactionDate: "2026-11-10", flow: "out", amountZmw: "4.00", description: "Selected unmatched row", reference: `REMOVE-EXTRA-${suffix}` },
-      ],
+      lines: identicalStatementLines,
       includedIndexes: [0, 1],
       allowDuplicateBatch: false,
     }, 201);
@@ -225,17 +226,26 @@ test("statement import removal preserves unrelated records and concurrent repeat
     );
     assert.ok(!partialRows.some((line) => line.reference === `SUBSET-SKIP-${suffix}`));
 
-    const cashAccount = accountMap.get("cash_on_hand");
-    assert.ok(cashAccount);
-    const crossAccountBatch = await request("/api/payments/reconciliation/imports", "POST", {
-      accountId: cashAccount.id,
+    const mobileMoneyAccount = accountMap.get("mobile_money");
+    assert.ok(mobileMoneyAccount);
+    const crossAccountPreview = await request("/api/payments/reconciliation/imports/preview", "POST", {
+      accountId: mobileMoneyAccount.id,
       fileName: `same-file-other-account-${label}.csv`,
       from: "2026-11-10",
       to: "2026-11-10",
-      lines: [
-        { transactionDate: "2026-11-10", flow: "in", amountZmw: "125.00", description: "Selected matched row", reference: `REMOVE-${suffix}` },
-        { transactionDate: "2026-11-10", flow: "out", amountZmw: "4.00", description: "Selected unmatched row", reference: `REMOVE-EXTRA-${suffix}` },
-      ],
+      lines: identicalStatementLines,
+    }, 200);
+    assert.equal(crossAccountPreview.duplicateBatch, null,
+      "the same statement fingerprint should not be a duplicate on another account");
+    assert.deepEqual(crossAccountPreview.duplicateRows, [false, false],
+      "rows already imported to another account should not be marked as duplicates");
+
+    const crossAccountBatch = await request("/api/payments/reconciliation/imports", "POST", {
+      accountId: mobileMoneyAccount.id,
+      fileName: `same-file-other-account-${label}.csv`,
+      from: "2026-11-10",
+      to: "2026-11-10",
+      lines: identicalStatementLines,
       includedIndexes: [0, 1],
       allowDuplicateBatch: false,
     }, 201);
@@ -244,7 +254,27 @@ test("statement import removal preserves unrelated records and concurrent repeat
     const crossAccountRows = await db.select().from(paymentStatementLines)
       .where(eq(paymentStatementLines.importBatchId, crossAccountBatchId));
     statementLineIds.push(...crossAccountRows.map((line) => line.id));
-    assert.equal(crossAccountRows.length, 2, "identical file contents are separate imports for different accounts");
+    assert.equal(crossAccountRows.length, 2);
+    assert.ok(crossAccountRows.every((line) => line.accountId === mobileMoneyAccount.id),
+      "the second statement's rows should belong to the selected account");
+    const sameAccountRepeat = await request("/api/payments/reconciliation/imports", "POST", {
+      accountId: bankAccount.id,
+      fileName: `repeat-same-account-${label}.csv`,
+      from: "2026-11-10",
+      to: "2026-11-10",
+      lines: identicalStatementLines,
+      includedIndexes: [0, 1],
+      allowDuplicateBatch: false,
+    }, 409);
+    assert.equal(sameAccountRepeat.duplicateBatch.id, selectedBatchId,
+      "a repeat on the original account should identify its existing batch");
+    const sameFingerprintBatches = await db.select().from(paymentStatementImportBatches)
+      .where(inArray(paymentStatementImportBatches.id, [selectedBatchId, crossAccountBatchId]));
+    assert.equal(sameFingerprintBatches.length, 2);
+    assert.equal(sameFingerprintBatches[0]?.fingerprint, sameFingerprintBatches[1]?.fingerprint,
+      "both accounts should store the identical statement fingerprint");
+    assert.notEqual(sameFingerprintBatches[0]?.accountId, sameFingerprintBatches[1]?.accountId,
+      "identical statement fingerprints should coexist for different accounts");
 
     const invalidRows = [
       { transactionDate: "2026-11-10", flow: "in", amountZmw: "8.00", description: "Would otherwise save", reference: `INVALID-PARTIAL-${suffix}` },

@@ -201,7 +201,7 @@ export function buildCustomerQuotePdf(content: CustomerQuoteEmailContent) {
     const pageObjectNumber = 4 + index * 2;
     const contentObjectNumber = pageObjectNumber + 1;
     const commands = [
-      ...(index === 0 ? ["q", "48 720 58 58 cm", "/Logo Do", "Q"] : []),
+      ...(index === 0 ? ["q", "58 0 0 58 48 720 cm", "/Logo Do", "Q"] : []),
       "BT",
       "/F1 10 Tf",
       index === 0 ? "118 790 Td" : "48 790 Td",

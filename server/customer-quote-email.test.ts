@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { once } from "node:events";
 import express, { type RequestHandler } from "express";
 import test from "node:test";
@@ -67,7 +71,7 @@ test("builds a Gmail-ready customer quote with its saved recipient and full pric
   assert.match(printableText, /\/Logo Do/, "The email PDF should include the same company logo as the preview.");
 });
 
-test("long emailed quotes paginate every item once and keep the total and approval fields", () => {
+test("long emailed quote PDFs open, print every item once, and keep the total on the final page", () => {
   const lineCount = 80;
   const content = {
     ...quote,
@@ -80,15 +84,31 @@ test("long emailed quotes paginate every item once and keep the total and approv
     }),
     totalZmw: `${lineCount}.00`,
   };
-  const pdf = buildCustomerQuotePdf(content).toString("latin1");
-  const pages = (pdf.match(/\/Type \/Page \/Parent 2 0 R/g) ?? []).length;
-  assert.ok(pages > 1, "A long emailed quote should span more than one PDF page.");
-  for (let index = 1; index <= lineCount; index += 1) {
-    const name = `Long quote item ${String(index).padStart(3, "0")}`;
-    assert.equal(pdf.split(name).length - 1, 1, `Expected exactly one copy of ${name}.`);
-  }
-  for (const required of ["TOTAL: ZMW 80.00", "CUSTOMER APPROVAL", "Name and signature", "Date:"]) {
-    assert.ok(pdf.includes(required), `The final PDF pages should contain ${required}.`);
+  const directory = mkdtempSync(join(tmpdir(), "emailed-long-quote-pdf-"));
+  const pdfPath = join(directory, "long-quote.pdf");
+  const textPath = join(directory, "long-quote.txt");
+
+  try {
+    writeFileSync(pdfPath, buildCustomerQuotePdf(content));
+    const pdfInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
+    assert.ok(pageCount > 1, `Expected a valid multi-page quote PDF, got ${pageCount} page(s).`);
+    assert.match(pdfInfo, /^Page size:.*\(A4\)$/m, "The emailed quote PDF should use A4 pages.");
+
+    execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
+    const pages = readFileSync(textPath, "utf8").split("\f").map((page) => page.trim()).filter(Boolean);
+    assert.equal(pages.length, pageCount, "Extracted PDF pages should match the PDF page count.");
+    const normalizedPages = pages.map((page) => page.replace(/\s+/g, " ").toLowerCase());
+    const allText = normalizedPages.join("\n");
+    for (let index = 1; index <= lineCount; index += 1) {
+      const name = `Long quote item ${String(index).padStart(3, "0")}`.toLowerCase();
+      assert.equal(allText.split(name).length - 1, 1, `Expected exactly one extracted copy of ${name}.`);
+    }
+    for (const required of ["TOTAL: ZMW 80.00", "CUSTOMER APPROVAL", "Name and signature", "Date:"]) {
+      assert.ok(normalizedPages.at(-1)?.includes(required.toLowerCase()), `The final PDF page should contain ${required}.`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

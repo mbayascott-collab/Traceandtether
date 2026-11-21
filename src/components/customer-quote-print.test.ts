@@ -31,7 +31,7 @@ function findChromium(): string {
   return command;
 }
 
-async function chromiumPageValue(url: string, expression: string): Promise<unknown> {
+async function chromiumPageValue(url: string, expression: string): Promise<{ value: unknown; pdfData: string }> {
   const profile = mkdtempSync(join(tmpdir(), "customer-quote-chromium-profile-"));
   const browser = spawn(findChromium(), [
     "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
@@ -83,7 +83,13 @@ async function chromiumPageValue(url: string, expression: string): Promise<unkno
         expression, returnByValue: true,
       }, attached.sessionId) as { result?: { value?: unknown } };
       const value = evaluation.result?.value;
-      if (value !== undefined && value !== null && value !== "") return value;
+      if (value !== undefined && value !== null && value !== "") {
+        const pdf = await send("Page.printToPDF", {
+          printBackground: true,
+          preferCSSPageSize: true,
+        }, attached.sessionId) as { data: string };
+        return { value, pdfData: pdf.data };
+      }
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
     }
     const state = await send("Runtime.evaluate", {
@@ -423,7 +429,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
         const printButton = Array.from(row?.querySelectorAll("button") ?? [])
           .find((button) => button.textContent?.trim() === "Print / Save PDF");
         if (!printButton) {
-          window.location.replace("/_done?result=quote-row-or-print-button-missing");
+          document.body.dataset.printResult = "quote-row-or-print-button-missing";
           return;
         }
         printButton.click();
@@ -434,7 +440,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
             article?.querySelector(".customer-quote-document-customer strong")?.textContent,
             article?.querySelector("tbody td")?.textContent
           ].join("|");
-          window.location.replace("/_done?result=" + encodeURIComponent(result));
+          document.body.dataset.printResult = result;
         }, 150);
       }, 350);
     `);
@@ -484,11 +490,6 @@ test("printing a quote from its row opens a preview for that selected quote", as
       } else if (request.url === "/quote-print-test.js.iife.js") {
         response.setHeader("Content-Type", "text/javascript; charset=utf-8");
         response.end(readFileSync(join(buildDirectory, "quote-print-test.js.iife.js")));
-      } else if (request.url?.startsWith("/_done?")) {
-        const result = new URL(request.url, "http://localhost").searchParams.get("result") ?? "";
-        const safeResult = result.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;");
-        response.setHeader("Content-Type", "text/html; charset=utf-8");
-        response.end(`<!doctype html><html><body data-print-result="${safeResult}">done</body></html>`);
       } else {
         response.writeHead(404).end();
       }
@@ -499,11 +500,19 @@ test("printing a quote from its row opens a preview for that selected quote", as
     });
     const address = httpServer.address();
     assert.ok(address && typeof address === "object");
-    const printResult = await chromiumPageValue(
+    const { value: printResult, pdfData } = await chromiumPageValue(
       `http://127.0.0.1:${address.port}/`,
       "document.body?.dataset?.printResult ?? ''",
     );
     assert.equal(printResult, "QT-E2E-SELECTED|Selected Quote Customer|Selected Quote Product");
+    const pdfPath = join(buildDirectory, "selected-quote.pdf");
+    const textPath = join(buildDirectory, "selected-quote.txt");
+    writeFileSync(pdfPath, Buffer.from(pdfData, "base64"));
+    execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
+    const pdfText = readFileSync(textPath, "utf8").replace(/\s+/g, " ").toLocaleLowerCase();
+    for (const text of ["QT-E2E-SELECTED", "Selected Quote Customer", "Selected Quote Product", "QT-E2E-PRODUCT"]) {
+      assert.ok(pdfText.includes(text.toLocaleLowerCase()), `Selected quote PDF should include "${text}".`);
+    }
     await new Promise<void>((resolveClose, reject) => httpServer!.close((error) => error ? reject(error) : resolveClose()));
     httpServer = null;
   } finally {
