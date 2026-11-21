@@ -5,8 +5,9 @@ import express, { type RequestHandler } from "express";
 import { eq } from "drizzle-orm";
 import test from "node:test";
 import {
-  accountingAccounts, businessPayments, customers, journalEntries, journalLines,
-  products, purchaseOrderLines, purchaseOrders, salesDeliveries, salesDeliveryLines, salesOrderLines, salesOrders, suppliers,
+  accountingAccounts, businessPayments, customers, importExpenses, journalEntries, journalLines,
+  products, purchaseOrderLines, purchaseOrders, salesDeliveries, salesDeliveryLines, salesOrderLines, salesOrders,
+  shipments, suppliers,
 } from "../shared/schema";
 import { cents, journalLinesAreBalanced } from "./accounting-posting";
 
@@ -55,6 +56,8 @@ test("payment routes post both directions to the selected funds account", {
   let salesOrderId: number | undefined;
   let partiallyDeliveredOrderId: number | undefined;
   let purchaseOrderId: number | undefined;
+  let shipmentId: number | undefined;
+  let importExpenseId: number | undefined;
   let payableJournalKey: string | undefined;
   const paymentIds: number[] = [];
 
@@ -239,6 +242,78 @@ test("payment routes post both directions to the selected funds account", {
         { accountKey: "accounts_payable", creditZmw: "100.00" },
       ],
     }));
+    const [sharedShipment] = await db.insert(shipments).values({
+      purchaseOrderId,
+      shipmentReference: `PAY-SH-${shortId}`,
+      status: "received",
+      receivedAt: "2026-11-18",
+    }).returning();
+    shipmentId = sharedShipment.id;
+    const [sharedExpense] = await db.insert(importExpenses).values({
+      shipmentId,
+      category: "Freight",
+      description: `Shared shipment bill ${suffix}`,
+      amount: "10.00",
+      currency: "ZMW",
+      exchangeRateToZmw: "1",
+      basis: "value",
+      incurredAt: "2026-11-18",
+    }).returning();
+    importExpenseId = sharedExpense.id;
+
+    const sharedBillPaymentRequest = {
+      direction: "supplier_payment" as const,
+      idempotencyKey: randomUUID(),
+      orderId: null,
+      importExpenseId,
+      amountZmw: "1.00",
+      paymentDate: "2026-11-18",
+      method: "bank_transfer" as const,
+      reference: null,
+      notes: null,
+    };
+    const sharedBillPayment = await request(sharedBillPaymentRequest);
+    paymentIds.push(sharedBillPayment.id);
+    await assertIdempotentRetry(sharedBillPaymentRequest, sharedBillPayment);
+    await assertPostedToFundsAccount(sharedBillPayment, "bank_account", "supplier_payment");
+    const changedPaymentRetry = await sendPayment({
+      ...sharedBillPaymentRequest,
+      amountZmw: "2.00",
+    });
+    assert.equal(changedPaymentRetry.status, 409);
+    assert.match(changedPaymentRetry.payload.error, /used for different payment details/i);
+    const [unchangedSharedBillPayment] = await db.select().from(businessPayments)
+      .where(eq(businessPayments.id, sharedBillPayment.id));
+    assert.deepEqual({
+      ...unchangedSharedBillPayment,
+      createdAt: unchangedSharedBillPayment!.createdAt.toISOString(),
+    }, sharedBillPayment);
+    assert.equal(
+      (await db.select().from(journalEntries).where(eq(journalEntries.sourceKey, `payment-${sharedBillPayment.id}`))).length,
+      1,
+    );
+
+    const competingBillPayments = [1, 2].map(() => ({
+      ...sharedBillPaymentRequest,
+      idempotencyKey: randomUUID(),
+      amountZmw: "6.00",
+      reference: null,
+    }));
+    const competingResults = await Promise.all(competingBillPayments.map(sendPayment));
+    assert.deepEqual(competingResults.map((result) => result.status).sort(), [201, 400]);
+    const winningBillPayment = competingResults.find((result) => result.status === 201)!.payload.payment;
+    paymentIds.push(winningBillPayment.id);
+    const losingBillPayment = competingResults.find((result) => result.status === 400)!;
+    assert.match(losingBillPayment.payload.error, /outstanding balance/i);
+    const shipmentBillPayments = await db.select().from(businessPayments)
+      .where(eq(businessPayments.importExpenseId, importExpenseId));
+    assert.equal(shipmentBillPayments.length, 2);
+    assert.equal(
+      shipmentBillPayments.reduce((total, payment) => total + cents(payment.amountZmw), 0n),
+      700n,
+      "the shared bill balance must not be overpaid by concurrent requests",
+    );
+    await paymentJournal(winningBillPayment.id);
 
     // Keep a pre-existing payment and its journal as a sentinel while other
     // methods are posted through the same route.
@@ -387,8 +462,12 @@ test("payment routes post both directions to the selected funds account", {
       await client.query("BEGIN");
       await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
       const fixturePayments = await client.query<{ id: number }>(
-        "SELECT id FROM business_payments WHERE sales_order_id = ANY($1::int[]) OR purchase_order_id = $2",
-        [[salesOrderId, partiallyDeliveredOrderId].filter((id): id is number => id !== undefined), purchaseOrderId ?? null],
+        "SELECT id FROM business_payments WHERE sales_order_id = ANY($1::int[]) OR purchase_order_id = $2 OR import_expense_id = $3",
+        [
+          [salesOrderId, partiallyDeliveredOrderId].filter((id): id is number => id !== undefined),
+          purchaseOrderId ?? null,
+          importExpenseId ?? null,
+        ],
       );
       for (const payment of fixturePayments.rows) paymentIds.push(payment.id);
       const journalSourceKeys = [
@@ -418,6 +497,8 @@ test("payment routes post both directions to the selected funds account", {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [partiallyDeliveredOrderId]);
         await client.query("DELETE FROM sales_orders WHERE id = $1", [partiallyDeliveredOrderId]);
       }
+      if (importExpenseId) await client.query("DELETE FROM import_expenses WHERE id = $1", [importExpenseId]);
+      if (shipmentId) await client.query("DELETE FROM shipments WHERE id = $1", [shipmentId]);
       if (purchaseOrderId) {
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);

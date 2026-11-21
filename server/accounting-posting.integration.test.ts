@@ -1898,9 +1898,9 @@ test("opening-stock corrections cannot reduce stock below active reservations", 
     assert.equal(openingResponse.status, 201, JSON.stringify(openingPayload));
     const openingMovementId = openingPayload.movement.id as number;
 
-    await db.insert(inventoryReservations).values({
+    const [reservation] = await db.insert(inventoryReservations).values({
       productId, locationId, quantity: 4, reason: "Reserved for a customer",
-    });
+    }).returning();
 
     const correctionBody = {
       quantity: 3, unitCostZmw: "25.00", effectiveAt: "2026-11-19",
@@ -1934,9 +1934,29 @@ test("opening-stock corrections cannot reduce stock below active reservations", 
     });
     const acceptedPayload = await acceptedResponse.json() as any;
     assert.equal(acceptedResponse.status, 201, JSON.stringify(acceptedPayload));
+
+    const releaseResponse = await fetch(`${baseUrl}/api/inventory/reservations/${reservation.id}/release`, {
+      method: "POST",
+    });
+    assert.equal(releaseResponse.status, 200, await releaseResponse.text());
+    const releasedReservation = await db.select().from(inventoryReservations)
+      .where(eq(inventoryReservations.id, reservation.id));
+    assert.equal(releasedReservation[0]?.status, "released");
+
+    const releasedCorrectionResponse = await fetch(
+      `${baseUrl}/api/inventory/opening-stock/${acceptedPayload.movement.id}/correct`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...correctionBody, quantity: 2 }),
+      },
+    );
+    const releasedCorrectionPayload = await releasedCorrectionResponse.json() as any;
+    assert.equal(releasedCorrectionResponse.status, 201, JSON.stringify(releasedCorrectionPayload));
+
     const finalMovements = await db.select().from(inventoryMovements)
       .where(eq(inventoryMovements.productId, productId));
-    assert.equal(finalMovements.length, 3);
+    assert.equal(finalMovements.length, 5);
     assert.ok(finalMovements.some((movement) =>
       movement.id === acceptedPayload.reversal.id
         && movement.kind === "opening_stock_reversal"
@@ -1947,11 +1967,21 @@ test("opening-stock corrections cannot reduce stock below active reservations", 
         && movement.kind === "opening_stock"
         && movement.quantityDelta === 5,
     ));
+    assert.ok(finalMovements.some((movement) =>
+      movement.id === releasedCorrectionPayload.reversal.id
+        && movement.kind === "opening_stock_reversal"
+        && movement.quantityDelta === -5,
+    ));
+    assert.ok(finalMovements.some((movement) =>
+      movement.id === releasedCorrectionPayload.movement.id
+        && movement.kind === "opening_stock"
+        && movement.quantityDelta === 2,
+    ));
     const finalJournals = await db.select().from(journalEntries).where(and(
       inArray(journalEntries.sourceType, ["opening_stock", "opening_stock_reversal"]),
       inArray(journalEntries.sourceId, finalMovements.map((movement) => movement.id)),
     ));
-    assert.equal(finalJournals.length, 3);
+    assert.equal(finalJournals.length, 5);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (productId) {
@@ -1984,6 +2014,314 @@ test("opening-stock corrections cannot reduce stock below active reservations", 
         await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
         await client.query("DELETE FROM products WHERE id = $1", [productId]);
         if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+  }
+});
+
+test("new reservations and opening-stock corrections serialize on the product lock", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db, pool }, { registerInventoryRoutes }] = await Promise.all([
+    import("./db"),
+    import("./inventory-routes"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const suffix = randomUUID();
+  const actorEmail = `opening-stock-race-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerInventoryRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let productId: number | undefined;
+  let locationId: number | undefined;
+  try {
+    const [product] = await db.insert(products).values({
+      sku: `OPENING-RACE-${suffix}`,
+      name: `Opening reservation race ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const [location] = await db.insert(inventoryLocations).values({
+      name: `Opening reservation race location ${suffix}`,
+    }).returning();
+    locationId = location.id;
+
+    const openingResponse = await fetch(`${baseUrl}/api/inventory/opening-stock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        productId, locationId, quantity: 10, unitCostZmw: "25.00",
+        effectiveAt: "2026-11-19", memo: "Initial physical count", reference: null,
+      }),
+    });
+    const openingPayload = await openingResponse.json() as any;
+    assert.equal(openingResponse.status, 201, JSON.stringify(openingPayload));
+    const openingMovementId = openingPayload.movement.id as number;
+
+    const [reservationResponse, correctionResponse] = await Promise.all([
+      fetch(`${baseUrl}/api/inventory/reservations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId, locationId, quantity: 7, reason: "Concurrent customer reservation",
+        }),
+      }),
+      fetch(`${baseUrl}/api/inventory/opening-stock/${openingMovementId}/correct`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          quantity: 6, unitCostZmw: "25.00", effectiveAt: "2026-11-19",
+          reason: "Concurrent physical count correction", reference: null,
+        }),
+      }),
+    ]);
+    const [reservationPayload, correctionPayload] = await Promise.all([
+      reservationResponse.json() as Promise<any>,
+      correctionResponse.json() as Promise<any>,
+    ]);
+
+    assert.deepEqual(
+      [reservationResponse.status, correctionResponse.status].sort(),
+      [201, 409],
+      JSON.stringify({ reservationPayload, correctionPayload }),
+    );
+
+    const persistedMovements = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.productId, productId));
+    const persistedReservations = await db.select().from(inventoryReservations)
+      .where(and(
+        eq(inventoryReservations.productId, productId),
+        eq(inventoryReservations.status, "active"),
+      ));
+    const onHand = persistedMovements.reduce((total, movement) => total + movement.quantityDelta, 0);
+    const reserved = persistedReservations.reduce((total, reservation) => total + reservation.quantity, 0);
+
+    assert.ok(onHand >= reserved, `persisted stock ${onHand} must cover active reservations ${reserved}`);
+    if (reservationResponse.status === 201) {
+      assert.equal(correctionResponse.status, 409);
+      assert.equal(persistedMovements.length, 1);
+      assert.equal(persistedMovements[0]!.id, openingMovementId);
+      assert.equal(onHand, 10);
+      assert.equal(persistedReservations.length, 1);
+      assert.equal(persistedReservations[0]!.id, reservationPayload.reservation.id);
+      assert.equal(reserved, 7);
+    } else {
+      assert.equal(correctionResponse.status, 201);
+      assert.equal(reservationResponse.status, 409);
+      assert.equal(persistedMovements.length, 3);
+      assert.ok(persistedMovements.some((movement) =>
+        movement.id === correctionPayload.reversal.id
+          && movement.kind === "opening_stock_reversal"
+          && movement.quantityDelta === -10,
+      ));
+      assert.ok(persistedMovements.some((movement) =>
+        movement.id === correctionPayload.movement.id
+          && movement.kind === "opening_stock"
+          && movement.quantityDelta === 6,
+      ));
+      assert.equal(onHand, 6);
+      assert.equal(persistedReservations.length, 0);
+      assert.equal(reserved, 0);
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (productId) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_id IN (
+              SELECT id FROM inventory_movements WHERE product_id = $1
+            )
+              AND source_type IN ('opening_stock', 'opening_stock_reversal')
+          )
+        `, [productId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_id IN (
+            SELECT id FROM inventory_movements WHERE product_id = $1
+          )
+            AND source_type IN ('opening_stock', 'opening_stock_reversal')
+        `, [productId]);
+        await client.query("DELETE FROM inventory_reservations WHERE product_id = $1", [productId]);
+        await client.query(
+          "UPDATE inventory_movements SET correction_of_movement_id = NULL WHERE product_id = $1",
+          [productId],
+        );
+        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        await client.query("DELETE FROM products WHERE id = $1", [productId]);
+        if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+  }
+});
+
+test("opening-stock corrections only change the selected location and reconcile inventory value", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db, pool }, { registerInventoryRoutes }] = await Promise.all([
+    import("./db"),
+    import("./inventory-routes"),
+  ]);
+  closeIntegrationPool = () => pool.end();
+
+  const suffix = randomUUID();
+  const actorEmail = `opening-location-correction-${suffix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerInventoryRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let productId: number | undefined;
+  let locationAId: number | undefined;
+  let locationBId: number | undefined;
+  try {
+    const [product] = await db.insert(products).values({
+      sku: `OLOC-${suffix}`,
+      name: `Location correction ${suffix}`,
+      status: "active",
+      purchaseCurrency: "CNY",
+    }).returning();
+    productId = product.id;
+    const [locationARow, locationBRow] = await db.insert(inventoryLocations).values([
+      { name: `Correction location A ${suffix}` },
+      { name: `Correction location B ${suffix}` },
+    ]).returning();
+    locationAId = locationARow!.id;
+    locationBId = locationBRow!.id;
+
+    const createOpeningCount = async (locationId: number, quantity: number) => {
+      const response = await fetch(`${baseUrl}/api/inventory/opening-stock`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId, locationId, quantity, unitCostZmw: "25.00",
+          effectiveAt: "2026-11-19", memo: "Location-specific opening count", reference: null,
+        }),
+      });
+      const payload = await response.json() as any;
+      assert.equal(response.status, 201, JSON.stringify(payload));
+      return payload.movement.id as number;
+    };
+    const openingAId = await createOpeningCount(locationAId, 10);
+    await createOpeningCount(locationBId, 4);
+
+    const correctionResponse = await fetch(`${baseUrl}/api/inventory/opening-stock/${openingAId}/correct`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quantity: 6, unitCostZmw: "25.00", effectiveAt: "2026-11-19",
+        reason: "Correct location A count", reference: null,
+      }),
+    });
+    const correctionPayload = await correctionResponse.json() as any;
+    assert.equal(correctionResponse.status, 201, JSON.stringify(correctionPayload));
+
+    const inventoryResponse = await fetch(`${baseUrl}/api/inventory`);
+    const inventoryPayload = await inventoryResponse.json() as any;
+    assert.equal(inventoryResponse.status, 200, JSON.stringify(inventoryPayload));
+    const item = inventoryPayload.inventory.find((row: any) => row.id === productId);
+    assert.ok(item, "the corrected product should appear in inventory");
+    const locationA = item.locations.find((row: any) => row.id === locationAId);
+    const locationB = item.locations.find((row: any) => row.id === locationBId);
+    assert.deepEqual(
+      { onHand: locationA?.onHand, stockValueZmw: locationA?.stockValueZmw },
+      { onHand: 6, stockValueZmw: "150.00" },
+    );
+    assert.deepEqual(
+      { onHand: locationB?.onHand, stockValueZmw: locationB?.stockValueZmw },
+      { onHand: 4, stockValueZmw: "100.00" },
+    );
+    assert.equal(item.onHand, 10);
+    assert.equal(item.stockValueZmw, "250.00");
+    assert.equal(item.locations.reduce((total: number, row: any) => total + row.onHand, 0), item.onHand);
+    assert.equal(item.locations.reduce((total: bigint, row: any) => total + cents(row.stockValueZmw), 0n), cents(item.stockValueZmw));
+
+    const [inventoryAccount] = await db.select({ id: accountingAccounts.id })
+      .from(accountingAccounts).where(eq(accountingAccounts.systemKey, "inventory")).limit(1);
+    assert.ok(inventoryAccount);
+    const inventoryJournalLines = await db.select({
+      debitZmw: journalLines.debitZmw, creditZmw: journalLines.creditZmw,
+    }).from(journalLines).where(and(
+      eq(journalLines.accountId, inventoryAccount.id),
+      eq(journalLines.productId, productId),
+    ));
+    const ledgerValue = inventoryJournalLines.reduce(
+      (total, line) => total + cents(line.debitZmw) - cents(line.creditZmw),
+      0n,
+    );
+    assert.equal(ledgerValue, cents(item.stockValueZmw));
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (productId) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
+        await client.query(`
+          DELETE FROM journal_lines
+          WHERE journal_entry_id IN (
+            SELECT id FROM journal_entries
+            WHERE source_id IN (
+              SELECT id FROM inventory_movements WHERE product_id = $1
+            )
+              AND source_type IN ('opening_stock', 'opening_stock_reversal')
+          )
+        `, [productId]);
+        await client.query(`
+          DELETE FROM journal_entries
+          WHERE source_id IN (
+            SELECT id FROM inventory_movements WHERE product_id = $1
+          )
+            AND source_type IN ('opening_stock', 'opening_stock_reversal')
+        `, [productId]);
+        await client.query("DELETE FROM inventory_reservations WHERE product_id = $1", [productId]);
+        await client.query(
+          "UPDATE inventory_movements SET correction_of_movement_id = NULL WHERE product_id = $1",
+          [productId],
+        );
+        await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
+        await client.query("DELETE FROM products WHERE id = $1", [productId]);
+        if (locationAId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationAId]);
+        if (locationBId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationBId]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -2512,6 +2850,56 @@ test("simultaneous shipment bill saves and retries do not create duplicate expen
       eq(journalEntries.sourceId, distinctExpense.id),
     ));
     assert.equal(distinctEntries.length, 1, "the distinct bill should receive one payable journal entry");
+
+    const concurrentDistinctBills = [
+      {
+        ...referencedBill,
+        description: `Concurrent independent bill A ${suffix}`,
+        amount: "41.00",
+        reference: `FW-INDEPENDENT-A-${suffix}`,
+      },
+      {
+        ...referencedBill,
+        description: `Concurrent independent bill B ${suffix}`,
+        amount: "42.00",
+        reference: `FW-INDEPENDENT-B-${suffix}`,
+      },
+    ];
+    const independentResults = await Promise.all(concurrentDistinctBills.map(simultaneousRequest));
+    assert.deepEqual(independentResults.map((result) => result.status), [201, 201],
+      "different forwarder bills for one shipment should both be accepted");
+    const independentExpenses = independentResults.map((result) => result.payload.expense);
+    assert.equal(new Set(independentExpenses.map((expense: any) => expense.id)).size, 2);
+    const persistedIndependentExpenses = await db.select().from(importExpenses).where(and(
+      eq(importExpenses.shipmentId, shipmentId!),
+      inArray(importExpenses.id, independentExpenses.map((expense: any) => expense.id)),
+    ));
+    assert.equal(persistedIndependentExpenses.length, 2);
+    for (const expense of persistedIndependentExpenses) {
+      const entries = await db.select().from(journalEntries).where(and(
+        eq(journalEntries.sourceType, "import_expense"),
+        eq(journalEntries.sourceId, expense.id),
+      ));
+      assert.equal(entries.length, 1, `bill ${expense.description} should receive one payable journal`);
+      const lines = await db.select({
+        systemKey: accountingAccounts.systemKey,
+        debitZmw: journalLines.debitZmw,
+        creditZmw: journalLines.creditZmw,
+      }).from(journalLines)
+        .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+        .where(eq(journalLines.journalEntryId, entries[0]!.id));
+      assert.equal(lines.filter((line) => line.systemKey === "accounts_payable").length, 1);
+      assert.equal(
+        lines.reduce((total, line) => total + cents(line.debitZmw) - cents(line.creditZmw), 0n),
+        0n,
+        `bill ${expense.description} journal must balance`,
+      );
+    }
+    assert.equal(
+      (await db.select().from(importExpenses).where(eq(importExpenses.shipmentId, shipmentId!))).length,
+      6,
+      "distinct concurrent bills must both remain alongside the prior shipment expenses",
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();

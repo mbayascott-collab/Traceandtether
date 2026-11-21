@@ -314,7 +314,8 @@ test("posts staged consolidated shipment receipts by increment with balanced jou
       .where(and(
         inArray(inventoryMovements.productId, productIds),
         eq(inventoryMovements.kind, "stock_receipt"),
-      ));
+      ))
+      .orderBy(asc(inventoryMovements.id));
     assert.equal(testMovements.length, 4, "each receipt increment should create one stock movement");
     assert.deepEqual(
       testMovements.map((movement) => movement.quantityDelta).sort((a, b) => a - b),

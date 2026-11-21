@@ -343,6 +343,22 @@ test("route mutations across business areas keep their audit history and actor",
       "sellingPriceZmw", "reorderThreshold", "unit", "status",
     ];
     await expectAudit("product", createdProductId, "created", actorId, actorEmail, productCreateFields);
+    const productAuditCountBeforeDuplicate = (await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.actorClerkUserId, actorId),
+      eq(businessAuditLogs.entityType, "product"),
+    ))).length;
+    await expectStatus("/api/products", {
+      ...productBody,
+      name: `Rejected duplicate SKU ${suffix}`,
+    }, "POST", 409);
+    assert.equal(
+      (await db.select().from(businessAuditLogs).where(and(
+        eq(businessAuditLogs.actorClerkUserId, actorId),
+        eq(businessAuditLogs.entityType, "product"),
+      ))).length,
+      productAuditCountBeforeDuplicate,
+      "a rejected duplicate SKU must not add a product-history entry",
+    );
     const updatedProductBody = {
       ...productBody,
       name: `Updated audit route product ${suffix}`,
@@ -375,6 +391,22 @@ test("route mutations across business areas keep their audit history and actor",
       "paymentTermDays", "defaultLeadTimeDays", "notes", "status",
     ];
     await expectAudit("supplier", createdSupplierId, "created", actorId, actorEmail, supplierCreateFields);
+    const supplierAuditCountBeforeDuplicate = (await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.actorClerkUserId, actorId),
+      eq(businessAuditLogs.entityType, "supplier"),
+    ))).length;
+    await expectStatus("/api/suppliers", {
+      ...supplierBody,
+      name: supplierBody.name.toUpperCase(),
+    }, "POST", 409);
+    assert.equal(
+      (await db.select().from(businessAuditLogs).where(and(
+        eq(businessAuditLogs.actorClerkUserId, actorId),
+        eq(businessAuditLogs.entityType, "supplier"),
+      ))).length,
+      supplierAuditCountBeforeDuplicate,
+      "a rejected duplicate supplier name must not add a history entry",
+    );
     const updatedSupplierBody = {
       ...supplierBody,
       name: `Updated audit route supplier ${suffix}`,
@@ -1081,6 +1113,13 @@ test("historical receipt repair routes are owner-only", {
     await db.update(inventoryMovements).set({ sourceKey: `legacy-receipt-${suffix}` })
       .where(eq(inventoryMovements.id, movementId));
 
+    const receiptLinkAuditFilter = and(
+      eq(businessAuditLogs.actorClerkUserId, actorId),
+      eq(businessAuditLogs.entityType, "journal_entry"),
+      eq(businessAuditLogs.entityId, journalId),
+    );
+    const auditsBeforeDeniedRepair = await db.select().from(businessAuditLogs)
+      .where(receiptLinkAuditFilter);
     actorRole = "manager";
     const deniedList = await request("/api/inventory/unlinked-receipt-journals");
     assert.equal(deniedList.response.status, 403, JSON.stringify(deniedList.payload));
@@ -1089,14 +1128,29 @@ test("historical receipt repair routes are owner-only", {
     const [stillUnlinked] = await db.select({ shipmentLineId: journalEntries.shipmentLineId })
       .from(journalEntries).where(eq(journalEntries.id, journalId));
     assert.equal(stillUnlinked.shipmentLineId, null);
+    const auditsAfterDeniedRepair = await db.select().from(businessAuditLogs)
+      .where(receiptLinkAuditFilter);
+    assert.deepEqual(auditsAfterDeniedRepair, auditsBeforeDeniedRepair, "a denied repair must not change audit history");
 
     actorRole = "owner";
     const allowedList = await request("/api/inventory/unlinked-receipt-journals");
     assert.equal(allowedList.response.status, 200, JSON.stringify(allowedList.payload));
     assert.ok(allowedList.payload.journals.some((entry: { id: number }) => entry.id === journalId));
-    const allowedLink = await request(`/api/inventory/receipt-journals/${journalId}/link`, { shipmentLineId });
-    assert.equal(allowedLink.response.status, 200, JSON.stringify(allowedLink.payload));
-    assert.equal(allowedLink.payload.journalEntry.journalEntryId, journalId);
+    const concurrentLinks = await Promise.all([1, 2].map(() =>
+      request(`/api/inventory/receipt-journals/${journalId}/link`, { shipmentLineId }),
+    ));
+    assert.deepEqual(concurrentLinks.map(({ response }) => response.status).sort(), [200, 409]);
+    const acceptedLink = concurrentLinks.find(({ response }) => response.status === 200)!;
+    assert.equal(acceptedLink.payload.journalEntry.journalEntryId, journalId);
+    const [linkedJournal] = await db.select({ shipmentLineId: journalEntries.shipmentLineId })
+      .from(journalEntries).where(eq(journalEntries.id, journalId));
+    assert.equal(linkedJournal.shipmentLineId, shipmentLineId);
+    const receiptLinkAudits = await db.select().from(businessAuditLogs)
+      .where(receiptLinkAuditFilter);
+    assert.equal(receiptLinkAudits.length, 1, "concurrent owner repairs should create one attributable audit event");
+    assert.equal(receiptLinkAudits[0]!.action, "updated");
+    assert.deepEqual(receiptLinkAudits[0]!.changedFields, ["shipmentLineId"]);
+    assert.equal(receiptLinkAudits[0]!.actorClerkUserId, actorId);
 
     const [secondMovement] = await db.insert(inventoryMovements).values({
       productId: productId!,
