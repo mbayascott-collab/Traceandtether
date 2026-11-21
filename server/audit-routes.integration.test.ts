@@ -924,9 +924,10 @@ test("route mutations across business areas keep their audit history and actor",
 test("historical receipt repair routes are owner-only", {
   skip: !process.env.DATABASE_URL,
 }, async (t) => {
-  const [{ db, pool }, { registerApiRoutes }] = await Promise.all([
+  const [{ db, pool }, { registerApiRoutes }, { postJournal }] = await Promise.all([
     import("./db"),
     import("./routes"),
+    import("./accounting-posting"),
   ]);
   const suffix = randomUUID();
   const actorId = `receipt-repair-access-${suffix}`;
@@ -968,11 +969,14 @@ test("historical receipt repair routes are owner-only", {
   let productId: number | undefined;
   let supplierId: number | undefined;
   let locationId: number | undefined;
+  let inactiveLocationId: number | undefined;
   let purchaseOrderId: number | undefined;
   let shipmentId: number | undefined;
   let shipmentLineId: number | undefined;
   let movementId: number | undefined;
   let journalId: number | undefined;
+  let secondMovementId: number | undefined;
+  let secondJournalId: number | undefined;
   try {
     const productResponse = await request("/api/products", {
       sku: `RPA-${suffix.replaceAll("-", "").slice(0, 20)}`,
@@ -1048,6 +1052,21 @@ test("historical receipt repair routes are owner-only", {
       lines: [{ shipmentLineId, quantityReceived: 1 }],
     }, "PATCH");
     assert.equal(received.response.status, 200, JSON.stringify(received.payload));
+    const [inactiveLocation] = await db.insert(inventoryLocations).values({
+      name: `Inactive receipt location ${suffix}`,
+      active: false,
+    }).returning();
+    inactiveLocationId = inactiveLocation.id;
+    const rejectedReceipt = await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId: inactiveLocationId });
+    assert.equal(rejectedReceipt.response.status, 400, JSON.stringify(rejectedReceipt.payload));
+    assert.match(rejectedReceipt.payload.error ?? "", /active receiving location/i);
+    const [lineAfterRejectedReceipt] = await db.select({ quantityStocked: shipmentLines.quantityStocked })
+      .from(shipmentLines).where(eq(shipmentLines.id, shipmentLineId));
+    assert.equal(lineAfterRejectedReceipt.quantityStocked, 0, "rejected receipt must not change the shipment line");
+    const rejectedReceiptMovements = await db.select({ id: inventoryMovements.id })
+      .from(inventoryMovements).where(eq(inventoryMovements.productId, productId!));
+    assert.equal(rejectedReceiptMovements.length, 0, "rejected receipt must not write a stock movement");
+
     const posted = await request(`/api/inventory/receipts/${shipmentLineId}/post`, { locationId });
     assert.equal(posted.response.status, 201, JSON.stringify(posted.payload));
     const [movement] = await db.select().from(inventoryMovements)
@@ -1078,6 +1097,38 @@ test("historical receipt repair routes are owner-only", {
     const allowedLink = await request(`/api/inventory/receipt-journals/${journalId}/link`, { shipmentLineId });
     assert.equal(allowedLink.response.status, 200, JSON.stringify(allowedLink.payload));
     assert.equal(allowedLink.payload.journalEntry.journalEntryId, journalId);
+
+    const [secondMovement] = await db.insert(inventoryMovements).values({
+      productId: productId!,
+      locationId: locationId!,
+      kind: "stock_receipt",
+      quantityDelta: 1,
+      reason: `Second historical receipt ${suffix}`,
+      sourceKey: `legacy-second-receipt-${suffix}`,
+    }).returning();
+    secondMovementId = secondMovement.id;
+    await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `legacy-second-receipt-journal-${suffix}`,
+      sourceType: "stock_receipt",
+      sourceId: secondMovement.id,
+      memo: `Historical stock receipt ${suffix}`,
+      entryDate: "2026-11-18",
+      lines: [
+        { accountKey: "inventory", productId: productId!, debitZmw: "20.00" },
+        { accountKey: "accounts_payable", creditZmw: "20.00" },
+      ],
+    }));
+    const [secondJournal] = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, secondMovement.id),
+    ));
+    secondJournalId = secondJournal.id;
+    const overLimitLink = await request(`/api/inventory/receipt-journals/${secondJournalId}/link`, { shipmentLineId });
+    assert.equal(overLimitLink.response.status, 409, JSON.stringify(overLimitLink.payload));
+    assert.match(overLimitLink.payload.error ?? "", /exceed the shipment line's stocked quantity/i);
+    const [stillUnlinkedSecondJournal] = await db.select({ shipmentLineId: journalEntries.shipmentLineId })
+      .from(journalEntries).where(eq(journalEntries.id, secondJournalId));
+    assert.equal(stillUnlinkedSecondJournal.shipmentLineId, null);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -1088,7 +1139,12 @@ test("historical receipt repair routes are owner-only", {
         await client.query("DELETE FROM journal_lines WHERE journal_entry_id = $1", [journalId]);
         await client.query("DELETE FROM journal_entries WHERE id = $1", [journalId]);
       }
+      if (secondJournalId) {
+        await client.query("DELETE FROM journal_lines WHERE journal_entry_id = $1", [secondJournalId]);
+        await client.query("DELETE FROM journal_entries WHERE id = $1", [secondJournalId]);
+      }
       if (movementId) await client.query("DELETE FROM inventory_movements WHERE id = $1", [movementId]);
+      if (secondMovementId) await client.query("DELETE FROM inventory_movements WHERE id = $1", [secondMovementId]);
       if (shipmentLineId) await client.query("DELETE FROM shipment_lines WHERE id = $1", [shipmentLineId]);
       if (shipmentId) {
         await client.query("DELETE FROM shipment_purchase_orders WHERE shipment_id = $1", [shipmentId]);
@@ -1100,6 +1156,7 @@ test("historical receipt repair routes are owner-only", {
       }
       if (productId) await client.query("DELETE FROM products WHERE id = $1", [productId]);
       if (supplierId) await client.query("DELETE FROM suppliers WHERE id = $1", [supplierId]);
+      if (inactiveLocationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [inactiveLocationId]);
       if (locationId) await client.query("DELETE FROM inventory_locations WHERE id = $1", [locationId]);
       await client.query("COMMIT");
     } catch (error) {

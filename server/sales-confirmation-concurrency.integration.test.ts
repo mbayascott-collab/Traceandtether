@@ -49,6 +49,8 @@ test("concurrent stock reservations cannot overbook the same location", {
   let productId: number | undefined;
   let manualRaceProductId: number | undefined;
   let transferRaceProductId: number | undefined;
+  let transferRetryProductId: number | undefined;
+  let fulfillmentRaceProductId: number | undefined;
   let writeOffRaceProductId: number | undefined;
   let locationId: number | undefined;
   let transferDestinationLocationId: number | undefined;
@@ -258,6 +260,7 @@ test("concurrent stock reservations cannot overbook the same location", {
           quantity: 3,
           reason: `Concurrent transfer race test ${suffix}`,
           reference: null,
+          idempotencyKey: `transfer-race-${suffix}`,
         }),
       }),
       fetch(`${baseUrl}/api/sales-orders/${transferRaceOrder.id}/confirm`, {
@@ -315,6 +318,108 @@ test("concurrent stock reservations cannot overbook the same location", {
       assert.deepEqual(sourceBalance, { onHand: 5, reserved: 4 }, "a completed confirmation keeps all five units at the source and reserves four");
       assert.deepEqual(destinationBalance, { onHand: 0, reserved: 0 }, "a blocked transfer leaves the destination unchanged");
     }
+
+    const [transferRetryProduct] = await db.insert(products).values({
+      sku: `SRETRY-${suffix}`,
+      name: `Transfer retry product ${suffix}`,
+      status: "active",
+    }).returning();
+    transferRetryProductId = transferRetryProduct.id;
+    await db.insert(inventoryMovements).values({
+      productId: transferRetryProductId,
+      locationId,
+      kind: "opening_stock",
+      quantityDelta: 10,
+      reason: `Transfer retry test ${suffix}`,
+      sourceKey: `stock-transfer-retry-opening-${suffix}`,
+    });
+    const transferRetryKey = `transfer-retry-${suffix}`;
+    const transferRetryBody = {
+      productId: transferRetryProductId,
+      fromLocationId: locationId,
+      toLocationId: transferDestinationLocationId,
+      quantity: 3,
+      reason: `Transfer retry test ${suffix}`,
+      reference: `RETRY-${suffix}`,
+      idempotencyKey: transferRetryKey,
+    };
+    const transferRetryResponses = await Promise.all([1, 2].map(() => fetch(`${baseUrl}/api/inventory/transfers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(transferRetryBody),
+    })));
+    const transferRetryResults = await Promise.all(transferRetryResponses.map((response) => response.json() as Promise<any>));
+    assert.deepEqual(transferRetryResponses.map((response) => response.status).sort(), [200, 201]);
+    assert.deepEqual(transferRetryResults[0].movements.map((movement: any) => movement.id),
+      transferRetryResults[1].movements.map((movement: any) => movement.id), "retries return the same saved transfer pair");
+    const retryMovements = await db.select({
+      id: inventoryMovements.id,
+      kind: inventoryMovements.kind,
+      quantityDelta: inventoryMovements.quantityDelta,
+    }).from(inventoryMovements).where(eq(inventoryMovements.productId, transferRetryProductId));
+    const transferMovements = retryMovements.filter((movement) =>
+      movement.kind === "stock_transfer_out" || movement.kind === "stock_transfer_in"
+    );
+    assert.equal(transferMovements.length, 2, "a retried transfer creates only one outgoing and one incoming movement");
+    assert.deepEqual(transferMovements.map((movement) => movement.quantityDelta).sort((a, b) => a - b), [-3, 3]);
+    const conflictingRetryResponse = await fetch(`${baseUrl}/api/inventory/transfers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...transferRetryBody, quantity: 4 }),
+    });
+    assert.equal(conflictingRetryResponse.status, 409);
+    assert.match((await conflictingRetryResponse.json() as any).error, /retry key was already used for different details/i);
+
+    const [fulfillmentRaceProduct] = await db.insert(products).values({
+      sku: `SFULFILL-${suffix}`,
+      name: `Manual fulfillment race product ${suffix}`,
+      status: "active",
+    }).returning();
+    fulfillmentRaceProductId = fulfillmentRaceProduct.id;
+    await db.insert(inventoryMovements).values({
+      productId: fulfillmentRaceProductId,
+      locationId,
+      kind: "opening_stock",
+      quantityDelta: 5,
+      reason: `Manual fulfillment race test ${suffix}`,
+      sourceKey: `manual-fulfillment-race-opening-${suffix}`,
+    });
+    const { reservation } = await request("/api/inventory/reservations", {
+      productId: fulfillmentRaceProductId,
+      locationId,
+      quantity: 4,
+      reference: `fulfillment-race-${suffix}`,
+      reason: `Manual fulfillment race test ${suffix}`,
+    }, 201);
+    const fulfillmentResponses = await Promise.all([1, 2].map(() => fetch(
+      `${baseUrl}/api/inventory/reservations/${reservation.id}/fulfill`,
+      { method: "POST" },
+    )));
+    const fulfillmentResults = await Promise.all(fulfillmentResponses.map(async (response) => ({
+      status: response.status,
+      payload: await response.json() as any,
+    })));
+    assert.deepEqual(fulfillmentResults.map((result) => result.status).sort(), [200, 409], JSON.stringify(fulfillmentResults));
+    const losingFulfillment = fulfillmentResults.find((result) => result.status === 409)!;
+    assert.match(losingFulfillment.payload.error, /only active reservations can be fulfilled/i);
+    const fulfilledReservations = await db.select().from(inventoryReservations).where(and(
+      eq(inventoryReservations.id, reservation.id),
+      eq(inventoryReservations.status, "fulfilled"),
+    ));
+    assert.equal(fulfilledReservations.length, 1, "the manual reservation must be fulfilled once");
+    const fulfillmentMovements = await db.select().from(inventoryMovements).where(and(
+      eq(inventoryMovements.productId, fulfillmentRaceProductId),
+      eq(inventoryMovements.kind, "reservation_fulfillment"),
+    ));
+    assert.equal(fulfillmentMovements.length, 1, "concurrent fulfillment must issue stock once");
+    assert.equal(fulfillmentMovements[0]!.quantityDelta, -4);
+    const [fulfillmentOnHand] = await db.select({
+      quantity: sum(inventoryMovements.quantityDelta),
+    }).from(inventoryMovements).where(and(
+      eq(inventoryMovements.productId, fulfillmentRaceProductId),
+      eq(inventoryMovements.locationId, locationId),
+    ));
+    assert.equal(Number(fulfillmentOnHand.quantity), 1, "on-hand stock must decrease once");
 
     const [writeOffRaceProduct] = await db.insert(products).values({
       sku: `SWOFF-${suffix}`,
@@ -399,10 +504,10 @@ test("concurrent stock reservations cannot overbook the same location", {
         await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = ANY($1::int[])", [allOrderIds]);
         await client.query("DELETE FROM sales_orders WHERE id = ANY($1::int[])", [allOrderIds]);
       }
-      const allProductIds = [productId, manualRaceProductId, transferRaceProductId, writeOffRaceProductId].filter((id): id is number => id !== undefined);
+      const allProductIds = [productId, manualRaceProductId, transferRaceProductId, transferRetryProductId, fulfillmentRaceProductId, writeOffRaceProductId].filter((id): id is number => id !== undefined);
       if (allProductIds.length) {
-        await client.query("DELETE FROM inventory_reservations WHERE product_id = ANY($1::int[])", [allProductIds]);
         await client.query("DELETE FROM inventory_movements WHERE product_id = ANY($1::int[])", [allProductIds]);
+        await client.query("DELETE FROM inventory_reservations WHERE product_id = ANY($1::int[])", [allProductIds]);
         await client.query("DELETE FROM products WHERE id = ANY($1::int[])", [allProductIds]);
       }
       if (customerId) await client.query("DELETE FROM customers WHERE id = $1", [customerId]);

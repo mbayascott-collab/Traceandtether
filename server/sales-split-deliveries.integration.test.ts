@@ -121,6 +121,31 @@ test("split sales deliveries keep each location linked and release undelivered r
       "confirmation must save a distinct active reservation for each supplying location",
     );
 
+    const reservationsBeforeRejectedDelivery = await db.select().from(inventoryReservations)
+      .where(eq(inventoryReservations.salesOrderId, salesOrderId))
+      .orderBy(asc(inventoryReservations.id));
+    const rejectedDelivery = await request("POST", `/api/sales-orders/${salesOrderId}/deliveries`, {
+      idempotencyKey: randomUUID(),
+      deliveryDate: "2026-11-16",
+      lines: [{
+        salesOrderLineId: line.id,
+        quantity: 3,
+        locationAllocations: [{ locationId: locations[0]!.id, quantity: 3 }],
+      }],
+    });
+    assert.equal(rejectedDelivery.status, 409, JSON.stringify(rejectedDelivery.payload));
+    const reservationsAfterRejectedDelivery = await db.select().from(inventoryReservations)
+      .where(eq(inventoryReservations.salesOrderId, salesOrderId))
+      .orderBy(asc(inventoryReservations.id));
+    assert.deepEqual(reservationsAfterRejectedDelivery, reservationsBeforeRejectedDelivery,
+      "a rejected split delivery must leave all location reservations unchanged");
+    assert.equal((await db.select().from(salesDeliveryLines).where(eq(salesDeliveryLines.salesOrderLineId, line.id))).length, 0,
+      "a rejected split delivery must not create delivery lines");
+    assert.equal((await db.select().from(inventoryMovements).where(and(
+      eq(inventoryMovements.productId, product.id),
+      eq(inventoryMovements.kind, "reservation_fulfillment"),
+    ))).length, 0, "a rejected split delivery must not consume stock");
+
     const firstDelivery = await post(`/api/sales-orders/${salesOrderId}/deliveries`, {
       idempotencyKey: randomUUID(),
       deliveryDate: "2026-11-17",

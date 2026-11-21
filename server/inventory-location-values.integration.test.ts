@@ -230,7 +230,7 @@ test("inventory endpoint reconciles location values and quantities with ledger b
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           productId: firstProduct.id, fromLocationId: inactiveLocation.id, toLocationId: locationA.id,
-          quantity: 1, reason: "Inactive source route regression", reference: null,
+          quantity: 1, reason: "Inactive source route regression", reference: null, idempotencyKey: `inactive-source-${suffix}`,
         }),
       }),
       fetch(`${baseUrl}/api/inventory/transfers`, {
@@ -238,7 +238,7 @@ test("inventory endpoint reconciles location values and quantities with ledger b
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           productId: firstProduct.id, fromLocationId: locationA.id, toLocationId: inactiveLocation.id,
-          quantity: 1, reason: "Inactive destination route regression", reference: null,
+          quantity: 1, reason: "Inactive destination route regression", reference: null, idempotencyKey: `inactive-destination-${suffix}`,
         }),
       }),
     ]);
@@ -272,6 +272,48 @@ test("inventory endpoint reconciles location values and quantities with ledger b
       [1, 0],
       "historical balance at an inactive location remains readable and unchanged",
     );
+
+    const productBeforeTransfer = inventoryAfterPayload.inventory.find((item) => item.id === secondProduct.id);
+    assert.ok(productBeforeTransfer);
+    const sourceBeforeTransfer = productBeforeTransfer.locations.find((location: { id: number | null }) => location.id === locationA.id);
+    const destinationBeforeTransfer = productBeforeTransfer.locations.find((location: { id: number | null }) => location.id === locationB.id);
+    assert.ok(sourceBeforeTransfer && destinationBeforeTransfer);
+    const transferResponse = await fetch(`${baseUrl}/api/inventory/transfers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        productId: secondProduct.id,
+        fromLocationId: locationA.id,
+        toLocationId: locationB.id,
+        quantity: 1,
+        reason: "Location total transfer regression",
+        reference: `LOC-TRANSFER-${suffix}`,
+        idempotencyKey: `location-transfer-${suffix}`,
+      }),
+    });
+    const transferPayload = await transferResponse.json() as { movements: { id: number }[]; error?: string };
+    assert.equal(transferResponse.status, 201, JSON.stringify(transferPayload));
+    movementIds.push(...transferPayload.movements.map(({ id }) => id));
+    const afterTransferResponse = await fetch(`${baseUrl}/api/inventory`);
+    assert.equal(afterTransferResponse.status, 200);
+    const afterTransferPayload = await afterTransferResponse.json() as { inventory: any[] };
+    const productAfterTransfer = afterTransferPayload.inventory.find((item) => item.id === secondProduct.id);
+    assert.ok(productAfterTransfer);
+    const sourceAfterTransfer = productAfterTransfer.locations.find((location: { id: number | null }) => location.id === locationA.id);
+    const destinationAfterTransfer = productAfterTransfer.locations.find((location: { id: number | null }) => location.id === locationB.id);
+    assert.ok(sourceAfterTransfer && destinationAfterTransfer);
+    assert.deepEqual(
+      [sourceAfterTransfer.onHand, sourceAfterTransfer.available],
+      [sourceBeforeTransfer.onHand - 1, sourceBeforeTransfer.available - 1],
+      "the transfer must reduce source on-hand and available quantities",
+    );
+    assert.deepEqual(
+      [destinationAfterTransfer.onHand, destinationAfterTransfer.available],
+      [destinationBeforeTransfer.onHand + 1, destinationBeforeTransfer.available + 1],
+      "the transfer must increase destination on-hand and available quantities",
+    );
+    assert.equal(productAfterTransfer.onHand, productBeforeTransfer.onHand, "moving stock must preserve product-wide on-hand quantity");
+    assert.equal(productAfterTransfer.stockValueZmw, productBeforeTransfer.stockValueZmw, "moving stock must preserve product-wide inventory value");
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, sum } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sql, sum } from "drizzle-orm";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Express, RequestHandler } from "express";
@@ -565,7 +565,10 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       if (current.onHand < reservation.quantity) return { error: "Insufficient on-hand stock to fulfill this reservation.", status: 409 };
       const productTotal = await balance(tx, reservation.productId);
       const inventoryValue = await accountBalance(tx, "inventory", reservation.productId);
-      const cost = productTotal.onHand > 0 ? (inventoryValue * BigInt(reservation.quantity) + BigInt(productTotal.onHand / 2)) / BigInt(productTotal.onHand) : 0n;
+      const productOnHand = BigInt(productTotal.onHand);
+      const cost = productOnHand > 0n
+        ? (inventoryValue * BigInt(reservation.quantity) + productOnHand / 2n) / productOnHand
+        : 0n;
       const [movement] = await tx.insert(inventoryMovements).values({
         productId: reservation.productId, locationId: reservation.locationId, kind: "reservation_fulfillment", quantityDelta: -reservation.quantity,
         reason: `Fulfilled reservation #${reservation.id}: ${reservation.reason}`,
@@ -649,10 +652,38 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       productId: z.number().int().positive(), fromLocationId: z.number().int().positive(),
       toLocationId: z.number().int().positive(), quantity: z.number().int().positive().max(1_000_000),
       reason: z.string().trim().min(3).max(500), reference: z.string().trim().max(120).nullable(),
+      idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
     }).strict().safeParse(req.body);
     if (!parsed.success) return bad(res, "Check the product, locations, quantity, and reason.");
     if (parsed.data.fromLocationId === parsed.data.toLocationId) return bad(res, "Choose two different locations.");
     const result = await db.transaction(async (tx) => {
+      const transferKey = `transfer-${parsed.data.idempotencyKey}`;
+      await tx.execute(sql`select pg_advisory_xact_lock(0, hashtext(${"inventory-transfer:" + parsed.data.idempotencyKey}))`);
+      const existingMovements = await tx.select().from(inventoryMovements)
+        .where(inArray(inventoryMovements.sourceKey, [`${transferKey}-out`, `${transferKey}-in`]))
+        .for("update");
+      if (existingMovements.length) {
+        const outgoing = existingMovements.find((movement) => movement.sourceKey === `${transferKey}-out`);
+        const incoming = existingMovements.find((movement) => movement.sourceKey === `${transferKey}-in`);
+        const matchesRequest = existingMovements.length === 2
+          && outgoing?.kind === "stock_transfer_out"
+          && outgoing.productId === parsed.data.productId
+          && outgoing.locationId === parsed.data.fromLocationId
+          && outgoing.quantityDelta === -parsed.data.quantity
+          && outgoing.reason === parsed.data.reason
+          && outgoing.reference === parsed.data.reference
+          && incoming?.kind === "stock_transfer_in"
+          && incoming.productId === parsed.data.productId
+          && incoming.locationId === parsed.data.toLocationId
+          && incoming.quantityDelta === parsed.data.quantity
+          && incoming.reason === parsed.data.reason
+          && incoming.reference === parsed.data.reference;
+        if (!matchesRequest) {
+          return { error: "This transfer retry key was already used for different details.", status: 409 };
+        }
+        return { movements: [outgoing!, incoming!], duplicate: true };
+      }
+
       const [product] = await tx.select({ id: products.id }).from(products).where(eq(products.id, parsed.data.productId)).for("update").limit(1);
       if (!product) return { error: "Product not found.", status: 404 };
       const locations = await tx.select({ id: inventoryLocations.id, active: inventoryLocations.active }).from(inventoryLocations)
@@ -663,7 +694,6 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
       }
       const source = await balance(tx, product.id, parsed.data.fromLocationId);
       if (source.onHand - source.reserved < parsed.data.quantity) return { error: "That location does not have enough unreserved stock to transfer.", status: 409 };
-      const transferKey = `transfer-${randomUUID()}`;
       const movements = await tx.insert(inventoryMovements).values([
         { productId: product.id, locationId: parsed.data.fromLocationId, kind: "stock_transfer_out", quantityDelta: -parsed.data.quantity, reason: parsed.data.reason, reference: parsed.data.reference, sourceKey: `${transferKey}-out` },
         { productId: product.id, locationId: parsed.data.toLocationId, kind: "stock_transfer_in", quantityDelta: parsed.data.quantity, reason: parsed.data.reason, reference: parsed.data.reference, sourceKey: `${transferKey}-in` },
@@ -673,10 +703,10 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
         recordLabel: `Stock transfer · product #${product.id}`,
         actor: res.locals.actor, action: "created", changedFields: ["productId", "locationId", "kind", "quantityDelta", "reason", "reference"],
       });
-      return { movements };
+      return { movements, duplicate: false };
     });
     if ("error" in result) return res.status(result.status ?? 400).json({ error: result.error });
-    res.status(201).json(result);
+    res.status(result.duplicate ? 200 : 201).json({ movements: result.movements });
   });
 
   app.post("/api/inventory/events", owner, async (req, res) => {

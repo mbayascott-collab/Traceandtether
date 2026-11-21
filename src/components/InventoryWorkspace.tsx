@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
@@ -17,6 +17,32 @@ const money = (value: string) => {
   return `ZMW ${amount < 0n ? "-" : ""}${absolute.toLocaleString("en-ZM")}.${cents}`;
 };
 
+export function InventoryOverviewTable({
+  products,
+  emptyMessage = "No products found.",
+}: {
+  products: InventoryItem[];
+  emptyMessage?: string;
+}) {
+  return <div className="panel data-table-wrap"><table>
+    <thead><tr>
+      <th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th>
+      <th>By location · on hand / available / value</th><th>Average cost</th><th>Stock value</th><th>Unit</th>
+    </tr></thead>
+    <tbody>
+      {products.map((product) => <tr key={product.id}>
+        <td>{product.name}</td><td>{product.sku}</td><td>{product.onHand}</td><td>{product.reserved}</td>
+        <td>{product.available}</td>
+        <td>{product.locations.map((location) =>
+          `${location.name}: ${location.onHand} / ${location.available} / ${money(location.stockValueZmw)}`
+        ).join(" · ") || "Main: 0"}</td>
+        <td>{money(product.averageUnitCostZmw)}</td><td>{money(product.stockValueZmw)}</td><td>{product.unit}</td>
+      </tr>)}
+      {!products.length && <tr><td colSpan={9}>{emptyMessage}</td></tr>}
+    </tbody>
+  </table></div>;
+}
+
 export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [locationTotals, setLocationTotals] = useState<InventoryLocationTotal[]>([]);
@@ -26,6 +52,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   const [receiptJournalLinks, setReceiptJournalLinks] = useState<Record<number, number>>({});
   const [reservations, setReservations] = useState<InventoryReservation[]>([]);
   const [locations, setLocations] = useState<InventoryLocation[]>([]);
+  const transferAttempt = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
   const [receiptLocations, setReceiptLocations] = useState<Record<number, number>>({});
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
@@ -119,7 +146,10 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <label className="search-field"><Search aria-hidden="true" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name or SKU" aria-label="Search inventory by product name or SKU" /></label>
         <span>{filteredInventory.length} {filteredInventory.length === 1 ? "product" : "products"}</span>
       </div>
-      <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Reserved</th><th>Available</th><th>By location · on hand / available / value</th><th>Average cost</th><th>Stock value</th><th>Unit</th></tr></thead><tbody>{filteredInventory.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.onHand}</td><td>{p.reserved}</td><td>{p.available}</td><td>{p.locations.map((l) => `${l.name}: ${l.onHand} / ${l.available} / ${money(l.stockValueZmw)}`).join(" · ") || "Main: 0"}</td><td>{money(p.averageUnitCostZmw)}</td><td>{money(p.stockValueZmw)}</td><td>{p.unit}</td></tr>)}{!filteredInventory.length && <tr><td colSpan={9}>{normalizedSearch ? "No products match that name or SKU." : "No products found."}</td></tr>}</tbody></table></div>
+      <InventoryOverviewTable
+        products={filteredInventory}
+        emptyMessage={normalizedSearch ? "No products match that name or SKU." : "No products found."}
+      />
     </>}
     {mode === "receipts" && <>
       <div className="panel data-table-wrap">
@@ -164,11 +194,22 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
       <div className="panel data-table-wrap"><table><thead><tr><th>Product</th><th>Location</th><th>Quantity</th><th>Reference</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>{reservations.map((r) => <tr key={r.id}><td>{r.productName} · {r.sku}</td><td>{r.locationName || "Main"}</td><td>{r.quantity}</td><td>{r.reference || "—"}</td><td>{r.reason}</td><td>{r.status}</td><td>{r.status === "active" && (r.salesOrderId ? "Manage through sales order" : <><button onClick={() => run(() => releaseReservation(r.id))}>Release</button> <button onClick={() => run(() => fulfillReservation(r.id))}>Fulfill</button></>)}</td></tr>)}</tbody></table></div>
     </>}
     {mode === "adjustments" && <>
-      <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => transferInventory({
-        productId: Number(d.get("productId")), fromLocationId: Number(d.get("fromLocationId")),
-        toLocationId: Number(d.get("toLocationId")), quantity: Number(d.get("quantity")),
-        reference: String(d.get("reference") || "") || null, reason: String(d.get("reason")),
-      }))}>
+      <form className="panel form-grid" onSubmit={(e) => submit(e, async (d) => {
+        const transfer = {
+          productId: Number(d.get("productId")),
+          fromLocationId: Number(d.get("fromLocationId")),
+          toLocationId: Number(d.get("toLocationId")),
+          quantity: Number(d.get("quantity")),
+          reference: String(d.get("reference") || "") || null,
+          reason: String(d.get("reason")),
+        };
+        const fingerprint = JSON.stringify(transfer);
+        if (transferAttempt.current?.fingerprint !== fingerprint) {
+          transferAttempt.current = { fingerprint, idempotencyKey: crypto.randomUUID() };
+        }
+        await transferInventory({ ...transfer, idempotencyKey: transferAttempt.current.idempotencyKey });
+        transferAttempt.current = null;
+      })}>
         <h2>Transfer stock between locations</h2>
         <label>Product<select name="productId" required defaultValue=""><option value="">Choose product</option>{inventory.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</select></label>
         <label>From<select name="fromLocationId" required defaultValue=""><option value="">Choose source</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></label>
@@ -258,7 +299,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
         <button type="button" className="button button-secondary" onClick={() => setCorrectingMovement(null)}>Cancel</button>
       </form>}
       <MovementTable
-        movements={movements.filter((m) => m.kind === "adjustment" || m.kind === "opening_stock" || m.kind === "opening_stock_reversal")}
+        movements={movements}
         onCorrect={setCorrectingMovement}
         onSubmit={submit}
       />
@@ -266,7 +307,7 @@ export default function InventoryWorkspace({ mode }: { mode: Mode }) {
   </section>;
 }
 
-function MovementTable({
+export function MovementTable({
   movements, onCorrect, onSubmit,
 }: {
   movements: InventoryMovement[];

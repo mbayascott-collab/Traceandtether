@@ -565,7 +565,10 @@ export async function fetchInventoryLocations(): Promise<InventoryLocation[]> {
 export async function createInventoryLocation(name: string): Promise<void> {
   await request("/api/inventory/locations", { method: "POST", body: JSON.stringify({ name }) });
 }
-export async function transferInventory(input: { productId: number; fromLocationId: number; toLocationId: number; quantity: number; reason: string; reference: string | null }): Promise<void> {
+export async function transferInventory(input: {
+  productId: number; fromLocationId: number; toLocationId: number; quantity: number;
+  reason: string; reference: string | null; idempotencyKey: string;
+}): Promise<void> {
   await request("/api/inventory/transfers", { method: "POST", body: JSON.stringify(input) });
 }
 export async function recordInventoryEvent(input: { kind: "stock_return" | "stock_damage"; productId: number; locationId: number; quantity: number; reason: string; reference: string | null }): Promise<void> {

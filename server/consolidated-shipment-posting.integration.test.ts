@@ -209,7 +209,44 @@ test("posts staged consolidated shipment receipts by increment with balanced jou
     ]));
     const stockedByOrderLine = new Map(createdOrderLines.map((line) => [line.id, 0]));
     const posted = [];
-    for (const line of receivedLines) {
+    const firstReceiptLine = receivedLines[0]!;
+    const overlappingPosts = await Promise.all([1, 2].map(() => fetch(
+      `${baseUrl}/api/inventory/receipts/${firstReceiptLine.id}/post`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ locationId }),
+      },
+    )));
+    const overlappingResults = await Promise.all(overlappingPosts.map(async (response) => ({
+      status: response.status,
+      payload: await response.json() as any,
+    })));
+    assert.deepEqual(overlappingResults.map((result) => result.status).sort(), [201, 409]);
+    const successfulPost = overlappingResults.find((result) => result.status === 201)!;
+    posted.push(successfulPost.payload.movement);
+    const firstLineMovements = await db.select().from(inventoryMovements)
+      .where(eq(inventoryMovements.sourceKey, `shipment-line-${firstReceiptLine.id}-to-${partialQuantities[0]}`));
+    assert.equal(firstLineMovements.length, 1, "overlapping posts must create only one stock movement");
+    const firstLineJournals = await db.select().from(journalEntries).where(and(
+      eq(journalEntries.sourceType, "stock_receipt"),
+      eq(journalEntries.sourceId, firstLineMovements[0]!.id),
+    ));
+    assert.equal(firstLineJournals.length, 1, "overlapping posts must create only one receipt journal");
+    const firstLineJournalLines = await db.select({
+      accountKey: accountingAccounts.systemKey,
+      debitZmw: journalLines.debitZmw,
+      creditZmw: journalLines.creditZmw,
+    }).from(journalLines)
+      .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
+      .where(eq(journalLines.journalEntryId, firstLineJournals[0]!.id));
+    assert.equal(journalLinesAreBalanced(firstLineJournalLines.map((line) => ({
+      accountKey: line.accountKey ?? "",
+      debitZmw: line.debitZmw,
+      creditZmw: line.creditZmw,
+    }))), true, "the single receipt journal must remain balanced");
+
+    for (const line of receivedLines.slice(1)) {
       const { movement } = await request(
         "POST",
         `/api/inventory/receipts/${line.id}/post`,
