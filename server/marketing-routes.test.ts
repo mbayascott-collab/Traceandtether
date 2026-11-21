@@ -387,15 +387,22 @@ test("campaign launch audiences remain reviewable after group rules change or th
     assert.equal(initial.response.status, 200, JSON.stringify(initial.payload));
     assert.equal(initial.payload.snapshot.groupName, group.name);
     assert.deepEqual(initial.payload.snapshot.rules, group.rules);
-    assert.deepEqual(initial.payload.snapshot.members.map((member: any) => ({
-      id: member.id, name: member.name, email: member.email,
-    })), [{ id: customer.id, name: customer.name, email: customer.email }]);
+    const initialMembers = initial.payload.snapshot.members;
+    assert.ok(initialMembers.some((member: any) =>
+      member.id === customer.id && member.name === customer.name && member.email === customer.email));
 
     const editedGroup = await request("owner", `/api/marketing/customer-groups/${group.id}`, "PATCH", {
       name: `Changed group ${suffix}`,
       rules: { minimumFulfilledOrders: 100 },
     });
     assert.equal(editedGroup.response.status, 200, JSON.stringify(editedGroup.payload));
+    const currentMembers = await request("owner", `/api/marketing/customer-groups/${group.id}/members`);
+    assert.equal(currentMembers.response.status, 200, JSON.stringify(currentMembers.payload));
+    assert.equal(
+      currentMembers.payload.members.some((member: any) => member.id === customer.id),
+      false,
+      "current group membership must reflect the edited rules",
+    );
     const removedGroup = await request("owner", `/api/marketing/customer-groups/${group.id}`, "DELETE", {
       campaignIds: [campaign.id],
       replacementGroupId: null,
@@ -407,7 +414,7 @@ test("campaign launch audiences remain reviewable after group rules change or th
     assert.equal(preserved.response.status, 200, JSON.stringify(preserved.payload));
     assert.equal(preserved.payload.snapshot.groupName, group.name);
     assert.deepEqual(preserved.payload.snapshot.rules, group.rules);
-    assert.equal(preserved.payload.snapshot.members[0].email, customer.email);
+    assert.deepEqual(preserved.payload.snapshot.members, initialMembers);
 
     const managerSnapshot = await request("manager", `/api/marketing/campaigns/${campaign.id}/audience-snapshot`);
     assert.equal(managerSnapshot.response.status, 403);
