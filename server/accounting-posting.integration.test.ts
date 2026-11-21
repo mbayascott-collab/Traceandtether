@@ -2378,6 +2378,7 @@ test("customer receipts and returns wait for an in-flight reminder send to finis
   let returnSendContent: import("./payment-reminder-email").PaymentReminderEmailContent | undefined;
   let sendAttempt = 0;
   let receiptRequests = 0;
+  const providerError = "Gmail rejected the test reminder.";
 
   app.use((req, _res, next) => {
     if (req.method === "POST" && req.path === "/api/payments") {
@@ -2394,14 +2395,17 @@ test("customer receipts and returns wait for an in-flight reminder send to finis
     next();
   };
   registerPaymentRoutes(app, owner, async (content) => {
-    if (sendAttempt++ === 0) {
+    const attempt = sendAttempt++;
+    if (attempt === 0) {
       sentContent = content;
       senderEntered();
       await senderPause;
-    } else {
+    } else if (attempt === 1) {
       returnSendContent = content;
       returnSenderEntered();
       await returnSenderPause;
+    } else {
+      return { ok: false, error: providerError };
     }
     return { ok: true, messageId: `gmail-test-${suffix}-${sendAttempt}` };
   });
@@ -2572,14 +2576,38 @@ test("customer receipts and returns wait for an in-flight reminder send to finis
     const returnEmailBody = Buffer.from(returnEncodedBody, "base64").toString("utf8");
     assert.match(returnEmailBody, /Amount still owed: ZMW 125\.00/);
 
-    const [failedReminder] = await db.insert(paymentReminders).values({
-      salesOrderId,
-      recipientEmail: `failed-${suffix}@example.test`,
-      outstandingZmw: "175.00",
-      dueDate: "2020-01-01",
-      status: "failed",
-      sendError: "Mailbox unavailable",
-    }).returning();
+    const failedReminderResponse = await fetch(`${baseUrl}/api/payments/${salesOrderId}/reminder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "" }),
+    });
+    const failedReminderPayload = await failedReminderResponse.json() as any;
+    assert.equal(failedReminderResponse.status, 502, JSON.stringify(failedReminderPayload));
+    assert.equal(failedReminderPayload.reminder.status, "failed");
+    assert.equal(failedReminderPayload.reminder.sendError, providerError);
+    const [failedReminder] = await db.select().from(paymentReminders)
+      .where(eq(paymentReminders.id, failedReminderPayload.reminder.id));
+    assert.equal(failedReminder?.status, "failed");
+    assert.equal(failedReminder?.sendError, providerError);
+
+    const receiptAfterFailedSend = await fetch(`${baseUrl}/api/payments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        direction: "customer_receipt",
+        idempotencyKey: randomUUID(),
+        orderId: salesOrderId,
+        amountZmw: "10.00",
+        paymentDate: "2026-11-20",
+        method: "bank_transfer",
+        reference: `receipt-after-failed-reminder-${suffix}`,
+        notes: null,
+      }),
+    });
+    const receiptAfterFailedSendPayload = await receiptAfterFailedSend.json() as any;
+    assert.equal(receiptAfterFailedSend.status, 201, JSON.stringify(receiptAfterFailedSendPayload));
+    assert.equal(receiptAfterFailedSendPayload.payment.amountZmw, "10.00");
+
     const overviewResponse = await fetch(`${baseUrl}/api/payments`);
     const overview = await overviewResponse.json() as any;
     assert.equal(overviewResponse.status, 200, JSON.stringify(overview));
@@ -2590,11 +2618,11 @@ test("customer receipts and returns wait for an in-flight reminder send to finis
     ]);
     assert.deepEqual(invoice.reminderHistory.map((reminder: any) => reminder.status), ["failed", "sent", "sent"]);
     assert.equal(invoice.reminderHistory[0].recipientEmail, failedReminder.recipientEmail);
-    assert.equal(invoice.reminderHistory[0].outstandingZmw, "175.00");
-    assert.equal(invoice.reminderHistory[0].error, "Mailbox unavailable");
+    assert.equal(invoice.reminderHistory[0].outstandingZmw, "125.00");
+    assert.equal(invoice.reminderHistory[0].error, providerError);
     assert.equal(invoice.reminderHistory[1].outstandingZmw, "125.00");
     assert.equal(invoice.reminderHistory[2].outstandingZmw, "200.00");
-    assert.equal(overview.payments.filter((payment: any) => payment.orderNumber === order.orderNumber).length, 1,
+    assert.equal(overview.payments.filter((payment: any) => payment.orderNumber === order.orderNumber).length, 2,
       "viewing reminder history does not create or alter payment records");
   } finally {
     releaseSender();
