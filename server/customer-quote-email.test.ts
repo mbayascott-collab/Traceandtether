@@ -343,6 +343,36 @@ test("customer quote sends prevent concurrent duplicates and require confirmatio
       .where(eq(customerQuoteEmailAttempts.customerQuoteId, ambiguousQuote.id));
     assert.deepEqual(quoteAttempts.map((attempt) => attempt.status), ["ambiguous", "sent"]);
     assert.equal(quoteAttempts[0]?.error, "Gmail did not confirm the result.");
+    const quoteListResponse = await fetch(`${baseUrl}/api/customer-quotes`);
+    assert.equal(quoteListResponse.status, 200);
+    const quoteList = await quoteListResponse.json() as { quotes: any[] };
+    const listedAmbiguousQuote = quoteList.quotes.find((quote) => quote.id === ambiguousQuote.id);
+    assert.deepEqual(
+      listedAmbiguousQuote?.emailAttempts.map((attempt: any) => ({
+        attemptNumber: attempt.attemptNumber,
+        status: attempt.status,
+        recipientEmail: attempt.recipientEmail,
+        providerMessageId: attempt.providerMessageId,
+        error: attempt.error,
+      })).sort((left: any, right: any) => left.attemptNumber - right.attemptNumber),
+      [
+        {
+          attemptNumber: 1,
+          status: "ambiguous",
+          recipientEmail: `quote-email-${suffix}@example.test`,
+          providerMessageId: null,
+          error: "Gmail did not confirm the result.",
+        },
+        {
+          attemptNumber: 2,
+          status: "sent",
+          recipientEmail: `quote-email-${suffix}@example.test`,
+          providerMessageId: `gmail-${suffix}-confirmed`,
+          error: null,
+        },
+      ],
+      "the quote workspace API must return each prior attempt with its result and Gmail reference",
+    );
 
     const retriedQuote = await createQuote("C");
     const staleStartedAt = new Date(Date.now() - 6 * 60 * 1000);
