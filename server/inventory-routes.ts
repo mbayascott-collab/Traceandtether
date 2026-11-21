@@ -25,6 +25,8 @@ import {
 } from "./accounting-posting";
 
 const bad = (res: import("express").Response, message: string) => res.status(400).json({ error: message });
+const MAX_EVIDENCE_ARCHIVE_MOVEMENTS = 25;
+const MAX_EVIDENCE_ARCHIVE_BYTES = 50 * 1024 * 1024;
 async function mainLocationId(tx: any): Promise<number> {
   const [existing] = await tx.select({ id: inventoryLocations.id }).from(inventoryLocations).where(eq(inventoryLocations.name, "Main")).limit(1);
   if (existing) return existing.id;
@@ -247,6 +249,71 @@ export function registerInventoryRoutes(app: Express, owner: RequestHandler) {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.attachment(`count-${id}-evidence.zip`);
+    res.setHeader("Content-Type", "application/zip");
+    return res.send(archive);
+  });
+
+  app.post("/api/inventory/opening-evidence/archive", owner, async (req, res) => {
+    const ids = req.body?.movementIds;
+    if (!Array.isArray(ids) || ids.length < 2 || ids.length > MAX_EVIDENCE_ARCHIVE_MOVEMENTS) {
+      return bad(res, `Select between 2 and ${MAX_EVIDENCE_ARCHIVE_MOVEMENTS} count records.`);
+    }
+    const movementIds = ids.map(getId);
+    if (movementIds.some((id) => id === null) || new Set(movementIds).size !== movementIds.length) {
+      return bad(res, "Choose each valid stock count only once.");
+    }
+    const validIds = movementIds as number[];
+    const movementRows = await db.select({
+      id: inventoryMovements.id,
+      kind: inventoryMovements.kind,
+      evidenceFileName: inventoryMovements.evidenceFileName,
+      evidenceData: inventoryMovements.evidenceData,
+    }).from(inventoryMovements)
+      .where(inArray(inventoryMovements.id, validIds))
+      .orderBy(asc(inventoryMovements.id));
+    if (movementRows.length !== validIds.length || movementRows.some((movement) => movement.kind !== "opening_stock")) {
+      return res.status(404).json({ error: "One or more selected stock counts could not be found." });
+    }
+
+    const evidenceRows = await db.select({
+      id: inventoryMovementEvidence.id,
+      movementId: inventoryMovementEvidence.movementId,
+      fileName: inventoryMovementEvidence.fileName,
+      data: inventoryMovementEvidence.data,
+    }).from(inventoryMovementEvidence)
+      .where(inArray(inventoryMovementEvidence.movementId, validIds))
+      .orderBy(asc(inventoryMovementEvidence.movementId), asc(inventoryMovementEvidence.id));
+    const evidenceByMovement = new Map<number, { fileName: string; data: Buffer }[]>();
+    for (const row of evidenceRows) evidenceByMovement.set(
+      row.movementId,
+      [...(evidenceByMovement.get(row.movementId) ?? []), { fileName: row.fileName, data: Buffer.from(row.data) }],
+    );
+
+    const entries: { fileName: string; data: Buffer }[] = [];
+    for (const movement of movementRows) {
+      const files = [
+        ...(movement.evidenceData && movement.evidenceFileName
+          ? [{ fileName: movement.evidenceFileName, data: Buffer.from(movement.evidenceData) }]
+          : []),
+        ...(evidenceByMovement.get(movement.id) ?? []),
+      ];
+      if (!files.length) {
+        return bad(res, `Count record ${movement.id} has no saved evidence to download.`);
+      }
+      files.forEach((file, index) => entries.push({
+        fileName: `count-${movement.id}/${String(index + 1).padStart(2, "0")}-${safeOpeningStockEvidenceFilename(file.fileName)}`,
+        data: file.data,
+      }));
+    }
+    const totalBytes = entries.reduce((total, entry) => total + entry.data.length, 0);
+    if (totalBytes > MAX_EVIDENCE_ARCHIVE_BYTES) {
+      return bad(res, "The selected evidence exceeds the 50 MB download limit. Select fewer count records.");
+    }
+
+    const archive = createZipArchive(entries);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.attachment("count-evidence-selected-records.zip");
     res.setHeader("Content-Type", "application/zip");
     return res.send(archive);
   });

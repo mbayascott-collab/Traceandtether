@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import {
   appendOpeningStockEvidence, correctOpeningStock, createInventoryAdjustment, createInventoryLocation, createOpeningStock, createReservation, fetchInventory, fetchInventoryLocations, fetchInventoryMovements,
   fetchInventoryReceipts, fetchReservations, fetchUnlinkedReceiptJournals, fulfillReservation, linkReceiptJournal, postInventoryReceipt,
-  inventoryLocationValuesCsv, inventoryProductLocationCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
+  fetchInventoryEvidenceArchive, inventoryLocationValuesCsv, inventoryProductLocationCsv, inventoryMovementCorrectionLinks, inventoryMovementEvidenceArchiveUrl, inventoryMovementEvidenceUrl, inventoryMovementHistoryCsv, MAX_OPENING_STOCK_EVIDENCE_FILES, openingStockEvidenceErrors, recordInventoryEvent, releaseReservation, transferInventory, type InventoryItem, type InventoryLocation, type InventoryLocationTotal, type InventoryMovement, type InventoryReceipt, type UnlinkedReceiptJournal,
   type InventoryReservation,
 } from "../lib/api";
 import { filterInventoryMovements } from "../lib/inventory-movement-filter";
@@ -327,6 +327,9 @@ export function MovementTable({
   const [productFilter, setProductFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<number[]>([]);
+  const [archiveError, setArchiveError] = useState("");
+  const [downloadingEvidence, setDownloadingEvidence] = useState(false);
   const correctionLinks = inventoryMovementCorrectionLinks(movements);
   const productOptions = [...new Map(movements.map((movement) => [
     movement.productId,
@@ -339,11 +342,43 @@ export function MovementTable({
     toDate: toDate || undefined,
   });
   const filtersActive = Boolean(productFilter || fromDate || toDate);
+  const selectableEvidenceIds = filteredMovements
+    .filter((movement) => movement.kind === "opening_stock" && movement.evidenceFiles.length > 0)
+    .map((movement) => movement.id);
+  const loadedEvidenceIds = new Set(movements
+    .filter((movement) => movement.kind === "opening_stock" && movement.evidenceFiles.length > 0)
+    .map((movement) => movement.id));
+  const selectedEvidenceIdsAvailable = selectedEvidenceIds.filter((id) => loadedEvidenceIds.has(id));
+  const allVisibleEvidenceSelected = selectableEvidenceIds.length > 0
+    && selectableEvidenceIds.every((id) => selectedEvidenceIds.includes(id));
   const clearFilters = () => {
     setProductFilter("");
     setFromDate("");
     setToDate("");
   };
+  function toggleVisibleEvidenceSelection() {
+    setSelectedEvidenceIds((selected) => allVisibleEvidenceSelected
+      ? selected.filter((id) => !selectableEvidenceIds.includes(id))
+      : [...new Set([...selected, ...selectableEvidenceIds])]);
+  }
+  async function downloadSelectedEvidence() {
+    if (selectedEvidenceIdsAvailable.length < 2) return;
+    setArchiveError("");
+    setDownloadingEvidence(true);
+    try {
+      const archive = await fetchInventoryEvidenceArchive(selectedEvidenceIdsAvailable);
+      const url = URL.createObjectURL(archive);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `count-evidence-${selectedEvidenceIdsAvailable.length}-records.zip`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (error) {
+      setArchiveError(error instanceof Error ? error.message : "Could not download count evidence.");
+    } finally {
+      setDownloadingEvidence(false);
+    }
+  }
   function downloadCsv() {
     const csv = inventoryMovementHistoryCsv(filteredMovements);
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -367,10 +402,30 @@ export function MovementTable({
       <button type="button" className="button button-secondary" onClick={clearFilters} disabled={!filtersActive}>Clear filters</button>
       <span aria-live="polite">{invalidDateRange ? "From date must be on or before the to date." : `Showing ${filteredMovements.length} of ${movements.length} movements.`}</span>
     </div>
-    <table><thead><tr><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{filteredMovements.map((m) => {
+    <div className="toolbar">
+      <button type="button" className="button button-secondary" onClick={toggleVisibleEvidenceSelection} disabled={!selectableEvidenceIds.length}>
+        {allVisibleEvidenceSelected ? "Clear matching count selections" : "Select all matching counts"}
+      </button>
+      <button type="button" className="button button-secondary" onClick={downloadSelectedEvidence}
+        disabled={selectedEvidenceIdsAvailable.length < 2 || downloadingEvidence}>
+        {downloadingEvidence ? "Preparing archive…" : `Download evidence for ${selectedEvidenceIdsAvailable.length} counts`}
+      </button>
+      {selectedEvidenceIds.length > 0 && <button type="button" className="button button-secondary" onClick={() => setSelectedEvidenceIds([])}>Clear selection</button>}
+      <span className="report-footnote">Select at least 2 count records; archives are limited to 25 records and 50 MB.</span>
+    </div>
+    {archiveError && <p role="alert" className="notice-strip">{archiveError}</p>}
+    <table><thead><tr><th>Select</th><th>Date</th><th>Product</th><th>Location</th><th>Type</th><th>Change</th><th>Reason</th><th>Correction link</th><th>Reference</th><th>Evidence</th></tr></thead><tbody>{filteredMovements.map((m) => {
     const correctionLink = correctionLinks.get(m.id) ?? "—";
     const hasCorrection = correctionLink !== "—";
-    return <tr key={m.id}><td>{new Date(m.createdAt).toLocaleString(undefined, { timeZone: "Africa/Lusaka" })}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !hasCorrection && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
+    const hasEvidence = m.kind === "opening_stock" && m.evidenceFiles.length > 0;
+    return <tr key={m.id}><td>{hasEvidence && <input
+      type="checkbox"
+      aria-label={`Select count evidence for ${m.productName} ${m.createdAt.slice(0, 10)}`}
+      checked={selectedEvidenceIds.includes(m.id)}
+      onChange={() => setSelectedEvidenceIds((selected) => selected.includes(m.id)
+        ? selected.filter((id) => id !== m.id)
+        : [...selected, m.id])}
+    />}</td><td>{new Date(m.createdAt).toLocaleString(undefined, { timeZone: "Africa/Lusaka" })}</td><td>{m.productName} · {m.sku}</td><td>{m.locationName || "Main"}</td><td>{m.kind.replaceAll("_", " ")}</td><td>{m.quantityDelta > 0 ? "+" : ""}{m.quantityDelta}</td><td>{m.reason}</td><td>{correctionLink}{m.kind === "opening_stock" && !hasCorrection && <><br /><button type="button" className="button button-secondary button-small" onClick={() => onCorrect(m)}>Correct count</button></>}</td><td>{m.reference || "—"}</td><td>
       {m.evidenceFiles.length ? <>{m.evidenceFiles.map((file, index) => <span key={file.id ?? `legacy-${index}`}>{index > 0 && <br />}<a href={inventoryMovementEvidenceUrl(m.id, file.id)} target="_blank" rel="noreferrer">{file.fileName}</a>{" "}<a href={inventoryMovementEvidenceUrl(m.id, file.id, true)} aria-label={`Download ${file.fileName}`}>Download</a></span>)}{m.evidenceFiles.length > 1 && <><br /><a className="button button-secondary button-small" href={inventoryMovementEvidenceArchiveUrl(m.id)}>Download all files (.zip)</a></>}</> : "—"}
       {m.kind === "opening_stock" && m.evidenceFiles.length < 5 && <form className="inventory-evidence-append" onSubmit={(event) => onSubmit(event, async (data) => {
         const selected = data.get("additionalEvidence");
@@ -384,5 +439,5 @@ export function MovementTable({
         <small>Files are added permanently; the count and existing files stay unchanged. Up to {5 - m.evidenceFiles.length} more.</small>
       </form>}
       </td></tr>;
-  })}{!filteredMovements.length && <tr><td colSpan={9}>{invalidDateRange ? "Correct the date range to view movements." : filtersActive ? "No movements match these filters." : "No stock movements yet."}</td></tr>}</tbody></table></div>;
+  })}{!filteredMovements.length && <tr><td colSpan={10}>{invalidDateRange ? "Correct the date range to view movements." : filtersActive ? "No movements match these filters." : "No stock movements yet."}</td></tr>}</tbody></table></div>;
 }

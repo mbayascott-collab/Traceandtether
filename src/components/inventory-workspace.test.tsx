@@ -107,3 +107,33 @@ test("stock movement history and CSV include receipts and both sides of transfer
   assert.match(csv, /SHIP-41/);
   assert.match(csv, /MOVE-41/);
 });
+
+test("movement history offers count selection for bulk evidence downloads", () => {
+  const movement: InventoryMovement = {
+    id: 21,
+    productId: 41,
+    productName: "Counted item",
+    sku: "COUNT-41",
+    kind: "opening_stock",
+    quantityDelta: 2,
+    reason: "Initial count",
+    reference: null,
+    locationId: 1,
+    locationName: "Main warehouse",
+    salesDeliveryLineId: null,
+    correctionOfMovementId: null,
+    createdAt: "2026-11-19T10:00:00.000Z",
+    evidenceFiles: [{ id: null, fileName: "count.pdf", mimeType: "application/pdf" }],
+  };
+
+  const markup = renderToStaticMarkup(createElement(MovementTable, {
+    movements: [movement],
+    onCorrect: () => {},
+    onSubmit: async () => {},
+  }));
+
+  assert.match(markup, /Select all matching counts/);
+  assert.match(markup, /Download evidence for 0 counts/);
+  assert.match(markup, /Select count evidence for Counted item 2026-11-19/);
+  assert.match(markup, /archives are limited to 25 records and 50 MB/);
+});

@@ -592,6 +592,19 @@ export function inventoryMovementEvidenceUrl(movementId: number, evidenceId?: nu
 export function inventoryMovementEvidenceArchiveUrl(movementId: number): string {
   return `/api/inventory/movements/${movementId}/opening-evidence/archive`;
 }
+export async function fetchInventoryEvidenceArchive(movementIds: number[]): Promise<Blob> {
+  const response = await fetch("/api/inventory/opening-evidence/archive", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ movementIds }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new ApiError(body.error ?? "The count evidence archive could not be downloaded.", response.status);
+  }
+  return response.blob();
+}
 export async function fetchInventoryLocations(): Promise<InventoryLocation[]> {
   return (await request<{ locations: InventoryLocation[] }>("/api/inventory/locations")).locations;
 }
