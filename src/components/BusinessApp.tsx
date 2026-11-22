@@ -756,8 +756,8 @@ export default function BusinessApp({ userEmail, userRole, onSignOut }: Business
                             <td><StatusBadge status={product.status} /></td>
                             <td>
                               <div className="table-actions">
-                                <button className="icon-button" aria-label={`Edit ${product.name}`} title="Edit product" onClick={() => setProductDialog(product)}>
-                                  <Pencil aria-hidden="true" />
+                                <button type="button" className="button button-secondary button-small" aria-label={`Edit ${product.name}`} title="Edit product" onClick={() => setProductDialog(product)}>
+                                  <Pencil aria-hidden="true" /> Edit
                                 </button>
                                 <button
                                   className="icon-button"
