@@ -2,6 +2,7 @@ export type PublicShopProduct = {
   id: number;
   name: string;
   description: string | null;
+  imageUrl: string | null;
   unit: string;
   sellingPriceZmw: string;
 };

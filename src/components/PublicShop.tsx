@@ -8,6 +8,26 @@ import {
 type ShopProduct = PublicShopProduct;
 type Cart = Record<number, number>;
 
+function ShopProductArtwork({ product, index }: { product: ShopProduct; index: number }) {
+  const [imageFailed, setImageFailed] = useState(false);
+
+  return (
+    <div className={`shop-product-art art-${index % 4}`}>
+      {product.imageUrl && !imageFailed
+        ? <img
+            className="shop-product-photo"
+            src={product.imageUrl}
+            alt={product.name}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            onError={() => setImageFailed(true)}
+          />
+        : <span aria-hidden="true">T&amp;T</span>}
+    </div>
+  );
+}
+
 function money(value: string) {
   return `ZMW ${Number(value).toLocaleString("en-ZM", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -144,7 +164,7 @@ export default function PublicShop() {
           <div className="shop-product-grid">
             {products.map((product, index) => (
               <article className="shop-product-card" key={product.id}>
-                <div className={`shop-product-art art-${index % 4}`}><span>T&amp;T</span></div>
+                <ShopProductArtwork product={product} index={index} />
                 <div className="shop-product-info">
                   <span className="shop-stock">AVAILABLE</span>
                   <h3>{product.name}</h3>

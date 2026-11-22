@@ -2303,9 +2303,18 @@ textarea:focus-visible {
 
 .shop-product-art {
   display: grid;
+  position: relative;
   height: 178px;
   place-items: center;
   background: #e7eee5;
+}
+
+.shop-product-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .shop-product-art span {

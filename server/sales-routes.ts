@@ -382,6 +382,7 @@ export function registerSalesRoutes(
       id: products.id,
       name: products.name,
       description: products.description,
+      imageUrl: products.imageUrl,
       unit: products.unit,
       sellingPriceZmw: products.sellingPriceZmw,
     }).from(products).where(and(eq(products.status, "active"))).orderBy(asc(products.name));

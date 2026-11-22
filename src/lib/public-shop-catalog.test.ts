@@ -8,6 +8,7 @@ const product: PublicShopProduct = {
   id: 4,
   name: "Basket",
   description: null,
+  imageUrl: "https://images.example.test/basket.jpg",
   unit: "piece",
   sellingPriceZmw: "20.00",
 };

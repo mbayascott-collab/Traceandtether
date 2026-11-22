@@ -356,7 +356,7 @@ test("route mutations across business areas keep their audit history and actor",
       sku: `AUD-${safeSuffix}`,
       name: `Audit route product ${suffix}`,
       description: null,
-      imageUrl: null,
+      imageUrl: "https://images.example.test/audit-product.jpg",
       brand: `Audit brand ${suffix}`,
       categoryId: null,
       supplierName: null,
@@ -689,7 +689,9 @@ test("route mutations across business areas keep their audit history and actor",
     if (publicShopAvailable) {
       const shop = await request("/api/shop/products");
       assert.equal(shop.response.status, 200, JSON.stringify(shop.payload));
-      assert.ok(shop.payload.products.some((item: { id: number }) => item.id === productId));
+      assert.ok(shop.payload.products.some((item: { id: number; imageUrl: string | null }) =>
+        item.id === productId && item.imageUrl === productBody.imageUrl,
+      ), "the public shop catalog includes the saved product picture link");
       await new Promise((resolve) => setTimeout(resolve, 1_600));
       const publicOrder = await expectStatus("/api/shop/orders", {
         name: publicCustomerName,
