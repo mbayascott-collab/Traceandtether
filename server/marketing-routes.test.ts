@@ -9,7 +9,30 @@ import {
   marketingCampaignAudienceSnapshots, marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
+import { customerGroupContactsCsv } from "../shared/marketing-customer-groups";
 import { installCustomerGroupRefresh } from "../src/lib/customer-group-refresh";
+
+test("customer-group contact CSVs neutralize formulas and preserve CSV escaping", () => {
+  const csv = customerGroupContactsCsv([
+    {
+      name: '=HYPERLINK("https://example.test","Open"),\r\nSecond line',
+      email: "+SUM(1,2)",
+      phone: "-1+2",
+    },
+    {
+      name: "@SUM(A1:A2)",
+      email: null,
+      phone: "  =1+1",
+    },
+  ]);
+
+  assert.equal(csv, [
+    "\uFEFF\"Name\",\"Email\",\"Phone\"",
+    "\"'=HYPERLINK(\"\"https://example.test\"\",\"\"Open\"\"),\r\nSecond line\",\"'+SUM(1,2)\",\"'-1+2\"",
+    "\"'@SUM(A1:A2)\",\"\",\"'  =1+1\"",
+    "",
+  ].join("\r\n"));
+});
 
 test("open marketing workspaces refresh customer-group names and counts from current history", {
   skip: !process.env.DATABASE_URL,
