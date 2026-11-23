@@ -2140,6 +2140,7 @@ test("marketing report counts partial campaign deliveries once and matches poste
     const unallocatedReport = await request(
       "/api/marketing/reports?from=2025-02-03&to=2025-02-03",
     );
+    assert.equal(unallocatedReport.response.status, 200, JSON.stringify(unallocatedReport.payload));
     const unallocatedCampaignReport = unallocatedReport.payload.campaigns.find(
       (campaign: { id: number }) => campaign.id === unallocatedCampaign.id,
     );
@@ -2155,7 +2156,15 @@ test("marketing report counts partial campaign deliveries once and matches poste
       adjustmentZmw: "5.00",
       campaignNames: [unallocatedCampaign.name],
     });
-    assert.equal(unallocatedReport.payload.totals.unallocatedLandedCostAdjustmentZmw, "5.00");
+    assert.deepEqual({
+      productCostZmw: unallocatedReport.payload.totals.productCostZmw,
+      landedCostAdjustmentZmw: unallocatedReport.payload.totals.landedCostAdjustmentZmw,
+      unallocatedLandedCostAdjustmentZmw: unallocatedReport.payload.totals.unallocatedLandedCostAdjustmentZmw,
+    }, {
+      productCostZmw: "0.00",
+      landedCostAdjustmentZmw: "0.00",
+      unallocatedLandedCostAdjustmentZmw: "5.00",
+    });
     assert.equal(unallocatedReport.payload.totals.netContributionZmw, null);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
