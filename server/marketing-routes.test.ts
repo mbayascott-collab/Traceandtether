@@ -1052,6 +1052,14 @@ test("customer-group membership changes do not rewrite past campaign attribution
       source: marketingAttributions.source,
     }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, campaignOrder.id));
     assert.deepEqual(attributionBefore, { campaignId: campaign.id, source: "manual" });
+    const assertHistoryIsUnchanged = async () => {
+      assert.deepEqual(await getCampaignReport(), reportBeforeHistoryChange);
+      const [attributionAfter] = await db.select({
+        campaignId: marketingAttributions.campaignId,
+        source: marketingAttributions.source,
+      }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, campaignOrder.id));
+      assert.deepEqual(attributionAfter, attributionBefore);
+    };
 
     await db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, historyOrder.id));
 
@@ -1060,12 +1068,16 @@ test("customer-group membership changes do not rewrite past campaign attribution
     assert.equal(members.response.status, 200, JSON.stringify(members.payload));
     assert.equal(members.payload.members.length, memberCountBefore + 1);
     assert.ok(members.payload.members.some((member: { id: number }) => member.id === customer.id));
-    assert.deepEqual(await getCampaignReport(), reportBeforeHistoryChange);
-    const [attributionAfter] = await db.select({
-      campaignId: marketingAttributions.campaignId,
-      source: marketingAttributions.source,
-    }).from(marketingAttributions).where(eq(marketingAttributions.salesOrderId, campaignOrder.id));
-    assert.deepEqual(attributionAfter, attributionBefore);
+    await assertHistoryIsUnchanged();
+
+    await db.update(salesOrders).set({ status: "confirmed" }).where(eq(salesOrders.id, historyOrder.id));
+
+    assert.equal(await getAudienceCount(), audienceCountBefore);
+    const membersAfterLeaving = await request(`/api/marketing/customer-groups/${group.id}/members`);
+    assert.equal(membersAfterLeaving.response.status, 200, JSON.stringify(membersAfterLeaving.payload));
+    assert.equal(membersAfterLeaving.payload.members.length, memberCountBefore);
+    assert.equal(membersAfterLeaving.payload.members.some((member: { id: number }) => member.id === customer.id), false);
+    await assertHistoryIsUnchanged();
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (orderIds.length) await db.delete(marketingAttributions).where(inArray(marketingAttributions.salesOrderId, orderIds));
