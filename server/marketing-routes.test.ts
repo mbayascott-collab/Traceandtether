@@ -1927,22 +1927,60 @@ test("marketing report counts partial campaign deliveries once and matches poste
         jan10Campaign.landedCostAdjustmentZmw,
         jan10Campaign.netContributionZmw,
         jan10Campaign.attributedRevenueZmw,
+        jan10Campaign.landedCostAdjustmentDeliveries.map(
+          (delivery: { deliveryDate: string; deliveryNumber: string }) =>
+            [delivery.deliveryDate, delivery.deliveryNumber],
+        ),
       ],
       jan11: [
         jan11Campaign.productCostZmw,
         jan11Campaign.landedCostAdjustmentZmw,
         jan11Campaign.netContributionZmw,
         jan11Campaign.attributedRevenueZmw,
+        jan11Campaign.landedCostAdjustmentDeliveries.map(
+          (delivery: { deliveryDate: string; deliveryNumber: string }) =>
+            [delivery.deliveryDate, delivery.deliveryNumber],
+        ),
       ],
       combined: [
         fullRangeCampaign.productCostZmw,
         fullRangeCampaign.landedCostAdjustmentZmw,
         fullRangeCampaign.netContributionZmw,
+        fullRangeCampaign.attributedRevenueZmw,
+        fullRangeCampaign.landedCostAdjustmentDeliveries.map(
+          (delivery: { deliveryDate: string; deliveryNumber: string }) =>
+            [delivery.deliveryDate, delivery.deliveryNumber],
+        ),
       ],
     }, {
-      jan10: ["20.04", "6.04", "119.96", "140.00"],
-      jan11: ["42.95", "12.95", "57.05", "100.00"],
-      combined: ["62.99", "18.99", "177.01"],
+      jan10: [
+        "20.04",
+        "6.04",
+        "119.96",
+        "140.00",
+        [
+          ["2025-01-10", `MR-${suffix.slice(0, 12)}-C1`],
+          ["2025-01-10", `MR-${suffix.slice(0, 12)}-LR`],
+        ],
+      ],
+      jan11: [
+        "42.95",
+        "12.95",
+        "57.05",
+        "100.00",
+        [["2025-01-11", `MR-${suffix.slice(0, 12)}-C2`]],
+      ],
+      combined: [
+        "62.99",
+        "18.99",
+        "177.01",
+        "240.00",
+        [
+          ["2025-01-10", `MR-${suffix.slice(0, 12)}-C1`],
+          ["2025-01-10", `MR-${suffix.slice(0, 12)}-LR`],
+          ["2025-01-11", `MR-${suffix.slice(0, 12)}-C2`],
+        ],
+      ],
     });
     assert.equal(
       centsDelta(fullRangeAfterReversal.payload.totals.productCostZmw, fullRangeBeforeReversal.payload.totals.productCostZmw),
