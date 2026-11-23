@@ -365,15 +365,18 @@ export default function MarketingWorkspace() {
     if (!groupDeletionReview) return;
     const { group, campaigns } = groupDeletionReview;
     const replacementGroup = customerGroups.find((candidate) => String(candidate.id) === replacementGroupId);
+    const selectedReplacementGroupId = replacementGroupId ? Number(replacementGroupId) : null;
     setError(""); setMessage("");
     try {
       await request(`/api/marketing/customer-groups/${group.id}`, "DELETE", {
         campaignIds: campaigns.map((campaign) => campaign.id),
-        replacementGroupId: replacementGroup?.id ?? null,
+        replacementGroupId: selectedReplacementGroupId,
       });
       if (selectedCustomerGroup === group.id) { setSelectedCustomerGroup(null); setCustomerGroupMembers([]); }
       setMessage(replacementGroup
         ? `Customer group removed. ${campaigns.length} campaign${campaigns.length === 1 ? " was" : "s were"} moved to ${replacementGroup.name}.`
+        : selectedReplacementGroupId !== null
+          ? `Customer group removed. ${campaigns.length} campaign${campaigns.length === 1 ? " was" : "s were"} moved to the selected replacement group.`
         : campaigns.length
           ? `Customer group removed. Unlinked campaigns: ${campaigns.map((campaign) => campaign.name).join(", ")}.`
           : "Customer group removed.");

@@ -297,6 +297,17 @@ test("deleting a customer group can move linked campaigns to a replacement atomi
     });
     assert.equal(stale.response.status, 409);
     assert.equal((await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, oldGroup.id))).length, 1);
+    let [unchangedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(unchangedCampaign.customerGroupId, oldGroup.id, "stale review must not change campaign links");
+
+    const missingReplacement = await request(`/api/marketing/customer-groups/${oldGroup.id}`, "DELETE", {
+      campaignIds: [campaign.id],
+      replacementGroupId: 2147483647,
+    });
+    assert.equal(missingReplacement.response.status, 404);
+    assert.equal((await db.select().from(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, oldGroup.id))).length, 1);
+    [unchangedCampaign] = await db.select().from(marketingCampaigns).where(eq(marketingCampaigns.id, campaign.id));
+    assert.equal(unchangedCampaign.customerGroupId, oldGroup.id, "missing replacement must leave campaign links unchanged");
 
     const removed = await request(`/api/marketing/customer-groups/${oldGroup.id}`, "DELETE", {
       campaignIds: [campaign.id],
