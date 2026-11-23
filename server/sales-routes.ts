@@ -1225,7 +1225,10 @@ export function registerSalesRoutes(
     const result = await db.transaction(async (tx) => {
       const [quote] = await tx.select().from(customerQuotes).where(eq(customerQuotes.id, id)).for("update").limit(1);
       if (!quote) return { error: "Customer quote not found.", status: 404 };
-      if (quote.status !== "accepted" || quote.salesOrderId) return { error: "Mark this quote as accepted before converting it.", status: 409 };
+      if (quote.status === "converted" || quote.salesOrderId) {
+        return { error: "This quote has already been converted.", status: 409 };
+      }
+      if (quote.status !== "accepted") return { error: "Mark this quote as accepted before converting it.", status: 409 };
       const approvalTime = new Date();
       const expired = isCustomerQuoteExpired(quote.validUntil, approvalTime);
       if (requiresCustomerQuoteExpiryConfirmation(quote.validUntil, req.body?.confirmExpired, approvalTime)) {

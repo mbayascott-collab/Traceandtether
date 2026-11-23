@@ -157,14 +157,26 @@ test("customer quote conversion requires explicit confirmation only after expiry
 
     const repeated = await convert(expiredQuote.id, { confirmExpired: true });
     assert.equal(repeated.status, 409, JSON.stringify(repeated.payload));
+    assert.match(repeated.payload.error, /already been converted/i);
     const [savedExpiredQuote] = await db.select().from(customerQuotes)
       .where(eq(customerQuotes.id, expiredQuote.id));
+    assert.equal(savedExpiredQuote?.status, "converted");
     assert.equal(savedExpiredQuote?.salesOrderId, confirmed.payload.order.id);
+    const linkedDraftOrders = await db.select().from(salesOrders).where(and(
+      eq(salesOrders.id, savedExpiredQuote.salesOrderId!),
+      eq(salesOrders.customerId, customerId),
+      eq(salesOrders.status, "draft"),
+    ));
+    assert.equal(linkedDraftOrders.length, 1, "the converted quote must retain exactly one linked draft order");
+    assert.equal(linkedDraftOrders[0].id, confirmed.payload.order.id);
     const customerOrders = await db.select().from(salesOrders).where(eq(salesOrders.customerId, customerId));
     assert.equal(customerOrders.length, 2, "repeat conversion must not create a second order");
     const linkedOrderLines = await db.select().from(salesOrderLines)
       .where(eq(salesOrderLines.salesOrderId, confirmed.payload.order.id));
     assert.equal(linkedOrderLines.length, 1, "repeat conversion must not duplicate the draft order lines");
+    assert.equal(linkedOrderLines[0].productId, productId);
+    assert.equal(linkedOrderLines[0].quantity, 2);
+    assert.equal(linkedOrderLines[0].unitPriceZmw, "25.00");
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
