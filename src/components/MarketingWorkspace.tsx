@@ -460,7 +460,7 @@ export default function MarketingWorkspace() {
               <label>Campaign name<input required maxLength={180} value={campaignForm.name} onChange={(e) => setCampaignForm({ ...campaignForm, name: e.target.value })} /></label>
               <div className="form-grid"><label>Channel<input placeholder="Social, retail, email…" value={campaignForm.channel} onChange={(e) => setCampaignForm({ ...campaignForm, channel: e.target.value })} /></label><label>Status<select value={campaignForm.status} onChange={(e) => setCampaignForm({ ...campaignForm, status: e.target.value })}>{["draft","active","paused","completed","cancelled"].map((x) => <option key={x}>{x}</option>)}</select></label></div>
               <label>Objective<textarea rows={2} value={campaignForm.objective} onChange={(e) => setCampaignForm({ ...campaignForm, objective: e.target.value })} /></label>
-              <div className="form-grid"><label>Launch date<input type="date" value={campaignForm.startsOn} onChange={(e) => setCampaignForm({ ...campaignForm, startsOn: e.target.value })} /><span className="field-hint">Set the status to active and choose a future date to schedule link attribution.</span></label><label>Ends<input type="date" value={campaignForm.endsOn} onChange={(e) => setCampaignForm({ ...campaignForm, endsOn: e.target.value })} /></label></div>
+              <div className="form-grid"><label>Launch date<input type="date" value={campaignForm.startsOn} onChange={(e) => setCampaignForm({ ...campaignForm, startsOn: e.target.value })} /><span className="field-hint">Set the status to active and choose a future date to schedule link attribution.</span></label><label>End date (optional)<input type="date" value={campaignForm.endsOn} onChange={(e) => setCampaignForm({ ...campaignForm, endsOn: e.target.value })} /><span className="field-hint">Campaign links stop attributing new requests after this date. Earlier orders stay in reports.</span></label></div>
                 <CampaignCustomerGroupSelector
                   canManage={canManageCustomerGroups}
                   groups={customerGroups}
@@ -483,7 +483,7 @@ export default function MarketingWorkspace() {
                  return <article className="marketing-row" key={item.id}>
                    <div>
                      <strong>{item.name}</strong>
-                      <span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}<CampaignCustomerGroupSummary canManage={canManageCustomerGroups} group={group} audienceStatus={audienceStatus} />
+                      <span>{item.channel || "No channel"} · {item.status}{item.startsOn ? ` · Launch date ${item.startsOn}` : ""}{item.endsOn ? ` · Ends ${item.endsOn}` : ""}{item.budgetZmw ? ` · Budget ${money(item.budgetZmw)}` : ""} · Spent ${money(campaignSpendZmw(item.id, expenses))}<CampaignCustomerGroupSummary canManage={canManageCustomerGroups} group={group} audienceStatus={audienceStatus} />
                      </span>
                      <input className="campaign-share-input" aria-label={`Shareable shop link for ${item.name}`} readOnly value={shopLink(item)} onFocus={(event) => event.currentTarget.select()} />
                    </div>

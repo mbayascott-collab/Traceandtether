@@ -211,6 +211,7 @@ test("public shop campaign links attribute orders and reports count them without
   let secondCampaignId: number | undefined;
   let scheduledCampaignId: number | undefined;
   const orderNumbers: string[] = [];
+  const scheduledOrderNumbers: string[] = [];
 
   try {
     const [campaign] = await db.insert(marketingCampaigns).values({
@@ -388,6 +389,7 @@ test("public shop campaign links attribute orders and reports count them without
       trackingCode: scheduledTrackingCode,
       status: "active",
       startsOn: databaseDate.tomorrow,
+      endsOn: databaseDate.tomorrow,
     }).returning();
     scheduledCampaignId = scheduledCampaign.id;
     const getScheduledChallenge = async () => {
@@ -411,6 +413,7 @@ test("public shop campaign links attribute orders and reports count them without
     const launchDayOrderNumber = await submitOrder(
       6, scheduledTrackingCode, await getScheduledChallenge(), scheduledClientIp,
     );
+    scheduledOrderNumbers.push(launchDayOrderNumber);
     const [launchDayOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
       .where(eq(salesOrders.orderNumber, launchDayOrderNumber));
     const launchDayAttribution = await db.select().from(marketingAttributions)
@@ -418,6 +421,47 @@ test("public shop campaign links attribute orders and reports count them without
     assert.equal(launchDayAttribution.length, 1, "link attribution must become eligible on its start date");
     assert.equal(launchDayAttribution[0].campaignId, scheduledCampaign.id);
     assert.equal(launchDayAttribution[0].source, "campaign_link");
+
+    await db.update(marketingCampaigns).set({ endsOn: databaseDate.today })
+      .where(eq(marketingCampaigns.id, scheduledCampaign.id));
+    const endDateOrderNumber = await submitOrder(
+      7, scheduledTrackingCode, await getScheduledChallenge(), scheduledClientIp,
+    );
+    scheduledOrderNumbers.push(endDateOrderNumber);
+    const [endDateOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
+      .where(eq(salesOrders.orderNumber, endDateOrderNumber));
+    const endDateAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, endDateOrder.id));
+    assert.equal(endDateAttribution.length, 1, "links remain eligible through the campaign end date");
+
+    const [yesterday] = (await pool.query<{ yesterday: string }>(
+      "SELECT (CURRENT_DATE - 1)::text AS yesterday",
+    )).rows;
+    await db.update(marketingCampaigns).set({
+      startsOn: yesterday.yesterday,
+      endsOn: yesterday.yesterday,
+    })
+      .where(eq(marketingCampaigns.id, scheduledCampaign.id));
+    const afterEndOrderNumber = await submitOrder(
+      8, scheduledTrackingCode, await getScheduledChallenge(), scheduledClientIp,
+    );
+    scheduledOrderNumbers.push(afterEndOrderNumber);
+    const [afterEndOrder] = await db.select({ id: salesOrders.id }).from(salesOrders)
+      .where(eq(salesOrders.orderNumber, afterEndOrderNumber));
+    const afterEndAttribution = await db.select().from(marketingAttributions)
+      .where(eq(marketingAttributions.salesOrderId, afterEndOrder.id));
+    assert.equal(afterEndAttribution.length, 0, "links stop attributing requests after the campaign end date");
+
+    await db.update(salesOrders).set({ status: "fulfilled", orderDate: oldReportDate })
+      .where(eq(salesOrders.id, endDateOrder.id));
+    const endedCampaignReport = await request(`/api/marketing/reports?from=${oldReportDate}&to=${oldReportDate}`);
+    assert.equal(endedCampaignReport.response.status, 200);
+    const endedCampaignRow = endedCampaignReport.payload.campaigns.find(
+      (item: { id: number }) => item.id === scheduledCampaign.id,
+    );
+    assert.ok(endedCampaignRow);
+    assert.equal(endedCampaignRow.orderCount, 1, "orders attributed before campaign end remain in reports");
+    assert.equal(endedCampaignRow.attributedRevenueZmw, "100.00");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const client = await pool.connect();
@@ -429,17 +473,18 @@ test("public shop campaign links attribute orders and reports count them without
       if (auditTable.rows[0]?.exists) {
         await client.query("DELETE FROM business_audit_logs WHERE actor_email = $1", [actorEmail]);
       }
-      if (orderNumbers.length) {
+      if (orderNumbers.length || scheduledOrderNumbers.length) {
+        const allOrderNumbers = [...orderNumbers, ...scheduledOrderNumbers];
         await client.query(
           "DELETE FROM sales_order_lines WHERE sales_order_id IN (SELECT id FROM sales_orders WHERE order_number = ANY($1))",
-          [orderNumbers],
+          [allOrderNumbers],
         );
         await client.query(`
           WITH deleted AS (
             DELETE FROM sales_orders WHERE order_number = ANY($1) RETURNING customer_id
           )
           DELETE FROM customers WHERE id IN (SELECT customer_id FROM deleted)
-        `, [orderNumbers]);
+        `, [allOrderNumbers]);
       }
       if (productId) {
         await client.query("DELETE FROM inventory_movements WHERE product_id = $1", [productId]);
