@@ -134,6 +134,27 @@ test("allocates negative landed-cost reversals deterministically without losing 
       .reduce((total, value) => total + value, 0n),
     -5n,
   );
+
+  const tiedRemainders = allocateLandedCostAdjustments(
+    [
+      { deliveryId: 12, orderId: 3, productId: 4 },
+      { deliveryId: 10, orderId: 1, productId: 4 },
+      { deliveryId: 11, orderId: 2, productId: 4 },
+    ],
+    [
+      { deliveryId: 12, productId: 4, debitZmw: "1.00" },
+      { deliveryId: 10, productId: 4, debitZmw: "1.00" },
+      { deliveryId: 11, productId: 4, debitZmw: "1.00" },
+    ],
+    [{ productId: 4, debitZmw: "0.00", creditZmw: "0.02" }],
+  );
+  assert.deepEqual([...tiedRemainders.adjustmentByDelivery].sort(([a], [b]) => a - b), [
+    [10, -1n], [11, -1n], [12, 0n],
+  ]);
+  assert.equal(
+    [...tiedRemainders.adjustmentByDelivery.values()].reduce((total, value) => total + value, 0n),
+    -2n,
+  );
 });
 
 test("does not invent a delivery allocation when product COGS has no delivery-cost basis", () => {
