@@ -669,19 +669,23 @@ test("customer-group CSV downloads are limited to owners", {
     assert.ok(ownerDownload.body.includes(customerName));
     assert.ok(ownerDownload.body.includes(contactEmail));
     assert.ok(ownerDownload.body.includes(contactPhone));
+    const repeatedOwnerDownload = await download(ownerUserId);
+    assert.equal(repeatedOwnerDownload.response.status, 200, repeatedOwnerDownload.body);
     const successfulExports = await db.select().from(businessAuditLogs).where(and(
       eq(businessAuditLogs.entityType, "marketing_customer_group"),
       eq(businessAuditLogs.entityId, group.id),
       eq(businessAuditLogs.actorEmail, ownerEmail),
       eq(businessAuditLogs.action, "exported"),
     ));
-    assert.equal(successfulExports.length, 1);
-    assert.equal(successfulExports[0]?.recordLabel, groupName);
-    assert.equal(successfulExports[0]?.actorClerkUserId, ownerUserId);
-    assert.ok(successfulExports[0]?.createdAt);
-    const auditText = JSON.stringify(successfulExports[0]);
-    for (const contact of [customerName, contactEmail, contactPhone]) {
-      assert.equal(auditText.includes(contact), false, "audit records must not copy customer contact details");
+    assert.equal(successfulExports.length, 2, "each successful CSV download must create its own audit event");
+    for (const audit of successfulExports) {
+      assert.equal(audit.recordLabel, groupName);
+      assert.equal(audit.actorClerkUserId, ownerUserId);
+      assert.ok(audit.createdAt);
+      const auditText = JSON.stringify(audit);
+      for (const contact of [customerName, contactEmail, contactPhone]) {
+        assert.equal(auditText.includes(contact), false, "audit records must not copy customer contact details");
+      }
     }
 
     const managerDownload = await download(managerUserId);
@@ -706,7 +710,7 @@ test("customer-group CSV downloads are limited to owners", {
       eq(businessAuditLogs.actorEmail, ownerEmail),
       eq(businessAuditLogs.action, "exported"),
     ));
-    assert.equal(exportsAfterDeniedRequests.length, 1);
+    assert.equal(exportsAfterDeniedRequests.length, 2);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (groupId) {
