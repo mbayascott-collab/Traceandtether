@@ -24,12 +24,13 @@ test("customer quote conversion requires explicit confirmation only after expiry
     return;
   }
   const suffix = randomUUID();
+  const ownerClerkUserId = `test-${suffix}-owner`;
   const actorEmail = `customer-quote-expiry-${suffix}@example.test`;
   const app = express();
   app.use(express.json());
   const owner: RequestHandler = (req, res, next) => {
     const role = req.get("x-test-role") === "manager" ? "manager" : "owner";
-    res.locals.actor = { clerkUserId: `test-${suffix}-${role}`, email: actorEmail, role };
+    res.locals.actor = { clerkUserId: role === "owner" ? ownerClerkUserId : `test-${suffix}-${role}`, email: actorEmail, role };
     next();
   };
   registerSalesRoutes(app, owner);
@@ -133,6 +134,8 @@ test("customer quote conversion requires explicit confirmation only after expiry
     ));
     const expiredApproval = expiredApprovalRows.find((entry) => entry.action === "approved");
     assert.ok(expiredApproval, "expired quote conversion must create an approval audit entry");
+    assert.equal(expiredApproval.recordLabel, expiredQuote.quoteNumber);
+    assert.equal(expiredApproval.actorClerkUserId, ownerClerkUserId);
     assert.equal(expiredApproval.actorEmail, actorEmail);
     assert.ok(expiredApproval.changedFields.includes("Expired quote prices"));
     assert.ok(expiredApproval.changedFields.includes("Quote expiry date: 2000-01-01"));
