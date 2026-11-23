@@ -114,6 +114,30 @@ async function chromiumPageValue(url: string, expression: string): Promise<{ val
   }
 }
 
+function pdfWordBounds(pdfPath: string) {
+  const xml = execFileSync("pdftotext", ["-bbox", pdfPath, "-"], { encoding: "utf8" });
+  return Array.from(xml.matchAll(/<page\b([^>]*)>([\s\S]*?)<\/page>/g), (pageMatch, pageIndex) => {
+    const pageAttributes = Object.fromEntries(Array.from(pageMatch[1]!.matchAll(/([\w]+)="([^"]*)"/g), (match) => [match[1]!, match[2]!]));
+    const words = Array.from(pageMatch[2]!.matchAll(/<word\b([^>]*)>([\s\S]*?)<\/word>/g), (wordMatch) => {
+      const attributes = Object.fromEntries(Array.from(wordMatch[1]!.matchAll(/([\w]+)="([^"]*)"/g), (match) => [match[1]!, match[2]!]));
+      const text = wordMatch[2]!
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&apos;/g, "'");
+      return {
+        text,
+        xMin: Number(attributes.xMin),
+        yMin: Number(attributes.yMin),
+        xMax: Number(attributes.xMax),
+        yMax: Number(attributes.yMax),
+      };
+    });
+    return { width: Number(pageAttributes.width), height: Number(pageAttributes.height), words, pageIndex };
+  });
+}
+
 function fixtureQuote(): CustomerQuote {
   const lines = Array.from({ length: rowCount }, (_, index) => {
     const n = String(index + 1).padStart(3, "0");
@@ -354,18 +378,59 @@ test("long quote names, addresses, and notes remain visible in the generated PDF
     ], { stdio: "pipe", timeout: 60_000 });
     execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
 
+    const pdfInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    assert.match(pdfInfo, /^Page size:.*\(A4\)$/m, "Long quote PDF must use A4 pages.");
     const extracted = readFileSync(textPath, "utf8");
     const compact = extracted.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    const countLetter = (letter: string) => (extracted.match(new RegExp(letter, "gi")) ?? []).length;
-    assert.ok(compact.includes("longproduct"), "PDF should retain the long product name marker.");
-    assert.ok(countLetter("a") >= 110, "PDF should retain every repeated character in the long product name.");
-    assert.ok(compact.includes("longsku"), "PDF should retain the long SKU marker.");
-    assert.ok(countLetter("b") >= 90, "PDF should retain every repeated character in the long SKU.");
-    assert.ok(compact.includes("longaddress"), "PDF should retain the long address marker.");
-    assert.ok(countLetter("c") >= 120, "PDF should retain every repeated character in the long delivery address.");
-    assert.ok(compact.includes("longnotestart") && compact.includes("longnoteend"), "PDF should retain both ends of the long note.");
+    for (const marker of ["LONG-PRODUCT", "LONG-SKU", "LONG-ADDRESS", "LONG-NOTE-START", "LONG-NOTE-END"]) {
+      assert.ok(compact.includes(marker.replace(/[^a-z0-9]/gi, "").toLowerCase()), `PDF should retain the ${marker} marker.`);
+    }
+    assert.equal((extracted.match(/customer\s+request\s+detail/gi) ?? []).length, 240, "PDF should retain all repeated note details.");
+
+    const pagesWithBounds = pdfWordBounds(pdfPath);
+    const findWord = (text: string) => pagesWithBounds.flatMap((page) => page.words
+      .filter((word) => word.text.toLocaleLowerCase() === text.toLocaleLowerCase())
+      .map((word) => ({ ...word, page })));
+    const productMarker = findWord("LONG-PRODUCT-")[0];
+    const skuMarker = findWord("LONG-SKU-")[0];
+    const addressMarker = findWord("LONG-ADDRESS-")[0];
+    const noteEnd = findWord("LONG-NOTE-END")[0];
+    const approval = findWord("approval")[0];
+    assert.ok(productMarker && skuMarker && addressMarker && noteEnd && approval, "PDF should expose bounds for every long value and the approval section.");
+
+    const textFragmentsNear = (
+      page: typeof pagesWithBounds[number],
+      marker: NonNullable<typeof productMarker>,
+      pattern: RegExp,
+      maxY: number,
+    ) => page.words.filter((word) => pattern.test(word.text) && word.yMin >= marker.yMin && word.yMax <= marker.yMin + maxY);
+    const productFragments = textFragmentsNear(productMarker.page, productMarker, /^(?:LONG-PRODUCT-|A+)$/i, 80);
+    const skuFragments = textFragmentsNear(skuMarker.page, skuMarker, /^(?:LONG-SKU-|B+)$/i, 90);
+    const addressFragments = textFragmentsNear(addressMarker.page, addressMarker, /^(?:LONG-ADDRESS-|C+)$/i, 60);
+    const skuHeading = productMarker.page.words.find((word) => word.text.toLocaleLowerCase() === "sku");
+    const quantityHeading = skuMarker.page.words.find((word) => word.text.toLocaleLowerCase() === "qty");
+    assert.ok(productFragments.length > 1 && skuFragments.length > 1 && addressFragments.length > 1, "Long values should wrap into visible lines.");
+    assert.ok(skuHeading && quantityHeading, "Table column headings should be present for the wrapped values.");
+    assert.equal(productFragments.filter((word) => /^A+$/i.test(word.text)).reduce((length, word) => length + word.text.length, 0), 110, "PDF should retain all 110 characters of the long product name.");
+    assert.equal(skuFragments.filter((word) => /^B+$/i.test(word.text)).reduce((length, word) => length + word.text.length, 0), 90, "PDF should retain all 90 characters of the long SKU.");
+    assert.equal(addressFragments.filter((word) => /^C+$/i.test(word.text)).reduce((length, word) => length + word.text.length, 0), 120, "PDF should retain all 120 characters of the long delivery address.");
+    assert.ok(
+      Math.max(...productFragments.map((word) => word.xMax)) <= skuHeading.xMin,
+      "Wrapped product name must stay within its column, before the SKU column.",
+    );
+    assert.ok(
+      Math.max(...skuFragments.map((word) => word.xMax)) <= quantityHeading.xMin,
+      "Wrapped SKU must stay within its column, before the quantity column.",
+    );
+    assert.ok(
+      Math.max(...addressFragments.map((word) => word.xMax)) <= addressMarker.page.width - 42,
+      "Wrapped delivery address must stay within the page's right margin.",
+    );
+
     const pages = extracted.split("\f").map((page) => page.trim()).filter(Boolean);
     assert.ok(pages.length > 1, "Long quote notes should flow onto additional PDF pages.");
+    assert.equal(noteEnd.page.pageIndex, approval.page.pageIndex, "The end of the long notes and approval should appear on the same final page.");
+    assert.ok(noteEnd.yMax < approval.yMin, "The approval section must start after, not overlap, the final line of notes.");
     const finalPage = pages.at(-1)!.replace(/\s+/g, " ").toLowerCase();
     for (const requiredText of ["Total (ZMW)", "Customer approval", "Name and signature", "Date"]) {
       assert.ok(finalPage.includes(requiredText.toLowerCase()), `Final page should keep ${requiredText} with the quote total.`);
