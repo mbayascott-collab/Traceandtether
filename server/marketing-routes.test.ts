@@ -748,7 +748,7 @@ test("customer-group CSV downloads are limited to owners", {
   }
 });
 
-test("customer-group CSV exports reflect recent-order history after delivery-date edits", {
+test("customer-group CSV exports refresh membership after order and delivered-sales edits", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const [{ db }, { registerMarketingRoutes }] = await Promise.all([
