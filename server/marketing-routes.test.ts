@@ -748,7 +748,7 @@ test("customer-group CSV downloads are limited to owners", {
   }
 });
 
-test("customer-group CSV exports reflect updated rules and delivered customer history", {
+test("customer-group CSV exports reflect recent-order history after delivery-date edits", {
   skip: !process.env.DATABASE_URL,
 }, async () => {
   const [{ db }, { registerMarketingRoutes }] = await Promise.all([
@@ -826,7 +826,7 @@ test("customer-group CSV exports reflect updated rules and delivered customer hi
     productId = product.id;
     const [group] = await db.insert(marketingCustomerGroups).values({
       name: `${prefix} group`,
-      rules: { minimumFulfilledOrders: 2 },
+      rules: { minimumFulfilledOrders: 2, noOrderInLastDays: 30 },
     }).returning();
     groupId = group.id;
 
