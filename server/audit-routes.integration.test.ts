@@ -6,7 +6,7 @@ import { and, eq, inArray, isNull, like } from "drizzle-orm";
 import { after, test } from "node:test";
 import {
   appUserAccess, businessAuditLogs, businessExpenses, businessPayments, customers, inventoryLocations, inventoryMovements,
-  journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
+  customerQuoteLines, customerQuotes, journalEntries, journalLines, marketingCampaigns, marketingCustomerGroups, paymentStatementLines,
   purchaseOrderLines, purchaseOrders, salesOrderLines, salesOrders, shipmentLines,
 } from "../shared/schema";
 
@@ -149,6 +149,8 @@ test("route mutations across business areas keep their audit history and actor",
   let productId: number | undefined;
   let supplierId: number | undefined;
   let customerId: number | undefined;
+  let convertedQuoteId: number | undefined;
+  let convertedQuoteOrderId: number | undefined;
   let locationId: number | undefined;
   let salesOrderId: number | undefined;
   let purchaseOrderId: number | undefined;
@@ -480,6 +482,47 @@ test("route mutations across business areas keep their audit history and actor",
         sourceKey: `audit-route-main-stock-${suffix}`,
       });
     }
+
+    // An optional confirmation on a current quote must not be recorded as expired-price approval.
+    const [currentQuote] = await db.insert(customerQuotes).values({
+      quoteNumber: `CQ-${safeSuffix.slice(0, 30)}`,
+      customerId,
+      status: "accepted",
+      validUntil: "2999-12-31",
+    }).returning();
+    convertedQuoteId = currentQuote.id;
+    await db.insert(customerQuoteLines).values({
+      customerQuoteId: currentQuote.id,
+      productId,
+      quantity: 1,
+      unitPriceZmw: "50.00",
+    });
+    const conversion = await expectStatus(
+      `/api/customer-quotes/${currentQuote.id}/convert`,
+      { confirmExpired: true },
+      "POST",
+      200,
+    );
+    convertedQuoteOrderId = conversion.order.id as number;
+    assert.equal(conversion.quote.status, "converted");
+    await expectAudit("customer_quote", currentQuote.id, "updated", actorId, actorEmail, ["status", "salesOrderId"]);
+    await expectAudit(
+      "sales_order",
+      convertedQuoteOrderId,
+      "created",
+      actorId,
+      actorEmail,
+      ["customerId", "deliveryAddress", "notes", "status", "lines"],
+    );
+    const quoteConversionHistory = await db.select().from(businessAuditLogs).where(and(
+      eq(businessAuditLogs.entityType, "customer_quote"),
+      eq(businessAuditLogs.entityId, currentQuote.id),
+    ));
+    assert.equal(
+      quoteConversionHistory.some((entry) => entry.action === "approved"),
+      false,
+      "an unexpired quote converted with confirmExpired must not create an expired-price approval",
+    );
 
     // Sales: create and delete a draft order through the HTTP routes.
     const sales = await expectStatus("/api/sales-orders", {
@@ -945,6 +988,18 @@ test("route mutations across business areas keep their audit history and actor",
       if (purchaseOrderId) {
         await client.query("DELETE FROM purchase_order_lines WHERE purchase_order_id = $1", [purchaseOrderId]);
         await client.query("DELETE FROM purchase_orders WHERE id = $1", [purchaseOrderId]);
+      }
+      if (convertedQuoteId) {
+        await client.query(
+          "UPDATE customer_quotes SET status = 'accepted', sales_order_id = NULL WHERE id = $1",
+          [convertedQuoteId],
+        );
+        await client.query("DELETE FROM customer_quote_lines WHERE customer_quote_id = $1", [convertedQuoteId]);
+        await client.query("DELETE FROM customer_quotes WHERE id = $1", [convertedQuoteId]);
+      }
+      if (convertedQuoteOrderId) {
+        await client.query("DELETE FROM sales_order_lines WHERE sales_order_id = $1", [convertedQuoteOrderId]);
+        await client.query("DELETE FROM sales_orders WHERE id = $1", [convertedQuoteOrderId]);
       }
       if (productId) {
         await client.query(`
