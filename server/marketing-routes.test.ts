@@ -9,6 +9,167 @@ import {
   marketingCampaignAudienceSnapshots, marketingCampaigns, marketingCustomerGroups, marketingExpenses, products, salesDeliveries, salesDeliveryLines,
   salesOrderLines, salesOrders,
 } from "../shared/schema";
+import { installCustomerGroupRefresh } from "../src/lib/customer-group-refresh";
+
+test("open marketing workspaces refresh customer-group names and counts from current history", {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
+  const [{ db }, { registerMarketingRoutes }] = await Promise.all([
+    import("./db"),
+    import("./marketing-routes"),
+  ]);
+  const suffix = randomUUID();
+  const prefix = `audience-refresh-${suffix}`;
+  const actorEmail = `${prefix}@example.test`;
+  const app = express();
+  app.use(express.json());
+  const owner: RequestHandler = (_req, res, next) => {
+    res.locals.actor = { clerkUserId: `test-${suffix}`, email: actorEmail, role: "owner" };
+    next();
+  };
+  registerMarketingRoutes(app, owner);
+
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const audiences = new Map<string, Set<() => void>>();
+  const eventSource = {
+    addEventListener(event: string, listener: () => void) {
+      const listeners = audiences.get(event) ?? new Set();
+      listeners.add(listener);
+      audiences.set(event, listeners);
+    },
+    removeEventListener(event: string, listener: () => void) {
+      audiences.get(event)?.delete(listener);
+    },
+    emit(event: string) {
+      for (const listener of audiences.get(event) ?? []) listener();
+    },
+  };
+  const window = eventSource;
+  const document = Object.assign(eventSource, { visibilityState: "visible" });
+  let timerRefresh: (() => void) | undefined;
+  let settleRefresh: (() => void) | undefined;
+  let displayedGroups: { id: number; name: string; memberCount: number }[] = [];
+  const refreshComplete = () => new Promise<void>((resolve) => { settleRefresh = resolve; });
+  const cleanupRefresh = installCustomerGroupRefresh({
+    selectedGroupId: null,
+    requestGroups: async () => {
+      const response = await fetch(`${baseUrl}/api/marketing/customer-groups`);
+      const payload = await response.json() as {
+        groups: { id: number; name: string; memberCount: number }[];
+        canManage: boolean;
+        canViewMembers: boolean;
+      };
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      return payload;
+    },
+    applyGroups: (access) => {
+      displayedGroups = access.groups;
+      return true;
+    },
+    requestMembers: async () => ({ members: [] }),
+    applyMembers: () => {},
+    clearAccess: () => { displayedGroups = []; },
+    setError: () => { settleRefresh?.(); settleRefresh = undefined; },
+    displayError: String,
+  }, {
+    window,
+    document,
+    setInterval: (callback, delay) => {
+      assert.equal(delay, 30_000);
+      timerRefresh = callback;
+      return "audience-refresh";
+    },
+    clearInterval: () => {},
+  });
+  const refreshFromTimer = async () => {
+    const complete = refreshComplete();
+    timerRefresh?.();
+    await complete;
+  };
+  const refreshOnReturn = async () => {
+    const complete = refreshComplete();
+    document.visibilityState = "visible";
+    document.emit("visibilitychange");
+    await complete;
+  };
+  let groupId: number | undefined;
+  let productId: number | undefined;
+  const customerIds: number[] = [];
+  const orderIds: number[] = [];
+  const orderLineIds: number[] = [];
+
+  try {
+    const insertedCustomers = await db.insert(customers).values([0, 1, 2].map((index) => ({
+      name: `${prefix} customer ${index}`,
+      email: `${prefix}-${index}@example.test`,
+      phone: `+260-${suffix.slice(index * 8, index * 8 + 8)}`,
+    }))).returning();
+    customerIds.push(...insertedCustomers.map((customer) => customer.id));
+    const [product] = await db.insert(products).values({
+      sku: `AR-${suffix}`,
+      name: `${prefix} product`,
+      sellingPriceZmw: "100.00",
+      status: "active",
+    }).returning();
+    productId = product.id;
+    const [group] = await db.insert(marketingCustomerGroups).values({
+      name: `${prefix} original audience`,
+      rules: { minimumFulfilledOrders: 1 },
+    }).returning();
+    groupId = group.id;
+    const orders = await db.insert(salesOrders).values(insertedCustomers.map((customer, index) => ({
+      orderNumber: `AR-${suffix.slice(0, 18)}-${index}`,
+      customerId: customer.id,
+      status: (index === 0 ? "fulfilled" : "confirmed") as "fulfilled" | "confirmed",
+      orderDate: "2026-01-01",
+    }))).returning();
+    orderIds.push(...orders.map((order) => order.id));
+    const lines = await db.insert(salesOrderLines).values(orders.map((order) => ({
+      salesOrderId: order.id,
+      productId: product.id,
+      quantity: 1,
+      unitPriceZmw: "100.00",
+    }))).returning();
+    orderLineIds.push(...lines.map((line) => line.id));
+
+    await refreshFromTimer();
+    const currentAudience = () => displayedGroups.find((item) => item.id === group.id);
+    const initialCount = currentAudience()?.memberCount;
+    assert.ok(initialCount !== undefined && initialCount >= 1);
+    assert.equal(currentAudience()?.name, `${prefix} original audience`);
+
+    await db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, orders[1]!.id));
+    await refreshFromTimer();
+    assert.equal(currentAudience()?.memberCount, initialCount + 1, "an open workspace's timer fetches the updated audience count");
+    assert.equal(currentAudience()?.name, `${prefix} original audience`);
+
+    document.visibilityState = "hidden";
+    const renamed = `${prefix} renamed audience`;
+    const renameResponse = await fetch(`${baseUrl}/api/marketing/customer-groups/${group.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: renamed, rules: { minimumFulfilledOrders: 1 } }),
+    });
+    assert.equal(renameResponse.status, 200, await renameResponse.text());
+    await db.update(salesOrders).set({ status: "fulfilled" }).where(eq(salesOrders.id, orders[2]!.id));
+    await refreshOnReturn();
+    assert.equal(currentAudience()?.name, renamed, "returning to the workspace fetches the latest group name");
+    assert.equal(currentAudience()?.memberCount, initialCount + 2, "returning to the workspace fetches the latest count");
+  } finally {
+    cleanupRefresh();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (orderLineIds.length) await db.delete(salesOrderLines).where(inArray(salesOrderLines.id, orderLineIds));
+    if (orderIds.length) await db.delete(salesOrders).where(inArray(salesOrders.id, orderIds));
+    if (groupId) await db.delete(marketingCustomerGroups).where(eq(marketingCustomerGroups.id, groupId));
+    await db.delete(businessAuditLogs).where(eq(businessAuditLogs.actorEmail, actorEmail));
+    if (productId) await db.delete(products).where(eq(products.id, productId));
+    if (customerIds.length) await db.delete(customers).where(inArray(customers.id, customerIds));
+  }
+});
 
 test("campaign link replacement is owner-only while managers retain ordinary campaign access", {
   skip: !process.env.DATABASE_URL,
