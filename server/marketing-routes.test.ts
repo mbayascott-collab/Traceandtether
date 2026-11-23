@@ -2391,7 +2391,11 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       journalEntryIds.push(entry.id);
     }
 
+    const baselineFirstPeriod = await requestReport(reportDate, reportDate);
+    const baselineSecondPeriod = await requestReport(nextReportDate, nextReportDate);
     const baseline = await requestReport();
+    assert.equal(baselineFirstPeriod.response.status, 200, JSON.stringify(baselineFirstPeriod.payload));
+    assert.equal(baselineSecondPeriod.response.status, 200, JSON.stringify(baselineSecondPeriod.payload));
     assert.equal(baseline.response.status, 200, JSON.stringify(baseline.payload));
     const baselineCampaign = baseline.payload.campaigns.find((item: { id: number }) => item.id === campaign.id);
     assert.ok(baselineCampaign);
@@ -2401,6 +2405,18 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     assert.equal(baseline.payload.totals.landedCostAdjustmentZmw, "0.00");
     assert.equal(baseline.payload.totals.netContributionZmw, "360.00");
 
+    const correction = await db.transaction((tx) => postJournal(tx, {
+      sourceKey: `${prefix}-landed-cost-correction`,
+      sourceType: "landed_cost_adjustment",
+      sourceId: product.id,
+      memo: `${prefix} landed-cost correction`,
+      entryDate: nextReportDate,
+      lines: [
+        { accountKey: "cost_of_goods_sold", productId: product.id, debitZmw: "0.05" },
+        { accountKey: "inventory", productId: product.id, creditZmw: "0.05" },
+      ],
+    }));
+    journalEntryIds.push(correction.id);
     const reversal = await db.transaction((tx) => postJournal(tx, {
       sourceKey: `${prefix}-landed-cost-reversal`,
       sourceType: "landed_cost_adjustment",
@@ -2408,20 +2424,20 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       memo: `${prefix} landed-cost reversal`,
       entryDate: nextReportDate,
       lines: [
-        { accountKey: "inventory", productId: product.id, debitZmw: "0.07" },
-        { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.07" },
+        { accountKey: "inventory", productId: product.id, debitZmw: "0.12" },
+        { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.12" },
       ],
     }));
     journalEntryIds.push(reversal.id);
-    const readReversalJournal = () => db.select({
+    const readAdjustmentJournals = () => db.select({
       systemKey: accountingAccounts.systemKey,
       debitZmw: journalLines.debitZmw,
       creditZmw: journalLines.creditZmw,
     }).from(journalLines)
       .innerJoin(journalEntries, eq(journalLines.journalEntryId, journalEntries.id))
       .innerJoin(accountingAccounts, eq(journalLines.accountId, accountingAccounts.id))
-      .where(eq(journalEntries.id, reversal.id));
-    const sourceJournal = await readReversalJournal();
+      .where(inArray(journalEntries.id, [correction.id, reversal.id]));
+    const sourceJournal = await readAdjustmentJournals();
     const firstPeriod = await requestReport(reportDate, reportDate);
     const secondPeriod = await requestReport(nextReportDate, nextReportDate);
     const report = await requestReport();
@@ -2442,6 +2458,22 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     assert.equal(report.payload.totals.productCostZmw, "39.93");
     assert.equal(report.payload.totals.landedCostAdjustmentZmw, "-0.07");
     assert.equal(report.payload.totals.netContributionZmw, "360.07");
+    assert.deepEqual(
+      firstPeriodCampaign.landedCostAdjustmentDeliveries.map((delivery: {
+        deliveryDate: string;
+        adjustmentZmw: string;
+        products: { productId: number; adjustmentZmw: string }[];
+      }) => [delivery.deliveryDate, delivery.adjustmentZmw, delivery.products.map((item) => [item.productId, item.adjustmentZmw])]),
+      [[reportDate, "-0.02", [[product.id, "-0.02"]]]],
+    );
+    assert.deepEqual(
+      secondPeriodCampaign.landedCostAdjustmentDeliveries.map((delivery: {
+        deliveryDate: string;
+        adjustmentZmw: string;
+        products: { productId: number; adjustmentZmw: string }[];
+      }) => [delivery.deliveryDate, delivery.adjustmentZmw, delivery.products.map((item) => [item.productId, item.adjustmentZmw])]),
+      [[nextReportDate, "-0.05", [[product.id, "-0.05"]]]],
+    );
     assert.deepEqual(
       campaignReport.landedCostAdjustmentDeliveries.map((delivery: {
         deliveryNumber: string;
@@ -2474,6 +2506,26 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       firstPeriod: ["100.00", "9.98", "-0.02", "90.02"],
       secondPeriod: ["300.00", "29.95", "-0.05", "270.05"],
     });
+    for (const [period, baselinePeriod, adjustment] of [
+      [firstPeriod, baselineFirstPeriod, "-0.02"],
+      [secondPeriod, baselineSecondPeriod, "-0.05"],
+    ] as const) {
+      assert.equal(
+        BigInt(period.payload.totals.landedCostAdjustmentZmw.replace(".", ""))
+          - BigInt(baselinePeriod.payload.totals.landedCostAdjustmentZmw.replace(".", "")),
+        BigInt(adjustment.replace(".", "")),
+      );
+      assert.equal(
+        BigInt(period.payload.totals.productCostZmw.replace(".", ""))
+          - BigInt(baselinePeriod.payload.totals.productCostZmw.replace(".", "")),
+        BigInt(adjustment.replace(".", "")),
+      );
+      assert.equal(
+        BigInt(period.payload.totals.netContributionZmw.replace(".", ""))
+          - BigInt(baselinePeriod.payload.totals.netContributionZmw.replace(".", "")),
+        -BigInt(adjustment.replace(".", "")),
+      );
+    }
     for (const field of ["attributedRevenueZmw", "productCostZmw", "landedCostAdjustmentZmw", "netContributionZmw"] as const) {
       assert.equal(
         BigInt(firstPeriodCampaign[field].replace(".", ""))
@@ -2511,7 +2563,7 @@ test("campaign reports show negative delivery shares for reversed landed costs",
         - BigInt(baseline.payload.totals.netContributionZmw.replace(".", "")),
       -allocatedCents,
     );
-    assert.deepEqual(await readReversalJournal(), sourceJournal);
+    assert.deepEqual(await readAdjustmentJournals(), sourceJournal);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (orderId) await db.delete(marketingAttributions).where(eq(marketingAttributions.salesOrderId, orderId));
