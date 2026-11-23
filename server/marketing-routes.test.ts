@@ -2361,8 +2361,8 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       memo: `${prefix} landed-cost reversal`,
       entryDate: nextReportDate,
       lines: [
-        { accountKey: "inventory", productId: product.id, debitZmw: "0.05" },
-        { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.05" },
+        { accountKey: "inventory", productId: product.id, debitZmw: "0.07" },
+        { accountKey: "cost_of_goods_sold", productId: product.id, creditZmw: "0.07" },
       ],
     }));
     journalEntryIds.push(reversal.id);
@@ -2389,12 +2389,12 @@ test("campaign reports show negative delivery shares for reversed landed costs",
     assert.ok(secondPeriodCampaign);
     assert.equal(campaignReport.orderCount, 1);
     assert.equal(campaignReport.attributedRevenueZmw, "400.00");
-    assert.equal(campaignReport.productCostZmw, "39.95");
-    assert.equal(campaignReport.landedCostAdjustmentZmw, "-0.05");
-    assert.equal(campaignReport.netContributionZmw, "360.05");
-    assert.equal(report.payload.totals.productCostZmw, "39.95");
-    assert.equal(report.payload.totals.landedCostAdjustmentZmw, "-0.05");
-    assert.equal(report.payload.totals.netContributionZmw, "360.05");
+    assert.equal(campaignReport.productCostZmw, "39.93");
+    assert.equal(campaignReport.landedCostAdjustmentZmw, "-0.07");
+    assert.equal(campaignReport.netContributionZmw, "360.07");
+    assert.equal(report.payload.totals.productCostZmw, "39.93");
+    assert.equal(report.payload.totals.landedCostAdjustmentZmw, "-0.07");
+    assert.equal(report.payload.totals.netContributionZmw, "360.07");
     assert.deepEqual(
       campaignReport.landedCostAdjustmentDeliveries.map((delivery: {
         deliveryNumber: string;
@@ -2406,8 +2406,8 @@ test("campaign reports show negative delivery shares for reversed landed costs",
         delivery.products.map((item) => [item.productId, item.adjustmentZmw]),
       ]),
       [
-        [`NLC-${suffix.slice(0, 16)}-D1`, "-0.01", [[product.id, "-0.01"]]],
-        [`NLC-${suffix.slice(0, 16)}-D2`, "-0.04", [[product.id, "-0.04"]]],
+        [`NLC-${suffix.slice(0, 16)}-D1`, "-0.02", [[product.id, "-0.02"]]],
+        [`NLC-${suffix.slice(0, 16)}-D2`, "-0.05", [[product.id, "-0.05"]]],
       ],
     );
     assert.deepEqual({
@@ -2424,8 +2424,8 @@ test("campaign reports show negative delivery shares for reversed landed costs",
         secondPeriodCampaign.netContributionZmw,
       ],
     }, {
-      firstPeriod: ["100.00", "9.99", "-0.01", "90.01"],
-      secondPeriod: ["300.00", "29.96", "-0.04", "270.04"],
+      firstPeriod: ["100.00", "9.98", "-0.02", "90.02"],
+      secondPeriod: ["300.00", "29.95", "-0.05", "270.05"],
     });
     for (const field of ["attributedRevenueZmw", "productCostZmw", "landedCostAdjustmentZmw", "netContributionZmw"] as const) {
       assert.equal(
@@ -2443,21 +2443,26 @@ test("campaign reports show negative delivery shares for reversed landed costs",
       .reduce((total, line) =>
         total + BigInt(line.debitZmw.replace(".", "")) - BigInt(line.creditZmw.replace(".", "")), 0n);
     assert.equal(allocatedCents, postedCogsAdjustmentCents);
-    assert.equal(allocatedCents, -5n);
+    assert.equal(allocatedCents, -7n);
     assert.equal(
       BigInt(campaignReport.productCostZmw.replace(".", ""))
         - BigInt(baselineCampaign.productCostZmw.replace(".", "")),
       allocatedCents,
     );
     assert.equal(
+      BigInt(campaignReport.netContributionZmw.replace(".", ""))
+        - BigInt(baselineCampaign.netContributionZmw.replace(".", "")),
+      -allocatedCents,
+    );
+    assert.equal(
       BigInt(report.payload.totals.productCostZmw.replace(".", ""))
         - BigInt(baseline.payload.totals.productCostZmw.replace(".", "")),
-      -5n,
+      allocatedCents,
     );
     assert.equal(
       BigInt(report.payload.totals.netContributionZmw.replace(".", ""))
         - BigInt(baseline.payload.totals.netContributionZmw.replace(".", "")),
-      5n,
+      -allocatedCents,
     );
     assert.deepEqual(await readReversalJournal(), sourceJournal);
   } finally {
