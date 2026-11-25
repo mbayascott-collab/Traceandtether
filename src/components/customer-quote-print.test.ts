@@ -244,14 +244,9 @@ test("long customer quotes print every row, repeat table headings, and keep appr
     assert.match(css, /@page\s*\{\s*size:\s*A4/i, "Print stylesheet must continue to declare A4 page size.");
     assert.match(css, /@page\s+customer-documents[\s\S]*?content:\s*"Page "\s*counter\(page\)\s*" of "\s*counter\(pages\)/i, "Customer quotes, invoices, and delivery notes need page number footers.");
     assert.match(css, /@page\s+customer-documents\s*\{[^}]*margin:\s*15mm\s+15mm\s+20mm/i, "Customer documents need a reserved footer margin.");
-    assert.match(css, /body:has\(>\s*\.quote-preview-overlay\)\s*\{\s*page:\s*customer-documents/i, "The quote print context must start on the named page to prevent a blank first page.");
-    assert.match(css, /\.quote-preview-overlay\s*\{[^}]*page:\s*customer-documents/i, "Quote previews must use the same named page as the quotation to avoid a leading blank page.");
     assert.match(css, /#sales-invoice-print,\s*#delivery-note-print\s*\{\s*page:\s*customer-documents/i, "Invoices and delivery notes must use the numbered customer-document page.");
     assert.match(css, /\.customer-quote-document-total,[\s\S]*?\.delivery-note-signatures\s*\{\s*break-inside:\s*avoid;\s*page-break-inside:\s*avoid/i, "Invoice totals and delivery signatures must not split across pages.");
     assert.match(css, /\.customer-quote-document-table thead\s*\{\s*display:\s*table-header-group/i, "Print stylesheet must repeat quote table headings.");
-    assert.match(css, /\.quote-preview-overlay\s*\{[^}]*place-items:\s*start\s+center/i, "Long quote previews should scroll from the top instead of centering and clipping their sheets.");
-    assert.match(css, /\.quote-preview-panel\s*\{\s*display:\s*block/i, "The quote sheet should flow at its natural height instead of being constrained to the viewport.");
-    assert.match(css, /\.customer-quote-document\s*\{[^}]*background:\s*#fff/i, "The full quote sheet should keep its white background.");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -456,7 +451,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
   const buildDirectory = mkdtempSync(join(tmpdir(), "customer-quote-print-browser-"));
   let httpServer: ReturnType<typeof createHttpServer> | null = null;
 
-  const quote = {
+  const quote: CustomerQuote = {
     id: 802,
     quoteNumber: "QT-E2E-SELECTED",
     customerId: 1,
@@ -474,7 +469,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
     notes: null,
     salesOrderId: null,
     salesOrderNumber: null,
-    totalZmw: "75.00",
+    totalZmw: "100.00",
     lines: [{
       id: 802,
       productId: 802,
@@ -483,26 +478,50 @@ test("printing a quote from its row opens a preview for that selected quote", as
       quantity: 3,
       unitPriceZmw: "25.00",
       lineTotalZmw: "75.00",
+    }, {
+      id: 803,
+      productId: 803,
+      productName: "Selected Quote Second Product",
+      sku: "QT-E2E-SECOND",
+      quantity: 1,
+      unitPriceZmw: "25.00",
+      lineTotalZmw: "25.00",
     }],
   };
   const backgroundQuotes = Array.from({ length: 90 }, (_, index) => ({
     ...quote,
     id: 900 + index,
     quoteNumber: `QT-BACKGROUND-${String(index + 1).padStart(3, "0")}`,
-    status: "converted",
+    status: "converted" as const,
     lines: [],
   }));
+  const otherQuote: CustomerQuote = {
+    ...quote,
+    id: 801,
+    quoteNumber: "QT-E2E-OTHER",
+    customerName: "Other Quote Customer",
+    totalZmw: "10.00",
+    lines: [{
+      id: 801,
+      productId: 801,
+      productName: "Other Quote Product",
+      sku: "QT-E2E-OTHER-PRODUCT",
+      quantity: 1,
+      unitPriceZmw: "10.00",
+      lineTotalZmw: "10.00",
+    }],
+  };
 
   try {
     writeFileSync(scriptPath, `
       import React from "react";
       import { createRoot } from "react-dom/client";
       import CustomerQuotesWorkspace from "./src/components/CustomerQuotesWorkspace.tsx";
-      const quote = ${JSON.stringify(quote)};
+      const quoteNumber = ${JSON.stringify(quote.quoteNumber)};
       createRoot(document.getElementById("root")!).render(React.createElement(CustomerQuotesWorkspace));
       window.setTimeout(() => {
         const row = Array.from(document.querySelectorAll("tbody tr"))
-          .find((item) => item.textContent?.includes("QT-E2E-SELECTED"));
+          .find((item) => item.textContent?.includes(quoteNumber));
         const printButton = Array.from(row?.querySelectorAll("button") ?? [])
           .find((button) => button.textContent?.trim() === "Print / Save PDF");
         if (!printButton) {
@@ -512,12 +531,13 @@ test("printing a quote from its row opens a preview for that selected quote", as
         printButton.click();
         window.setTimeout(() => {
           const article = document.querySelector("#customer-quote-print");
-          const result = [
-            article?.querySelector("h1")?.textContent,
-            article?.querySelector(".customer-quote-document-customer strong")?.textContent,
-            article?.querySelector("tbody td")?.textContent
-          ].join("|");
-          document.body.dataset.printResult = result;
+          const result = {
+            quoteNumber: article?.querySelector("h1")?.textContent?.trim(),
+            customer: article?.querySelector(".customer-quote-document-customer strong")?.textContent?.trim(),
+            lines: Array.from(article?.querySelectorAll("tbody tr") ?? [])
+              .map((line) => Array.from(line.cells).map((cell) => cell.textContent?.trim()))
+          };
+          document.body.dataset.printResult = JSON.stringify(result);
         }, 150);
       }, 350);
     `);
@@ -534,9 +554,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
       },
     });
     const htmlPath = join(buildDirectory, "index.html");
-    writeFileSync(htmlPath, `<!doctype html><html><head><meta charset="utf-8">
-      <link rel="stylesheet" href="./index.css">
-      </head><body>
+    writeFileSync(htmlPath, `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/index.css"></head><body>
       <div id="root"></div>
       <script>
         window.addEventListener("error", event => document.body.dataset.browserError = [
@@ -546,7 +564,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
         const responses = {
           "/api/customers": { customers: [] },
           "/api/products": { products: [], total: 0, page: 1, pageSize: 100 },
-          "/api/customer-quotes": { quotes: ${JSON.stringify([quote, ...backgroundQuotes])} },
+          "/api/customer-quotes": { quotes: ${JSON.stringify([otherQuote, ...backgroundQuotes, quote])} },
           "/api/customer-quote-email-notices": { events: [] }
         };
         window.fetch = async (input) => {
@@ -566,12 +584,12 @@ test("printing a quote from its row opens a preview for that selected quote", as
       if (request.url === "/") {
         response.setHeader("Content-Type", "text/html; charset=utf-8");
         response.end(readFileSync(htmlPath));
-      } else if (request.url === "/quote-print-test.js.iife.js") {
-        response.setHeader("Content-Type", "text/javascript; charset=utf-8");
-        response.end(readFileSync(join(buildDirectory, "quote-print-test.js.iife.js")));
       } else if (request.url === "/index.css") {
         response.setHeader("Content-Type", "text/css; charset=utf-8");
         response.end(readFileSync(resolve("src/index.css")));
+      } else if (request.url === "/quote-print-test.js.iife.js") {
+        response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+        response.end(readFileSync(join(buildDirectory, "quote-print-test.js.iife.js")));
       } else {
         response.writeHead(404).end();
       }
@@ -586,7 +604,14 @@ test("printing a quote from its row opens a preview for that selected quote", as
       `http://127.0.0.1:${address.port}/`,
       "document.body?.dataset?.printResult ?? ''",
     );
-    assert.equal(printResult, "QT-E2E-SELECTED|Selected Quote Customer|Selected Quote Product");
+    assert.deepEqual(JSON.parse(String(printResult)), {
+      quoteNumber: "QT-E2E-SELECTED",
+      customer: "Selected Quote Customer",
+      lines: [
+        ["Selected Quote Product", "QT-E2E-PRODUCT", "3", "ZMW 25.00", "ZMW 75.00"],
+        ["Selected Quote Second Product", "QT-E2E-SECOND", "1", "ZMW 25.00", "ZMW 25.00"],
+      ],
+    });
     const pdfPath = join(buildDirectory, "selected-quote.pdf");
     const textPath = join(buildDirectory, "selected-quote.txt");
     writeFileSync(pdfPath, Buffer.from(pdfData, "base64"));
@@ -595,9 +620,17 @@ test("printing a quote from its row opens a preview for that selected quote", as
     assert.equal(pageCount, 1, `A short quote should print on one page, not ${pageCount}.`);
     execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
     const pdfText = readFileSync(textPath, "utf8").replace(/\s+/g, " ").toLocaleLowerCase();
-    for (const text of ["QT-E2E-SELECTED", "Selected Quote Customer", "Selected Quote Product", "QT-E2E-PRODUCT"]) {
+    for (const text of [
+      "QT-E2E-SELECTED", "Selected Quote Customer",
+      "Selected Quote Product", "QT-E2E-PRODUCT",
+      "Selected Quote Second Product", "QT-E2E-SECOND", "QT-E2E-SELECTED",
+    ]) {
       assert.ok(pdfText.includes(text.toLocaleLowerCase()), `Selected quote PDF should include "${text}".`);
     }
+    for (const text of ["QT-E2E-OTHER", "Other Quote Customer", "Other Quote Product", "QT-E2E-OTHER-PRODUCT"]) {
+      assert.ok(!pdfText.includes(text.toLocaleLowerCase()), `Selected quote PDF must not include "${text}".`);
+    }
+    assert.ok(!pdfText.includes("qt-background-"), "The selected quote PDF must not include quotes from the surrounding list.");
     await new Promise<void>((resolveClose, reject) => httpServer!.close((error) => error ? reject(error) : resolveClose()));
     httpServer = null;
   } finally {

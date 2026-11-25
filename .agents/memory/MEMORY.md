@@ -13,3 +13,4 @@
 - [Customer group permission refreshes](customer-group-permission-refresh.md) — A successful refresh can revoke access; clear previously loaded group and member state when permissions disappear.
 - [Drizzle migration history location](drizzle-migration-history.md) — This project's Drizzle migration records live in the `drizzle` schema, not `public`; preflight checks must query that schema.
 - [Print preview isolation](print-preview-isolation.md) — Hide the workspace from print layout, not just visually, and test short documents beside long surrounding content.
+- [Browser print test styling](browser-print-test-styling.md) — Browser PDF regression tests must load the app's print stylesheet to verify the same isolated document users print.
