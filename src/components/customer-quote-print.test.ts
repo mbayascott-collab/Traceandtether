@@ -244,6 +244,7 @@ test("long customer quotes print every row, repeat table headings, and keep appr
     assert.match(css, /@page\s*\{\s*size:\s*A4/i, "Print stylesheet must continue to declare A4 page size.");
     assert.match(css, /@page\s+customer-documents[\s\S]*?content:\s*"Page "\s*counter\(page\)\s*" of "\s*counter\(pages\)/i, "Customer quotes, invoices, and delivery notes need page number footers.");
     assert.match(css, /@page\s+customer-documents\s*\{[^}]*margin:\s*15mm\s+15mm\s+20mm/i, "Customer documents need a reserved footer margin.");
+    assert.match(css, /\.quote-preview-overlay\s*\{[^}]*page:\s*customer-documents/i, "Quote previews must use the same named page as the quotation to avoid a leading blank page.");
     assert.match(css, /#sales-invoice-print,\s*#delivery-note-print\s*\{\s*page:\s*customer-documents/i, "Invoices and delivery notes must use the numbered customer-document page.");
     assert.match(css, /\.customer-quote-document-total,[\s\S]*?\.delivery-note-signatures\s*\{\s*break-inside:\s*avoid;\s*page-break-inside:\s*avoid/i, "Invoice totals and delivery signatures must not split across pages.");
     assert.match(css, /\.customer-quote-document-table thead\s*\{\s*display:\s*table-header-group/i, "Print stylesheet must repeat quote table headings.");

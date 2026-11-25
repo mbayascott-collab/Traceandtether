@@ -3210,6 +3210,7 @@ textarea:focus-visible {
   body:has(> .quote-preview-overlay) > #root { display: none !important; }
   .quote-preview-overlay {
     position: static !important;
+    page: customer-documents;
     inset: auto !important;
     display: block !important;
     overflow: visible !important;
