@@ -249,6 +249,9 @@ test("long customer quotes print every row, repeat table headings, and keep appr
     assert.match(css, /#sales-invoice-print,\s*#delivery-note-print\s*\{\s*page:\s*customer-documents/i, "Invoices and delivery notes must use the numbered customer-document page.");
     assert.match(css, /\.customer-quote-document-total,[\s\S]*?\.delivery-note-signatures\s*\{\s*break-inside:\s*avoid;\s*page-break-inside:\s*avoid/i, "Invoice totals and delivery signatures must not split across pages.");
     assert.match(css, /\.customer-quote-document-table thead\s*\{\s*display:\s*table-header-group/i, "Print stylesheet must repeat quote table headings.");
+    assert.match(css, /\.quote-preview-overlay\s*\{[^}]*place-items:\s*start\s+center/i, "Long quote previews should scroll from the top instead of centering and clipping their sheets.");
+    assert.match(css, /\.quote-preview-panel\s*\{\s*display:\s*block/i, "The quote sheet should flow at its natural height instead of being constrained to the viewport.");
+    assert.match(css, /\.customer-quote-document\s*\{[^}]*background:\s*#fff/i, "The full quote sheet should keep its white background.");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
