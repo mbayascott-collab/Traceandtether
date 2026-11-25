@@ -3207,6 +3207,7 @@ textarea:focus-visible {
   html,
   body { background: #fff !important; }
   body * { visibility: hidden !important; }
+  body:has(> .quote-preview-overlay) { page: customer-documents; }
   body:has(> .quote-preview-overlay) > #root { display: none !important; }
   .quote-preview-overlay {
     position: static !important;
