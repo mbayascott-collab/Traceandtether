@@ -480,6 +480,13 @@ test("printing a quote from its row opens a preview for that selected quote", as
       lineTotalZmw: "75.00",
     }],
   };
+  const backgroundQuotes = Array.from({ length: 90 }, (_, index) => ({
+    ...quote,
+    id: 900 + index,
+    quoteNumber: `QT-BACKGROUND-${String(index + 1).padStart(3, "0")}`,
+    status: "converted",
+    lines: [],
+  }));
 
   try {
     writeFileSync(scriptPath, `
@@ -522,7 +529,9 @@ test("printing a quote from its row opens a preview for that selected quote", as
       },
     });
     const htmlPath = join(buildDirectory, "index.html");
-    writeFileSync(htmlPath, `<!doctype html><html><head><meta charset="utf-8"></head><body>
+    writeFileSync(htmlPath, `<!doctype html><html><head><meta charset="utf-8">
+      <link rel="stylesheet" href="./index.css">
+      </head><body>
       <div id="root"></div>
       <script>
         window.addEventListener("error", event => document.body.dataset.browserError = [
@@ -532,7 +541,7 @@ test("printing a quote from its row opens a preview for that selected quote", as
         const responses = {
           "/api/customers": { customers: [] },
           "/api/products": { products: [], total: 0, page: 1, pageSize: 100 },
-          "/api/customer-quotes": { quotes: [${JSON.stringify(quote)}] },
+          "/api/customer-quotes": { quotes: ${JSON.stringify([quote, ...backgroundQuotes])} },
           "/api/customer-quote-email-notices": { events: [] }
         };
         window.fetch = async (input) => {
@@ -555,6 +564,9 @@ test("printing a quote from its row opens a preview for that selected quote", as
       } else if (request.url === "/quote-print-test.js.iife.js") {
         response.setHeader("Content-Type", "text/javascript; charset=utf-8");
         response.end(readFileSync(join(buildDirectory, "quote-print-test.js.iife.js")));
+      } else if (request.url === "/index.css") {
+        response.setHeader("Content-Type", "text/css; charset=utf-8");
+        response.end(readFileSync(resolve("src/index.css")));
       } else {
         response.writeHead(404).end();
       }
@@ -573,6 +585,9 @@ test("printing a quote from its row opens a preview for that selected quote", as
     const pdfPath = join(buildDirectory, "selected-quote.pdf");
     const textPath = join(buildDirectory, "selected-quote.txt");
     writeFileSync(pdfPath, Buffer.from(pdfData, "base64"));
+    const pdfInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
+    assert.equal(pageCount, 1, `A short quote should print on one page, not ${pageCount}.`);
     execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
     const pdfText = readFileSync(textPath, "utf8").replace(/\s+/g, " ").toLocaleLowerCase();
     for (const text of ["QT-E2E-SELECTED", "Selected Quote Customer", "Selected Quote Product", "QT-E2E-PRODUCT"]) {

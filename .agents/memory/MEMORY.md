@@ -12,3 +12,4 @@
 - [Trusted proxy address handling](trusted-proxy-address.md) — Keep visitor IP extraction and request tests aligned with the single trusted ingress hop.
 - [Customer group permission refreshes](customer-group-permission-refresh.md) — A successful refresh can revoke access; clear previously loaded group and member state when permissions disappear.
 - [Drizzle migration history location](drizzle-migration-history.md) — This project's Drizzle migration records live in the `drizzle` schema, not `public`; preflight checks must query that schema.
+- [Print preview isolation](print-preview-isolation.md) — Hide the workspace from print layout, not just visually, and test short documents beside long surrounding content.

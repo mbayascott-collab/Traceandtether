@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { convertCustomerQuote, deleteCustomerQuote, emailCustomerQuote, fetchCustomerQuotes, fetchCustomers, fetchProducts, fetchUnmatchedCustomerQuoteEmailEvents, markCustomerQuoteEmailEventReviewed, saveCustomerQuote, type Customer, type CustomerQuote, type CustomerQuoteInput, type Product, type UnmatchedCustomerQuoteEmailEvent } from "../lib/api";
 import { isCustomerQuoteExpired } from "../../shared/customer-quote-expiry";
 import companyLogo from "../../attached_assets/google_profile_1793771922305.png";
@@ -213,7 +214,7 @@ export default function CustomerQuotesWorkspace() {
         <button className="button button-secondary button-small" onClick={() => setPrintQuote(quote)}>Print / Save PDF</button>
       </td></tr>)}
     </tbody></table>{!quotes.length && <p className="report-footnote">No customer quotes yet.</p>}</div>
-    {printQuote && <div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
+    {printQuote && typeof document !== "undefined" && createPortal(<div className="quote-preview-overlay" role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
       <div className="quote-preview-panel">
         <div className="quote-preview-toolbar">
           <div><strong id="quote-preview-title">Customer quote preview</strong><span>Choose “Save as PDF” in the print window.</span></div>
@@ -221,6 +222,6 @@ export default function CustomerQuotesWorkspace() {
         </div>
         <CustomerQuotePrintDocument quote={printQuote} logoSrc={companyLogo} />
       </div>
-    </div>}
+    </div>, document.body)}
   </section>;
 }
