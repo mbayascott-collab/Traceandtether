@@ -138,6 +138,33 @@ function pdfWordBounds(pdfPath: string) {
   });
 }
 
+function assertPageNumberClearance(pdfPath: string, pageCount: number, documentTitle: string) {
+  const pages = pdfWordBounds(pdfPath);
+  assert.equal(pages.length, pageCount, `${documentTitle} page bounds should match the PDF page count.`);
+  pages.forEach((page, index) => {
+    const pageLabel = page.words.find((word) =>
+      word.text === "Page" && word.yMin > page.height * 0.82,
+    );
+    assert.ok(pageLabel, `${documentTitle} page ${index + 1} should have a footer page number.`);
+    const footerLine = page.words
+      .filter((word) => Math.abs(word.yMin - pageLabel.yMin) < 2)
+      .sort((left, right) => left.xMin - right.xMin);
+    assert.equal(
+      footerLine.map((word) => word.text).join(" "),
+      `Page ${index + 1} of ${pageCount}`,
+      `${documentTitle} page ${index + 1} footer should show its current and total page counts.`,
+    );
+    const footerWords = new Set(footerLine);
+    const lastContentY = Math.max(...page.words
+      .filter((word) => !footerWords.has(word))
+      .map((word) => word.yMax));
+    assert.ok(
+      lastContentY < pageLabel.yMin,
+      `${documentTitle} page ${index + 1} content must end before its page-number footer.`,
+    );
+  });
+}
+
 function fixtureQuote(): CustomerQuote {
   const lines = Array.from({ length: rowCount }, (_, index) => {
     const n = String(index + 1).padStart(3, "0");
@@ -314,6 +341,7 @@ test("multi-page invoices and delivery notes print numbered pages without splitt
       const pdfInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
       const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
       assert.ok(pageCount > 1, `${document.title} should print across multiple pages.`);
+      assertPageNumberClearance(pdfPath, pageCount, document.title);
       execFileSync("pdftotext", ["-layout", pdfPath, textPath], { stdio: "pipe" });
       const pages = readFileSync(textPath, "utf8").split("\f").map((page) => page.trim()).filter(Boolean);
       assert.equal(pages.length, pageCount);
